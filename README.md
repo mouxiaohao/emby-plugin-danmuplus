@@ -1,6 +1,8 @@
 # emby-plugin-danmuplus
 
-Emby 弹幕插件增强版，参考 [fengymi/emby-plugin-danmu](https://github.com/fengymi/emby-plugin-danmu) 开发。项目从原移植版继续演进，面向 Emby 4.9.x，当前 `main` 对应版本为 **2.0.0**。
+Emby 弹幕插件增强版，参考 [fengymi/emby-plugin-danmu](https://github.com/fengymi/emby-plugin-danmu) 开发。项目从原移植版继续演进，当前 `main` 对应版本为 **2.0.0**。
+
+已验证的服务器环境：Synology 套件版 Emby **4.9.3.0**。其他 Emby 版本可能需要调整配置页或前端菜单兼容代码。
 
 ## 主要功能
 
@@ -42,7 +44,7 @@ Emby 弹幕插件增强版，参考 [fengymi/emby-plugin-danmu](https://github.c
 - 新增可独立安装的 CustomCssJS 前端脚本，电视剧详情页和季度详情页“更多”菜单可以一键下载整部剧或整季弹幕。
 - 前端支持流式显示季度、集数和实时结果，支持自动匹配结果调整、手动候选选择、后台下载、停止和重试。
 - 2.0.0 的 DLL 本身不修改 Emby 的 `dashboard-ui` 文件；需要菜单时手动安装 `Frontend/DanmuSmartMatch.CustomCssJS.js`。
-- Android 原生客户端不加载 CustomCssJS，因此菜单需要通过 Emby Web 客户端或浏览器使用。
+- Android 原生客户端不加载 CustomCssJS，因此菜单需要通过 Emby Web 客户端或浏览器使用；如需 Android 客户端支持，请参考 [Emby.CustomCssJS 仓库](https://github.com/Shurelol/Emby.CustomCssJS) 中针对 Android 客户端的注入/修改方法，将 CustomCssJS 支持集成到客户端后再安装本项目脚本。
 
 ## 安装 DLL
 
@@ -67,7 +69,7 @@ Emby 弹幕插件增强版，参考 [fengymi/emby-plugin-danmu](https://github.c
 
 脚本提供季度候选确认、手动绑定、强制刷新、后台下载、强制停止、流式进度和单集重试。它只调用插件已有的 `plugin/danmu` API，不包含账号、密码或 API Secret。
 
-Android 原生客户端不加载 Emby 网页端的 CustomCssJS，因此不会显示该菜单；请使用 Emby Web 客户端或浏览器操作。
+Android 原生客户端不加载 Emby 网页端的 CustomCssJS，因此不会显示该菜单。需要在 Android 客户端使用时，请先参考 [Emby.CustomCssJS 仓库](https://github.com/Shurelol/Emby.CustomCssJS) 的 Android 客户端修改方法，将对应脚本注入支持集成到客户端；未修改客户端时请使用 Emby Web 客户端或浏览器操作。
 
 ## 构建
 
@@ -86,6 +88,14 @@ dotnet run --project RegressionTests/Emby.Plugin.Danmu.RegressionTests.csproj -c
 仓库中的 [`dist/Emby.Plugin.Danmu.dll`](dist/Emby.Plugin.Danmu.dll) 是当前 `main` 的 2.0.0 Release 构建，可直接下载后复制到 Emby 插件目录。该 DLL 保留程序集文件名 `Emby.Plugin.Danmu.dll`，以兼容已有插件配置。
 
 SHA-256：`648b5a357d309dde279436853f2f3d621c00a9d7ac255385a02cab0963e31f88`
+
+## 按版本下载
+
+每个正式版本的 DLL、源码压缩包和智能搜索前端都会保存在对应版本目录中：
+
+- [`releases/v2.0.0/`](releases/v2.0.0/)
+
+后续版本不会覆盖旧版本文件，便于按 Emby 环境回退或比较。
 
 ## 安全提醒
 
