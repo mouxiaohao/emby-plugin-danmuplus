@@ -1,0 +1,32 @@
+schema: spec-driven
+
+context: |
+  Product: Emby danmu downloader plugin for Emby 4.9.3.0 on Synology.
+  Tech stack: C# 8, .NET Standard 2.0, MediaBrowser.Server.Core 4.8.5.
+  UI integration: Emby.CustomCssJS injects the bulk smart-match workflow.
+  Matching domain: enabled danmu providers are searched and globally scored by
+  parent series title, season keyword, year, and episode count.
+  Compatibility: preserve saved manual bindings, STRM libraries, provider-specific
+  download behavior, seven-day duplicate skipping, partial XML, and retry controls.
+  Verification: Release build must succeed; matching changes require live preview
+  regression on representative seasons and deterministic descending-score checks.
+
+rules:
+  proposal:
+    - State observable user impact and explicit non-goals.
+  specs:
+    - Express requirements with SHALL or MUST and include testable scenarios.
+    - Cover manual matching and automatic library-import behavior when both are affected.
+  design:
+    - Document compatibility, failure handling, persistence, and rollback considerations.
+  tasks:
+    - Include implementation, automated or deterministic checks, live Emby regression, packaging, and deployment verification.
+
+operations:
+  apply:
+    guidance:
+      - Preserve user files and unrelated worktree changes.
+      - Back up the deployed DLL before replacement.
+  archive:
+    guidance:
+      - Record delivered artifact hashes and the server rollback path.
