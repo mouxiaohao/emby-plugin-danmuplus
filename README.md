@@ -1,6 +1,6 @@
 # emby-plugin-danmuplus
 
-Emby 弹幕插件增强版，参考 [fengymi/emby-plugin-danmu](https://github.com/fengymi/emby-plugin-danmu) 开发。项目从原移植版继续演进，当前 `main` 对应版本为 **2.0.0**。
+Emby 弹幕插件增强版，参考 [fengymi/emby-plugin-danmu](https://github.com/fengymi/emby-plugin-danmu) 开发。项目从原移植版继续演进，当前版本为 **2.0.1-r1**。
 
 已验证的服务器环境：Synology 套件版 Emby **4.9.3.0**。其他 Emby 版本可能需要调整配置页或前端菜单兼容代码。
 
@@ -13,7 +13,15 @@ Emby 弹幕插件增强版，参考 [fengymi/emby-plugin-danmu](https://github.c
 - 腾讯分段重试、连接重置重试，以及已完成分段合并为部分弹幕 XML。
 - 七天 XML 重复跳过；支持强制刷新、后台队列、强制停止、单集重试和流式进度。
 - STRM、115 挂载等普通 Emby 媒体库场景兼容。
-- 配置页面版本显示为 `2.0.0`。
+- 配置页面版本显示为 `2.0.1-r1`。
+
+## 2.0.1-r1 补丁
+
+- 为所有弹幕来源增加统一的 XML 1.0 字符安全防线，过滤非法控制字符、`U+FFFE`、`U+FFFF` 和孤立代理项。
+- 保留中文、TAB/LF/CR、合法字符引用和有效 Unicode 补充字符（包括 emoji）。
+- 爱奇艺和 Bilibili 原始 XML 首次解析失败时，会在清理非法字符后重试一次；其他 JSON/protobuf 来源由最终 XML 输出防线统一保护。
+- 下载结果改为按弹幕条目和序列化结果判断，不再仅因合法 XML 小于 1 KB 而拒绝保存。
+- 空内容和最终 XML 序列化失败会返回对应错误；来源解析异常保留在日志中，不再统一误报为“弹幕内容少于 1KB”。
 
 ## 2.0.0 相比旧版 emby-plugin-danmu 的改动
 
@@ -61,6 +69,15 @@ Emby 弹幕插件增强版，参考 [fengymi/emby-plugin-danmu](https://github.c
 
 本项目保留原程序集名称 `Emby.Plugin.Danmu.dll`，这样可以兼容现有 Emby 插件配置和数据；仓库名称与项目发行名称为 `emby-plugin-danmuplus`。
 
+## 弹弹 Play API 凭据
+
+插件不会自动申请、生成或附带第三方凭据。如需启用弹弹 Play，请先从弹弹 Play 开放平台取得属于自己的应用 API ID 与 API Secret，然后在 Emby 管理后台的“弹幕配置”中同时填写两项并保存。
+
+- API ID 与 API Secret 必须作为完整的一对填写；只填写一项会明确报配置不完整，不会与其他来源的值拼接。
+- 插件配置中的完整凭据优先；配置为空时才依次尝试环境变量 `DANDAN_API_ID`、`DANDAN_API_SECRET` 和旧版内置值。
+- API Secret 在管理页面中以密码框遮罩，但仍以明文保存在 Emby 插件配置 XML 中；请依靠群晖和 Emby 文件权限保护配置文件。
+- 插件不会把 API ID、API Secret 或签名材料写入日志。提交诊断日志前仍应检查并移除其他令牌和个人路径。
+
 ## 一键智能匹配前端
 
 `Frontend/DanmuSmartMatch.CustomCssJS.js` 是独立的 Emby.CustomCssJS 前端脚本，适用于不希望 DLL 修改 Emby `dashboard-ui` 文件的部署方式。
@@ -87,11 +104,26 @@ dotnet build Emby.Plugin.Danmu.sln -c Release
 dotnet run --project RegressionTests/Emby.Plugin.Danmu.RegressionTests.csproj -c Release
 ```
 
-构建产物为 `Emby.Plugin.Danmu/bin/Release/netstandard2.0/Emby.Plugin.Danmu.dll`。
+构建产物为 `bin/Release/netstandard2.0/Emby.Plugin.Danmu.dll`。
 
 ## 下载 DLL
 
-release中下载dll，注意适配emby版本
+仓库中的 [`dist/Emby.Plugin.Danmu.dll`](dist/Emby.Plugin.Danmu.dll) 是 2.0.1-r1 Release 构建，可直接下载后复制到 Emby 插件目录。该 DLL 保留程序集文件名 `Emby.Plugin.Danmu.dll`，以兼容已有插件配置。
+
+SHA-256：`636675edb9eb1f97f7b215f6b14adf495e62e966a60b4a2f226e0241d425a0f2`
+
+## 按版本下载
+
+每个正式版本的 DLL、源码压缩包和智能搜索前端都会保存在对应版本目录中：
+
+- [`releases/v2.0.0/`](releases/v2.0.0/)
+- [`releases/v2.0.1-r1/`](releases/v2.0.1-r1/)
+
+后续版本不会覆盖旧版本文件，便于按 Emby 环境回退或比较。
+
+## 安全提醒
+
+不要提交 Emby 配置 XML、服务器日志、备份文件、API Secret、账号密码、`bin/` 或 `obj/`。站点接口变更时请保留失败日志中的请求上下文，但先删除访问令牌和个人路径。
 
 ## 致谢与许可证
 

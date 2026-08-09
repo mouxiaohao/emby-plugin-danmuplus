@@ -1207,7 +1207,6 @@ namespace Emby.Plugin.Danmu
                 throw new DanmuDownloadErrorException("弹幕来源返回空内容");
             }
 
-            var bytes = danmaku.ToXml();
             var isPartial = danmaku.SegmentFailed > 0 && danmaku.SegmentFailed < danmaku.SegmentTotal;
             if (danmaku.SegmentTotal > 0 && danmaku.SegmentFailed >= danmaku.SegmentTotal)
             {
@@ -1215,11 +1214,8 @@ namespace Emby.Plugin.Danmu
                     $"全部 {danmaku.SegmentTotal} 个弹幕分段下载失败");
             }
 
-            // 部分分段失败时，仍保存其他已下载分段组成的合法 XML；完整下载继续保留原有的 1KB 防空校验。
-            if (bytes == null || (!isPartial && bytes.Length < 1024))
-            {
-                throw new DanmuDownloadErrorException("弹幕内容少于 1KB");
-            }
+            // 部分分段失败时，仍保存其他已下载分段组成的合法 XML；不再以文件大小判断内容是否有效。
+            var bytes = DanmuDownloadContent.Serialize(danmaku);
 
             await SaveDanmu(scraper, episode, bytes).ConfigureAwait(false);
             if (!string.IsNullOrWhiteSpace(mediaEpisode.Id))
@@ -1307,13 +1303,7 @@ namespace Emby.Plugin.Danmu
                 var danmaku = await scraper.GetDanmuContent(item, commentId);
                 if (danmaku != null)
                 {
-                    var bytes = danmaku.ToXml();
-                    if (bytes.Length < 1024)
-                    {
-                        _logger.LogInformation("[{0}]弹幕内容少于1KB，忽略处理：{1}.{2}", scraper.Name, item.IndexNumber,
-                            item.Name);
-                        throw new DanmuDownloadErrorException("弹幕内容少于1KB");
-                    }
+                    var bytes = DanmuDownloadContent.Serialize(danmaku);
 
                     await this.SaveDanmu(scraper, item, bytes);
                     this._logger.LogInformation("[{0}]弹幕下载成功：name={1}.{2} commentId={3}", scraper.Name,
@@ -1322,6 +1312,7 @@ namespace Emby.Plugin.Danmu
                 else
                 {
                     _memoryCache.Remove(checkDownloadedKey);
+                    throw new DanmuDownloadErrorException("弹幕来源返回空内容");
                 }
             }
             catch (Exception ex)

@@ -1,11 +1,11 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using System.Linq;
 using System.Text;
 using System.Xml;
 using System.Xml.Schema;
 using System.Xml.Serialization;
+using Emby.Plugin.Danmu.Core.Extensions;
 
 namespace Emby.Plugin.Danmu.Scraper.Entity
 {
@@ -136,34 +136,8 @@ namespace Emby.Plugin.Danmu.Scraper.Entity
             // time, mode, size, color, create, pool, sender, id, weight(屏蔽等级)
             var time = (Convert.ToDouble(Progress) / 1000).ToString("F05");
             var attr = string.Format("{0},{1},{2},{3},{4},{5},{6},{7},{8}", time, Mode, Fontsize, Color, Ctime, Pool, MidHash, Id, Weight);
-            writer.WriteAttributeString("p", attr);
-            if (IsValidXmlString(Content))
-            {
-                writer.WriteString(Content);
-            }
-            else
-            {
-                writer.WriteString(RemoveInvalidXmlChars(Content));
-            }
-        }
-
-        private string RemoveInvalidXmlChars(string text)
-        {
-            var validXmlChars = text.Where(ch => XmlConvert.IsXmlChar(ch)).ToArray();
-            return new string(validXmlChars);
-        }
-
-        private bool IsValidXmlString(string text)
-        {
-            try
-            {
-                XmlConvert.VerifyXmlChars(text);
-                return true;
-            }
-            catch
-            {
-                return false;
-            }
+            writer.WriteAttributeString("p", Xml10Sanitizer.SanitizeText(attr));
+            writer.WriteString(Xml10Sanitizer.SanitizeText(Content));
         }
     }
 }

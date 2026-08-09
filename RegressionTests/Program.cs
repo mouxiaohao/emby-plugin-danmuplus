@@ -3,11 +3,18 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
+using System.Text;
+using System.Xml;
+using System.Xml.Serialization;
+using Emby.Plugin.Danmu.Core;
+using Emby.Plugin.Danmu.Core.Extensions;
 using Emby.Plugin.Danmu.Model;
 using Emby.Plugin.Danmu.Scraper;
 using Emby.Plugin.Danmu.Scraper.Bilibili;
 using Emby.Plugin.Danmu.Scraper.Bilibili.Entity;
 using Emby.Plugin.Danmu.Scraper.Dandan;
+using Emby.Plugin.Danmu.Scraper.Entity;
+using Emby.Plugin.Danmu.Scraper.Iqiyi;
 using BilibiliMedia = Emby.Plugin.Danmu.Scraper.Bilibili.Entity.Media;
 
 namespace Emby.Plugin.Danmu.RegressionTests
@@ -27,6 +34,12 @@ namespace Emby.Plugin.Danmu.RegressionTests
             ResolvesDandanCredentialsByCompletePair();
             RejectsIncompleteDandanCredentialsWithoutLeakingValues();
             EmbedsDandanCredentialSettings();
+            PreservesValidUnicodeWhileRemovingInvalidXmlScalars();
+            RemovesInvalidXmlCharacterReferences();
+            PreservesCharacterReferenceTextInsideCdata();
+            RecoversIqiyiXmlContainingInvalidCharacters();
+            RecoversBilibiliXmlContainingInvalidCharacters();
+            SanitizesFinalXmlForEveryProviderAndAcceptsSmallValidOutput();
             Console.WriteLine("Danmu plugin regression checks passed.");
             return 0;
         }
@@ -203,6 +216,113 @@ namespace Emby.Plugin.Danmu.RegressionTests
             Assert(script.Contains("dandan.ApiId") && script.Contains("dandan.ApiSecret") &&
                    script.Contains("dandan.WithRelatedDanmu") && script.Contains("dandan.ChConvert"),
                 "settings script should save credentials without dropping existing Dandan options");
+        }
+
+        private static void PreservesValidUnicodeWhileRemovingInvalidXmlScalars()
+        {
+            var source = "中文\t换行\n回车\remoji😀尾部" + '\u0001' + '\uFFFE' + '\uFFFF' +
+                         "\uD800孤立高代理\uDC00孤立低代理";
+            var sanitized = Xml10Sanitizer.SanitizeText(source);
+
+            Assert(sanitized.Contains("中文\t换行\n回车\remoji😀尾部"),
+                "valid Chinese, whitespace, and supplementary Unicode should be preserved");
+            Assert(!sanitized.Contains('\u0001') && !sanitized.Contains('\uFFFE') &&
+                   !sanitized.Contains('\uFFFF') && !sanitized.Contains("\uD800") &&
+                   !sanitized.Contains("\uDC00"),
+                "invalid XML scalars and isolated surrogates should be removed");
+        }
+
+        private static void RemovesInvalidXmlCharacterReferences()
+        {
+            const string source = "<root>保留&#10;&#x1F600;移除&#0;&#xB;&#65535;&#x110000;</root>";
+            var sanitized = Xml10Sanitizer.SanitizeDocument(source);
+            var document = new XmlDocument();
+            document.LoadXml(sanitized);
+
+            Assert(sanitized.Contains("&#10;") && sanitized.Contains("&#x1F600;"),
+                "legal numeric XML character references should be preserved");
+            Assert(!sanitized.Contains("&#0;") && !sanitized.Contains("&#xB;") &&
+                   !sanitized.Contains("&#65535;") && !sanitized.Contains("&#x110000;"),
+                "illegal numeric XML character references should be removed");
+        }
+
+        private static void PreservesCharacterReferenceTextInsideCdata()
+        {
+            const string source = "<root><![CDATA[字面文本 &#xFFFF; 和 &#0;]]><value>&#xFFFF;</value></root>";
+            var sanitized = Xml10Sanitizer.SanitizeDocument(source);
+            var document = new XmlDocument();
+            document.LoadXml(sanitized);
+
+            Assert(document.DocumentElement.FirstChild.Value == "字面文本 &#xFFFF; 和 &#0;",
+                "numeric-reference-like text inside CDATA should remain literal and unchanged");
+            Assert(document.DocumentElement.SelectSingleNode("value").InnerText == string.Empty,
+                "an illegal numeric character reference outside CDATA should still be removed");
+        }
+
+        private static void RecoversIqiyiXmlContainingInvalidCharacters()
+        {
+            var xml = "<danmu><sum>1</sum><validSum>1</validSum><duration>1</duration>" +
+                      "<data><entry><int>1</int><list><bulletInfo>" +
+                      "<contentId>1</contentId><content>中文\n😀\uFFFF尾部&#0;</content>" +
+                      "<font>1</font><color>FFFFFF</color><showTime>1</showTime>" +
+                      "</bulletInfo></list></entry></data></danmu>";
+            var cleaned = IqiyiApi.RemoveInvalidXmlChars(xml);
+            var serializer = new XmlSerializer(typeof(IqiyiCommentDocument));
+            IqiyiCommentDocument result;
+            using (var reader = new StringReader(cleaned))
+            {
+                result = (IqiyiCommentDocument)serializer.Deserialize(reader);
+            }
+
+            Assert(result.Data[0].List[0].Content == "中文\n😀尾部",
+                "Iqiyi fallback should remove invalid XML data without damaging valid comment text");
+        }
+
+        private static void RecoversBilibiliXmlContainingInvalidCharacters()
+        {
+            var xml = "<i><d p=\"1,1,25,16777215,0,0,user,1,1\">中文\n😀\uFFFF尾部&#0;</d></i>";
+            var result = Emby.Plugin.Danmu.Scraper.Bilibili.Bilibili.ParseXml(xml);
+
+            Assert(result.Items.Count == 1 && result.Items[0].Content == "中文\n😀尾部",
+                "Bilibili XML fallback should recover a comment containing invalid XML data");
+        }
+
+        private static void SanitizesFinalXmlForEveryProviderAndAcceptsSmallValidOutput()
+        {
+            var providers = new[] { "BilibiliID", "IqiyiID", "TencentID", "YoukuID", "MgtvID", "DandanID" };
+            foreach (var provider in providers)
+            {
+                var danmaku = new ScraperDanmaku
+                {
+                    ProviderId = provider,
+                    Items = new List<ScraperDanmakuText>
+                    {
+                        new ScraperDanmakuText
+                        {
+                            Id = 1,
+                            Progress = 1000,
+                            MidHash = "用户\uFFFF😀",
+                            Content = "中文\n😀\u0001\uFFFE\uFFFF尾部"
+                        }
+                    }
+                };
+
+                Assert(DanmuDownloadContent.HasUsableItems(danmaku),
+                    "a single valid comment should be usable regardless of provider");
+                var bytes = DanmuDownloadContent.Serialize(danmaku);
+                Assert(bytes.Length < 1024,
+                    "the regression fixture should remain below the removed one-kilobyte threshold");
+
+                var document = new XmlDocument();
+                document.LoadXml(Encoding.UTF8.GetString(bytes));
+                var finalContent = document.DocumentElement.SelectSingleNode("d").InnerText;
+                Assert(finalContent.Replace("\r\n", "\n") == "中文\n😀尾部",
+                    "final XML should preserve valid text and remove invalid characters for " + provider +
+                    "; actual=" + finalContent);
+            }
+
+            Assert(!DanmuDownloadContent.HasUsableItems(new ScraperDanmaku()),
+                "an empty danmu result should not be treated as usable");
         }
 
         private static string ReadResource(System.Reflection.Assembly assembly, string name)

@@ -11,7 +11,7 @@ The system SHALL merge and de-duplicate candidates from all searched providers a
 - **WHEN** the match API returns multiple candidates
 - **THEN** their scores SHALL be monotonically non-increasing in the returned list
 
-#### Scenario: Candidates have equal final scores
+#### Scenario: Candidates have equal scores
 - **WHEN** two candidates have exactly equal final composite scores
 - **THEN** the candidate from the provider earlier in the current configured provider order SHALL appear first
 
@@ -34,6 +34,6 @@ The system SHALL automatically select a candidate when the globally ranked candi
 - **WHEN** the earliest configured provider among the top-scoring candidates has multiple candidates with that same score
 - **THEN** the system SHALL return candidates for manual selection without automatically binding an arbitrary result
 
-#### Scenario: Global result is otherwise ambiguous
+#### Scenario: Global result is ambiguous
 - **WHEN** no candidate satisfies the standard confidence rules or the priority-resolved tie rule
 - **THEN** the system SHALL return candidates for manual selection without automatically binding an arbitrary provider result
