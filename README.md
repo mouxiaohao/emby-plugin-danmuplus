@@ -81,6 +81,12 @@ dotnet run --project RegressionTests/Emby.Plugin.Danmu.RegressionTests.csproj -c
 
 构建产物为 `Emby.Plugin.Danmu/bin/Release/netstandard2.0/Emby.Plugin.Danmu.dll`。
 
+## 下载 DLL
+
+仓库中的 [`dist/Emby.Plugin.Danmu.dll`](dist/Emby.Plugin.Danmu.dll) 是当前 `main` 的 2.0.0 Release 构建，可直接下载后复制到 Emby 插件目录。该 DLL 保留程序集文件名 `Emby.Plugin.Danmu.dll`，以兼容已有插件配置。
+
+SHA-256：`648b5a357d309dde279436853f2f3d621c00a9d7ac255385a02cab0963e31f88`
+
 ## 安全提醒
 
 不要提交 Emby 配置 XML、服务器日志、备份文件、API Secret、账号密码、`bin/` 或 `obj/`。站点接口变更时请保留失败日志中的请求上下文，但先删除访问令牌和个人路径。
