@@ -156,7 +156,14 @@ namespace Emby.Plugin.Danmu.Scrapers.Mgtv
                         continue;
                     }
 
-                    media.Episodes.Add(new ScraperEpisode() { Id = $"{ep.VideoId}", CommentId = $"{id},{ep.VideoId}", Title = ep.Title });
+                    media.Episodes.Add(new ScraperEpisode()
+                    {
+                        Id = $"{ep.VideoId}",
+                        CommentId = $"{id},{ep.VideoId}",
+                        Title = ep.Title,
+                        EpisodeNumber = EpisodeContentClassifier.TryGetEpisodeNumber(ep.Title2) ??
+                            EpisodeContentClassifier.TryGetEpisodeNumber(ep.Title),
+                    });
                 }
             }
 
@@ -175,7 +182,15 @@ namespace Emby.Plugin.Danmu.Scrapers.Mgtv
                     return null;
                 }
 
-                return new ScraperEpisode() { Id = id, CommentId = $"{id},{video.EpisodeList[0].VideoId}" };
+                var firstEpisode = video.EpisodeList[0];
+                return new ScraperEpisode()
+                {
+                    Id = id,
+                    CommentId = $"{id},{firstEpisode.VideoId}",
+                    Title = firstEpisode.Title,
+                    EpisodeNumber = EpisodeContentClassifier.TryGetEpisodeNumber(firstEpisode.Title2) ??
+                        EpisodeContentClassifier.TryGetEpisodeNumber(firstEpisode.Title),
+                };
             }
 
 
@@ -273,7 +288,14 @@ namespace Emby.Plugin.Danmu.Scrapers.Mgtv
                 foreach (var ep in video.EpisodeList)
                 {
                     var title = regTvEpisodeTitle.IsMatch(ep.Title2) ? ep.Title2 : ep.Title;
-                    list.Add(new ScraperEpisode() { Id = $"{ep.VideoId}", CommentId = $"{id},{ep.VideoId}", Title = title });
+                    list.Add(new ScraperEpisode()
+                    {
+                        Id = $"{ep.VideoId}",
+                        CommentId = $"{id},{ep.VideoId}",
+                        Title = title,
+                        EpisodeNumber = EpisodeContentClassifier.TryGetEpisodeNumber(ep.Title2) ??
+                            EpisodeContentClassifier.TryGetEpisodeNumber(ep.Title),
+                    });
                 }
             }
 

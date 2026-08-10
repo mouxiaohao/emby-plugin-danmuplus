@@ -4,6 +4,8 @@ using System.IO;
 using System.Linq;
 using System.Text.Json;
 using System.Text;
+using System.Reflection;
+using System.Text.RegularExpressions;
 using System.Xml;
 using System.Xml.Serialization;
 using Emby.Plugin.Danmu.Configuration;
@@ -19,6 +21,7 @@ using Emby.Plugin.Danmu.Scraper.Iqiyi;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.Movies;
 using MediaBrowser.Model.Logging;
+using System.Threading;
 using System.Threading.Tasks;
 using BilibiliMedia = Emby.Plugin.Danmu.Scraper.Bilibili.Entity.Media;
 
@@ -33,20 +36,27 @@ namespace Emby.Plugin.Danmu.RegressionTests
             UsesIdentifierFallbackOrder();
             OmitsMalformedRecords();
             OrdersAndSelectsCrossProviderTies();
-            PreservesSameProviderTieAmbiguity();
+            PreservesSameSiteHighestScoreTieAmbiguity();
+            SelectsCloseHighConfidenceCandidatesBySitePriority();
             ScoresMoviesAndFiltersTelevisionCandidates();
             IsolatesMovieProviderFailures();
             ResolvesMovieProviderLookupIdentifiers();
+            PreservesSavedManualBindingsUntilForcedSearch();
+            AppliesDuplicateAndForceRefreshPolicy();
+            PreservesSingleEpisodeIsolationAndLegacyTaskShape();
             MapsEpisodeSourceNumbersSafely();
             DeserializesAndNormalizesBilibiliEpisodes();
             ClassifiesOnlyExplicitNonMainTitles();
             ResolvesDandanCredentialsByCompletePair();
             RejectsIncompleteDandanCredentialsWithoutLeakingValues();
             PreservesLegacyDandanApiDefaults();
+            MigratesOfficialProxyCorsConfigurationWithoutPersistingItsAddress();
             NormalizesAndValidatesDandanProxyPrefixes();
             RoutesExistingDandanEndpointsWithoutLocalProxyAuthentication();
             PreservesDandanTitleBasedMatchingEndpoints();
             EmbedsDandanCredentialSettings();
+            VerifiesVersionedConfigurationPageResources();
+            VerifiesSingleTargetSmartMatchReliabilityContracts();
             PreservesValidUnicodeWhileRemovingInvalidXmlScalars();
             RemovesInvalidXmlCharacterReferences();
             PreservesCharacterReferenceTextInsideCdata();
@@ -129,15 +139,107 @@ namespace Emby.Plugin.Danmu.RegressionTests
             Assert(unequal[0].Id == "higher-score", "provider priority must not outrank a higher score");
         }
 
-        private static void PreservesSameProviderTieAmbiguity()
+        private static void PreservesSameSiteHighestScoreTieAmbiguity()
         {
             var candidates = DanmuMatchSearchEngine.OrderCandidates(new List<DanmuMatchCandidate>
             {
-                Candidate("a", "PrioritySite", 0, 0.90),
-                Candidate("b", "PrioritySite", 0, 0.90),
-                Candidate("c", "LaterSite", 1, 0.90)
+                Candidate("a", "PrioritySite", 0, 0.99),
+                Candidate("b", "PrioritySite", 0, 0.99),
+                Candidate("c", "LaterSite", 1, 0.99)
             });
-            Assert(!DanmuMatchScorer.CanAutoSelect(candidates), "multiple top candidates within the highest-priority provider must remain ambiguous");
+            Assert(!DanmuMatchScorer.CanAutoSelect(candidates),
+                "multiple same-score winners within the highest-priority site must remain ambiguous");
+
+            var oneSite = DanmuMatchSearchEngine.OrderCandidates(new List<DanmuMatchCandidate>
+            {
+                Candidate("same-site-high", "PrioritySite", 0, 0.90),
+                Candidate("same-site-low", "PrioritySite", 0, 0.89),
+                Candidate("non-competing-site", "LaterSite", 1, 0.64)
+            });
+            Assert(DanmuMatchScorer.SelectAutoCandidate(oneSite)?.Id == "same-site-high" &&
+                   DanmuMatchScorer.SelectAutoCandidate(oneSite, false)?.Id == "same-site-high",
+                "one-site competitors should select their unique highest score even during intermediate search");
+        }
+
+        private static void SelectsCloseHighConfidenceCandidatesBySitePriority()
+        {
+            var preferredRunnerUp = DanmuMatchSearchEngine.OrderCandidates(new List<DanmuMatchCandidate>
+            {
+                Candidate("full", "LaterSite", 2, 1.0),
+                Candidate("preferred", "PrioritySite", 0, 0.98)
+            });
+            Assert(preferredRunnerUp[0].Id == "full" &&
+                   DanmuMatchScorer.SelectAutoCandidate(preferredRunnerUp)?.Id == "preferred",
+                "display order must stay score-descending while the earlier site's 0.98 candidate is selected");
+
+            var outsideGap = DanmuMatchSearchEngine.OrderCandidates(new List<DanmuMatchCandidate>
+            {
+                Candidate("full", "FullSite", 1, 1.0),
+                Candidate("outside", "PrioritySite", 0, 0.969)
+            });
+            Assert(DanmuMatchScorer.SelectAutoCandidate(outsideGap)?.Id == "full",
+                "a candidate more than 0.03 below the top score must stay outside the close pool");
+
+            var belowPoolFloor = DanmuMatchSearchEngine.OrderCandidates(new List<DanmuMatchCandidate>
+            {
+                Candidate("higher", "LaterSite", 1, 0.949),
+                Candidate("lower", "PrioritySite", 0, 0.94)
+            });
+            Assert(DanmuMatchScorer.SelectAutoCandidate(belowPoolFloor) == null,
+                "candidates below 0.95 must remain ambiguous even when their scores are close");
+
+            var floorBoundary = DanmuMatchSearchEngine.OrderCandidates(new List<DanmuMatchCandidate>
+            {
+                Candidate("floor", "LaterSite", 1, 0.95),
+                Candidate("below-floor", "PrioritySite", 0, 0.92)
+            });
+            Assert(DanmuMatchScorer.SelectAutoCandidate(floorBoundary)?.Id == "floor",
+                "the 0.95 pool floor must exclude a 0.92 candidate even at the 0.03 gap boundary");
+
+            var samePreferredSite = DanmuMatchSearchEngine.OrderCandidates(new List<DanmuMatchCandidate>
+            {
+                Candidate("preferred-high", "PrioritySite", 0, 0.99),
+                Candidate("preferred-low", "PrioritySite", 0, 0.98),
+                Candidate("later", "LaterSite", 1, 0.97)
+            });
+            Assert(DanmuMatchScorer.SelectAutoCandidate(samePreferredSite)?.Id == "preferred-high",
+                "the highest-scoring close candidate within the earliest site should win when unique");
+
+            var preferredThirdScore = DanmuMatchSearchEngine.OrderCandidates(new List<DanmuMatchCandidate>
+            {
+                Candidate("full", "LateSite", 3, 1.0),
+                Candidate("second", "MiddleSite", 2, 0.99),
+                Candidate("preferred", "PrioritySite", 0, 0.98)
+            });
+            Assert(preferredThirdScore.Select(x => x.Id).SequenceEqual(new[] { "full", "second", "preferred" }) &&
+                   DanmuMatchScorer.SelectAutoCandidate(preferredThirdScore)?.Id == "preferred",
+                "the sole pooled candidate from the earliest site may win without changing score order");
+
+            Assert(DanmuMatchScorer.SelectAutoCandidate(preferredRunnerUp, false) == null,
+                "intermediate search must not resolve a multi-candidate close pool by site priority");
+            Assert(DanmuMatchScorer.SelectAutoCandidate(outsideGap, false)?.Id == "full",
+                "intermediate search may stop when only one candidate is in the close pool");
+
+            var exactTie = DanmuMatchSearchEngine.OrderCandidates(new List<DanmuMatchCandidate>
+            {
+                Candidate("late-tie", "LaterSite", 2, 0.98),
+                Candidate("priority-tie", "PrioritySite", 0, 0.98)
+            });
+            Assert(DanmuMatchScorer.SelectAutoCandidate(exactTie)?.Id == "priority-tie" &&
+                   DanmuMatchScorer.SelectAutoCandidate(exactTie, false) == null,
+                "exact ties must use the same final-only site-priority rule");
+
+            Assert(DanmuMatchScorer.SelectAutoCandidate(new List<DanmuMatchCandidate>
+                {
+                    Candidate("below-floor", "Site", 0, 0.77)
+                }) == null,
+                "the existing top-score floor must remain unchanged");
+            Assert(DanmuMatchScorer.SelectAutoCandidate(new List<DanmuMatchCandidate>
+                {
+                    Candidate("strong", "SiteA", 0, 0.78),
+                    Candidate("weak-runner-up", "SiteB", 1, 0.64)
+                })?.Id == "strong",
+                "the existing runner-up floor must remain unchanged");
         }
 
         private static void ScoresMoviesAndFiltersTelevisionCandidates()
@@ -210,6 +312,27 @@ namespace Emby.Plugin.Danmu.RegressionTests
             Assert(!DanmuEpisodeMatchHelper.IsValidSourceEpisodeNumber(0, 12) &&
                    DanmuEpisodeMatchHelper.IsValidSourceEpisodeNumber(12, 12),
                 "source episode validation should accept only positive existing numbers");
+
+            var sourceEpisodes = new List<ScraperEpisode>
+            {
+                new ScraperEpisode { CommentId = "episode-1", EpisodeNumber = 1 },
+                new ScraperEpisode { CommentId = "episode-3", EpisodeNumber = 3 },
+            };
+            Assert(DanmuEpisodeMatchHelper.SuggestSourceEpisodeNumber(1, sourceEpisodes) == 1 &&
+                   DanmuEpisodeMatchHelper.SuggestSourceEpisodeNumber(2, sourceEpisodes) == null &&
+                   DanmuEpisodeMatchHelper.SuggestSourceEpisodeNumber(3, sourceEpisodes) == 3 &&
+                   DanmuEpisodeMatchHelper.TryGetSourceEpisode(sourceEpisodes, 3, out var third) &&
+                   third.CommentId == "episode-3",
+                "explicit provider numbering should preserve a real episode gap instead of mapping episode 2 by list position");
+
+            var legacyEpisodes = new List<ScraperEpisode>
+            {
+                new ScraperEpisode { CommentId = "legacy-1" },
+                new ScraperEpisode { CommentId = "legacy-2" },
+            };
+            Assert(DanmuEpisodeMatchHelper.TryGetSourceEpisode(legacyEpisodes, 2, out var legacySecond) &&
+                   legacySecond.CommentId == "legacy-2",
+                "episode collections with no reliable numbering should retain the legacy positional fallback");
         }
 
         private static void DeserializesAndNormalizesBilibiliEpisodes()
@@ -304,6 +427,130 @@ namespace Emby.Plugin.Danmu.RegressionTests
                 "adding proxy settings must not change existing Dandan option defaults");
         }
 
+        private static void PreservesSavedManualBindingsUntilForcedSearch()
+        {
+            var first = new FakeScraper("FirstID", null);
+            var saved = new FakeScraper("SavedID", null);
+            var providerIds = new Dictionary<string, string>
+            {
+                ["FirstID"] = "automatic-id",
+                ["SavedIDManual"] = "saved-manual-id",
+            };
+
+            Assert(DanmuMatchBindingHelper.TryGetSavedManualBinding(
+                       false, new[] { first, saved }, providerIds, out var scraper, out var manualId) &&
+                   scraper == saved && manualId == "saved-manual-id",
+                "Movie and Season previews should prefer an existing explicit manual binding");
+            Assert(!DanmuMatchBindingHelper.TryGetSavedManualBinding(
+                       true, new[] { first, saved }, providerIds, out _, out _) &&
+                   providerIds["SavedIDManual"] == "saved-manual-id",
+                "forced search should bypass but not delete the saved manual binding");
+        }
+
+        private static void AppliesDuplicateAndForceRefreshPolicy()
+        {
+            var now = new DateTime(2026, 8, 10, 12, 0, 0, DateTimeKind.Local);
+            Assert(DanmuDownloadPolicy.ShouldSkipExistingDanmu(
+                       false, true, now.AddDays(-2), now),
+                "a recent existing danmu file should produce a duplicate skip");
+            Assert(!DanmuDownloadPolicy.ShouldSkipExistingDanmu(
+                       true, true, now.AddMinutes(-1), now),
+                "force refresh should bypass the duplicate skip policy");
+            Assert(!DanmuDownloadPolicy.ShouldSkipExistingDanmu(
+                       false, true, now.AddDays(-8), now) &&
+                   !DanmuDownloadPolicy.ShouldSkipExistingDanmu(
+                       false, false, DateTime.MinValue, now),
+                "expired or missing danmu files should remain downloadable");
+
+            var invalidMovie = new ScraperMedia
+            {
+                Id = string.Empty,
+                CommentId = string.Empty,
+                Episodes = new List<ScraperEpisode>(),
+            };
+            Assert(DanmuMovieMatchHelper.ResolveEpisodeLookupId("IqiyiID", invalidMovie) == string.Empty,
+                "movie candidate preparation should reject media without a provider playback/comment identifier");
+        }
+
+        private static void PreservesSingleEpisodeIsolationAndLegacyTaskShape()
+        {
+            var seasonBindings = new Dictionary<string, string>
+            {
+                ["DandanIDManual"] = "season-binding",
+            };
+            var sources = new List<ScraperEpisode>
+            {
+                new ScraperEpisode { CommentId = "source-1" },
+                new ScraperEpisode { CommentId = "source-2" },
+                new ScraperEpisode { CommentId = "source-3" },
+            };
+            Assert(DanmuEpisodeMatchHelper.TryGetSourceEpisode(sources, 2, out var selected) &&
+                   selected.CommentId == "source-2" && sources.Count == 3 &&
+                   seasonBindings["DandanIDManual"] == "season-binding",
+                "single-Episode selection should isolate the requested source and leave sibling/source collections and Season binding intact");
+
+            var legacySeasonTask = new DanmuDownloadTaskResult
+            {
+                TaskId = "season-task",
+                SeriesId = "series-id",
+                SeasonId = "season-id",
+                SeasonName = "Season 1",
+                Status = "running",
+                Episodes = new List<DanmuEpisodeDownloadResult>
+                {
+                    new DanmuEpisodeDownloadResult { ItemId = "episode-1", EpisodeNumber = 1 },
+                    new DanmuEpisodeDownloadResult { ItemId = "episode-2", EpisodeNumber = 2 },
+                },
+            };
+            var json = JsonSerializer.Serialize(legacySeasonTask);
+            var roundTrip = JsonSerializer.Deserialize<DanmuDownloadTaskResult>(json);
+            Assert(roundTrip.SeasonId == "season-id" && roundTrip.SeriesId == "series-id" &&
+                   roundTrip.Episodes.Count == 2 && roundTrip.Status == "running",
+                "additive single-target fields must preserve the existing Series/Season task shape");
+        }
+
+        private static void MigratesOfficialProxyCorsConfigurationWithoutPersistingItsAddress()
+        {
+            var serializer = new XmlSerializer(typeof(DandanOption));
+            DandanOption Deserialize(string xml)
+            {
+                using (var reader = new StringReader(xml))
+                {
+                    return (DandanOption)serializer.Deserialize(reader);
+                }
+            }
+
+            var legacyEmpty = Deserialize("<DandanOption />");
+            var legacyCustom = Deserialize("<DandanOption><ProxyCorsUrl>https://worker.example/cors/</ProxyCorsUrl></DandanOption>");
+            var explicitOfficial = Deserialize("<DandanOption><UseOfficialProxyCors>true</UseOfficialProxyCors></DandanOption>");
+            var explicitCustom = Deserialize("<DandanOption><UseOfficialProxyCors>false</UseOfficialProxyCors></DandanOption>");
+
+            Assert(DandanApi.ResolveUseOfficialProxyCors(legacyEmpty),
+                "a legacy configuration without a custom prefix should migrate to official CORS");
+            Assert(!DandanApi.ResolveUseOfficialProxyCors(legacyCustom),
+                "a legacy configuration with a custom prefix should preserve custom CORS routing");
+            Assert(DandanApi.ResolveUseOfficialProxyCors(explicitOfficial) &&
+                   !DandanApi.ResolveUseOfficialProxyCors(explicitCustom),
+                "explicit official CORS choices must take precedence over the custom-prefix value");
+
+            explicitCustom.ProxyCorsUrl = string.Empty;
+            Assert(!DandanApi.ResolveUseOfficialProxyCors(explicitCustom),
+                "an explicit false choice must not reset when the custom prefix is empty");
+            explicitOfficial.ProxyCorsUrl = "https://worker.example/cors/";
+            Assert(DandanApi.ResolveUseOfficialProxyCors(explicitOfficial),
+                "an explicit true choice must remain selected when a custom prefix is retained");
+
+            string serialized;
+            using (var writer = new StringWriter())
+            {
+                serializer.Serialize(writer, explicitOfficial);
+                serialized = writer.ToString();
+            }
+            Assert(serialized.Contains("UseOfficialProxyCors") &&
+                   !serialized.Contains("workers.dev", StringComparison.OrdinalIgnoreCase),
+                "serializing the official CORS selection must persist only the boolean choice");
+        }
+
         private static void NormalizesAndValidatesDandanProxyPrefixes()
         {
             Assert(
@@ -360,19 +607,33 @@ namespace Emby.Plugin.Danmu.RegressionTests
 
             foreach (var officialUrl in officialUrls)
             {
-                Assert(DandanApi.RouteOfficialUrl(officialUrl, false, string.Empty) == officialUrl,
+                Assert(DandanApi.RouteOfficialUrl(officialUrl, false, false, string.Empty) == officialUrl,
                     "custom API mode should preserve the exact official URL");
-                Assert(DandanApi.RouteOfficialUrl(officialUrl, true, proxyPrefix) ==
+                Assert(DandanApi.RouteOfficialUrl(officialUrl, true, false, proxyPrefix) ==
                        proxyPrefix + officialUrl,
-                    "proxy API mode should preserve the complete endpoint and query string");
+                    "custom proxy mode should preserve the complete endpoint and query string");
             }
+
+            var officialRoutes = officialUrls
+                .Select(url => DandanApi.RouteOfficialUrl(url, true, true, string.Empty))
+                .ToList();
+            var officialPrefixLength = officialRoutes[0].Length - officialUrls[0].Length;
+            var officialPrefix = officialRoutes[0].Substring(0, officialPrefixLength);
+            Assert(!string.IsNullOrWhiteSpace(officialPrefix) && officialRoutes.Select((route, index) =>
+                       route == officialPrefix + officialUrls[index]).All(value => value),
+                "official CORS mode should route every endpoint through one exact backend prefix");
 
             Assert(DandanApi.ShouldAddLocalAuthentication(false),
                 "custom API mode should retain local Dandanplay signing");
             Assert(!DandanApi.ShouldAddLocalAuthentication(true),
                 "proxy API mode should not add local Dandanplay authentication");
-            Assert(DandanApi.RouteOfficialUrl(officialUrls[0], true, proxyPrefix).Contains("search/anime"),
+            Assert(DandanApi.RouteOfficialUrl(officialUrls[0], true, false, proxyPrefix).Contains("search/anime"),
                 "proxy routing should succeed independently of any local credential resolver");
+            Assert(!DandanApi.ResolveUseOfficialProxyCors(new DandanOption
+            {
+                UseOfficialProxyCors = false,
+                ProxyCorsUrl = proxyPrefix,
+            }), "custom CORS mode must not fall back to official routing");
         }
 
         private static void PreservesDandanTitleBasedMatchingEndpoints()
@@ -386,6 +647,10 @@ namespace Emby.Plugin.Danmu.RegressionTests
             Assert(source.IndexOf("/match", StringComparison.OrdinalIgnoreCase) < 0 &&
                    source.IndexOf("fileHash", StringComparison.OrdinalIgnoreCase) < 0,
                 "Dandan must not introduce dd-danmaku hash matching");
+            Assert(!Regex.IsMatch(source,
+                    "(?:_logger|logger)\\.[A-Za-z]+\\([^;]*(?:ApiId|ApiSecret|X-Signature|signature)",
+                    RegexOptions.IgnoreCase),
+                "Dandan request logging must not include credential, signature, or authentication-header values");
         }
 
         private static void EmbedsDandanCredentialSettings()
@@ -404,6 +669,9 @@ namespace Emby.Plugin.Danmu.RegressionTests
             Assert(html.Contains("id=\"ProxyCorsUrl\"") && html.Contains("id=\"DandanProxyApiSettings\"") &&
                    html.Contains("id=\"DandanCustomApiSettings\""),
                 "settings page should contain the proxy CORS input and both conditional sections");
+            Assert(html.Contains("id=\"UseOfficialProxyCors\"") &&
+                   !html.Contains("workers.dev", StringComparison.OrdinalIgnoreCase),
+                "settings page should expose only the official-CORS choice, never its backend address");
             Assert(!html.Contains("id=\"ProxyCorsUrl\" value="),
                 "settings page must not prefill or embed a proxy CORS URL");
             Assert(script.Contains("config.Dandan.ApiId") && script.Contains("config.Dandan.ApiSecret"),
@@ -416,6 +684,9 @@ namespace Emby.Plugin.Danmu.RegressionTests
                 "settings script should save credentials without dropping existing Dandan options");
             Assert(script.Contains("dandan.UseProxyApi") && script.Contains("dandan.ProxyCorsUrl"),
                 "settings script should save the selected API mode and proxy CORS prefix");
+            Assert(script.Contains("resolveUseOfficialProxyCors") && script.Contains("dandan.UseOfficialProxyCors") &&
+                   script.Contains("ProxyCorsUrl').disabled = !useProxyApi || useOfficialProxyCors"),
+                "settings script should migrate legacy choices, persist an explicit boolean, and disable only the active official route input");
             Assert(script.Contains("classList.toggle('hide', !useProxyApi)") &&
                    script.Contains("classList.toggle('hide', useProxyApi)"),
                 "settings script should switch proxy and custom field visibility");
@@ -423,6 +694,129 @@ namespace Emby.Plugin.Danmu.RegressionTests
                    !script.Contains("DandanApiSecret').value = ''") &&
                    !script.Contains("ProxyCorsUrl').value = ''"),
                 "switching API modes must not clear inactive values");
+        }
+
+        private static void VerifiesVersionedConfigurationPageResources()
+        {
+            var assembly = typeof(DandanCredentialResolver).Assembly;
+            var generatedType = assembly.GetType("Emby.Plugin.Danmu.Configuration.GeneratedConfigurationPageResources");
+            Assert(generatedType != null, "the build should compile generated configuration-page resource names");
+            var token = (string)generatedType.GetField("CacheToken", BindingFlags.Static | BindingFlags.NonPublic)
+                .GetRawConstantValue();
+            var pageName = (string)generatedType.GetField("PageName", BindingFlags.Static | BindingFlags.NonPublic)
+                .GetRawConstantValue();
+            var controllerName = (string)generatedType.GetField("ControllerName", BindingFlags.Static | BindingFlags.NonPublic)
+                .GetRawConstantValue();
+            var informationalVersion = assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
+
+            Assert(token == NormalizeCacheToken(informationalVersion) &&
+                   Regex.IsMatch(token, "^[A-Za-z0-9_-]+$"),
+                "the generated cache token should normalize informational-version metadata to a URL-safe identifier");
+            Assert(pageName == "danmu-" + token && controllerName == "danmuJs-" + token,
+                "configuration page and controller identifiers must share the generated token");
+            Assert(NormalizeCacheToken("2.0.1+r5") == "2-0-1-r5",
+                "cache-token normalization should replace unsafe build-metadata punctuation");
+
+            var names = assembly.GetManifestResourceNames();
+            var html = ReadResource(assembly, names.Single(x => x.EndsWith("configPage.html", StringComparison.OrdinalIgnoreCase)));
+            Assert(html.Contains("data-controller=\"__plugin/" + controllerName + "\"") &&
+                   !html.Contains("__DANMU_CONFIG_CACHE_TOKEN__", StringComparison.Ordinal),
+                "the embedded configuration page should contain the matching generated controller without a placeholder");
+
+            var pluginSource = File.ReadAllText(Path.GetFullPath(Path.Combine(
+                AppContext.BaseDirectory, "..", "..", "..", "..", "Plugin.cs")));
+            Assert(pluginSource.Contains("GeneratedConfigurationPageResources.PageName") &&
+                   pluginSource.Contains("GeneratedConfigurationPageResources.ControllerName"),
+                "PluginPageInfo registration should use generated matched identifiers");
+        }
+
+        private static string NormalizeCacheToken(string informationalVersion)
+        {
+            var token = Regex.Replace(informationalVersion ?? string.Empty, "[^A-Za-z0-9_-]+", "-");
+            token = Regex.Replace(token, "(^-+|-+$)", string.Empty);
+            return string.IsNullOrEmpty(token) ? "build" : token;
+        }
+
+        private static void VerifiesSingleTargetSmartMatchReliabilityContracts()
+        {
+            Assert(DanmuEpisodeMatchHelper.SuggestSourceEpisodeNumber(null, 12) == null &&
+                   DanmuEpisodeMatchHelper.SuggestSourceEpisodeNumber(1, 0) == null &&
+                   !DanmuEpisodeMatchHelper.IsValidSourceEpisodeNumber(-1, 12),
+                "Episode suggestions should reject missing, special, and unavailable source numbers without affecting siblings");
+
+            var lateProvider = new TaskCompletionSource<DanmuEpisodeDownloadOutcome>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            var timedOut = false;
+            var timeoutOutcome = SingleTargetDownloadArbiter.AwaitAsync(
+                    lateProvider.Task,
+                    TimeSpan.FromMilliseconds(20),
+                    CancellationToken.None,
+                    onTimeout: () => timedOut = true)
+                .GetAwaiter().GetResult();
+            Assert(timeoutOutcome.Status == "skipped" && timedOut,
+                "a single-target provider that exceeds its deadline should become skipped");
+            Assert(timeoutOutcome.Message.Contains("20") && !timeoutOutcome.Message.Contains("180"),
+                "timeout diagnostics should describe the configured deadline instead of a hard-coded 180 seconds");
+            lateProvider.SetResult(new DanmuEpisodeDownloadOutcome { Status = "success", Message = "late" });
+            Assert(timeoutOutcome.Status == "skipped",
+                "a late provider completion must not overwrite the already selected timeout result");
+
+            var providerSkipped = false;
+            var duplicateSkipOutcome = SingleTargetDownloadArbiter.AwaitAsync(
+                    Task.FromResult(new DanmuEpisodeDownloadOutcome { Status = "skipped", Message = "duplicate" }),
+                    TimeSpan.FromSeconds(1),
+                    CancellationToken.None,
+                    onTimeout: () => providerSkipped = true)
+                .GetAwaiter().GetResult();
+            Assert(duplicateSkipOutcome.Status == "skipped" && !providerSkipped,
+                "a provider-reported duplicate skip must not be reported as a timeout");
+
+            using (var cancellation = new CancellationTokenSource())
+            {
+                cancellation.Cancel();
+                var cancelledProvider = new TaskCompletionSource<DanmuEpisodeDownloadOutcome>(
+                    TaskCreationOptions.RunContinuationsAsynchronously);
+                var cancelled = false;
+                try
+                {
+                    SingleTargetDownloadArbiter.AwaitAsync(
+                            cancelledProvider.Task,
+                            TimeSpan.FromSeconds(1),
+                            cancellation.Token)
+                        .GetAwaiter().GetResult();
+                }
+                catch (OperationCanceledException)
+                {
+                    cancelled = true;
+                }
+                Assert(cancelled,
+                    "a cancelled single-target task must complete as cancelled without waiting for its provider");
+            }
+
+            using (var simultaneousCancellation = new CancellationTokenSource())
+            {
+                simultaneousCancellation.Cancel();
+                var cancelled = false;
+                try
+                {
+                    SingleTargetDownloadArbiter.AwaitAsync(
+                            Task.FromResult(new DanmuEpisodeDownloadOutcome
+                            {
+                                Status = "success",
+                                Message = "provider completed",
+                            }),
+                            TimeSpan.FromSeconds(1),
+                            simultaneousCancellation.Token)
+                        .GetAwaiter().GetResult();
+                }
+                catch (OperationCanceledException)
+                {
+                    cancelled = true;
+                }
+
+                Assert(cancelled,
+                    "cancellation must win when the cancellation signal and provider result are both already complete");
+            }
         }
 
         private static int CountOccurrences(string text, string value)

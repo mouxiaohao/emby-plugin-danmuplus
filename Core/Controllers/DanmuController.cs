@@ -532,35 +532,27 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 Keyword = string.IsNullOrWhiteSpace(keywordOverride) ? latest.Name ?? string.Empty : keywordOverride,
             };
             var scrapers = _scraperManager.All();
-            if (!forceSearch && latest.ProviderIds != null)
+            if (DanmuMatchBindingHelper.TryGetSavedManualBinding(
+                    forceSearch, scrapers, latest.ProviderIds, out var savedScraper, out var manualId))
             {
-                foreach (var scraper in scrapers)
-                {
-                    if (!latest.ProviderIds.TryGetValue(scraper.ProviderId + "Manual", out var manualId) ||
-                        string.IsNullOrWhiteSpace(manualId))
-                    {
-                        continue;
-                    }
-
                     result.Status = "bound";
                     result.Message = "使用已经保存的电影手动匹配";
                     result.AutoSelected = true;
                     result.SelectedId = manualId;
-                    result.SelectedSite = scraper.ProviderId;
-                    result.SelectedSiteName = scraper.ProviderName;
+                    result.SelectedSite = savedScraper.ProviderId;
+                    result.SelectedSiteName = savedScraper.ProviderName;
                     result.Candidates.Add(new DanmuMatchCandidate
                     {
                         Id = manualId,
-                        Site = scraper.ProviderId,
-                        SiteName = scraper.ProviderName,
-                        SourceOrder = scraper.DefaultOrder,
+                        Site = savedScraper.ProviderId,
+                        SiteName = savedScraper.ProviderName,
+                        SourceOrder = savedScraper.DefaultOrder,
                         Name = "已手动绑定的电影",
                         Score = 1,
                         ManualBound = true,
                         Reason = "使用已保存的手动绑定",
                     });
                     return result;
-                }
             }
 
             var search = await DanmuMatchSearchEngine.SearchMovieAsync(
@@ -570,9 +562,7 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 _logger).ConfigureAwait(false);
             result.Candidates = search.Candidates;
             result.SearchErrors = search.SearchErrors;
-            var selected = DanmuMatchScorer.CanAutoSelect(result.Candidates)
-                ? result.Candidates[0]
-                : null;
+            var selected = DanmuMatchScorer.SelectAutoCandidate(result.Candidates);
             if (selected != null)
             {
                 result.Status = "matched";
@@ -645,7 +635,7 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                     var media = await scraper.GetMedia(season, candidate.Id).ConfigureAwait(false);
                     candidate.SuggestedEpisodeNumber = DanmuEpisodeMatchHelper.SuggestSourceEpisodeNumber(
                         latest.IndexNumber,
-                        media?.Episodes.Count ?? 0);
+                        media?.Episodes);
                 }
                 catch (Exception ex)
                 {
@@ -715,35 +705,27 @@ namespace Emby.Plugin.Danmu.Core.Controllers
             };
 
             var scrapers = _scraperManager.All();
-            if (!forceSearch && latest.ProviderIds != null)
+            if (DanmuMatchBindingHelper.TryGetSavedManualBinding(
+                    forceSearch, scrapers, latest.ProviderIds, out var savedScraper, out var manualId))
             {
-                foreach (var scraper in scrapers)
-                {
-                    if (!latest.ProviderIds.TryGetValue(scraper.ProviderId + "Manual", out var manualId) ||
-                        string.IsNullOrWhiteSpace(manualId))
-                    {
-                        continue;
-                    }
-
                     result.Status = "bound";
                     result.Message = "使用已经保存的手动匹配";
                     result.AutoSelected = true;
                     result.SelectedId = manualId;
-                    result.SelectedSite = scraper.ProviderId;
-                    result.SelectedSiteName = scraper.ProviderName;
+                    result.SelectedSite = savedScraper.ProviderId;
+                    result.SelectedSiteName = savedScraper.ProviderName;
                     result.Candidates.Add(new DanmuMatchCandidate
                     {
                         Id = manualId,
-                        Site = scraper.ProviderId,
-                        SiteName = scraper.ProviderName,
-                        SourceOrder = scraper.DefaultOrder,
+                        Site = savedScraper.ProviderId,
+                        SiteName = savedScraper.ProviderName,
+                        SourceOrder = savedScraper.DefaultOrder,
                         Name = "已手动绑定的项目",
                         Score = 1,
                         ManualBound = true,
                         Reason = "使用已保存的手动绑定",
                     });
                     return result;
-                }
             }
 
             var search = await DanmuMatchSearchEngine.SearchSeasonAsync(
@@ -756,9 +738,7 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 _logger).ConfigureAwait(false);
             result.Candidates = search.Candidates;
             result.SearchErrors = search.SearchErrors;
-            var selected = DanmuMatchScorer.CanAutoSelect(result.Candidates)
-                ? result.Candidates[0]
-                : null;
+            var selected = DanmuMatchScorer.SelectAutoCandidate(result.Candidates);
 
             if (selected != null)
             {
@@ -1339,9 +1319,9 @@ namespace Emby.Plugin.Danmu.Core.Controllers
             try
             {
                 media = await scraper.GetMedia(season, request.CandidateId).ConfigureAwait(false);
-                if (media == null || !DanmuEpisodeMatchHelper.IsValidSourceEpisodeNumber(
-                        sourceEpisodeNumber, media.Episodes.Count) ||
-                    string.IsNullOrWhiteSpace(media.Episodes[sourceEpisodeNumber - 1].CommentId))
+                if (media == null || !DanmuEpisodeMatchHelper.TryGetSourceEpisode(
+                        media.Episodes, sourceEpisodeNumber, out var sourceEpisode) ||
+                    string.IsNullOrWhiteSpace(sourceEpisode.CommentId))
                 {
                     failed.SiteName = scraper.ProviderName;
                     failed.Message = $"候选中不存在可下载的第 {sourceEpisodeNumber} 集";
@@ -1500,42 +1480,25 @@ namespace Emby.Plugin.Danmu.Core.Controllers
             CancellationToken cancellationToken,
             DanmuDownloadTaskResult task)
         {
-            var timeoutTask = Task.Delay(TimeSpan.FromSeconds(180));
-            var cancellationSignal = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-            Task completedTask;
-            using (cancellationToken.Register(() => cancellationSignal.TrySetResult(true)))
-            {
-                completedTask = await Task.WhenAny(providerTask, timeoutTask, cancellationSignal.Task).ConfigureAwait(false);
-            }
-            if (completedTask == providerTask)
-            {
-                return await providerTask.ConfigureAwait(false);
-            }
-
-            // Observe a provider request that ignores cancellation and finishes after the
-            // tracked task has already reached its immutable terminal state.
-            _ = providerTask.ContinueWith(
-                lateTask => _logger.LogError(
-                    lateTask.Exception,
+            var outcome = await SingleTargetDownloadArbiter.AwaitAsync(
+                providerTask,
+                TimeSpan.FromSeconds(180),
+                cancellationToken,
+                exception => _logger.LogError(
+                    exception,
                     "[{0}] 单目标下载在任务结束后返回异常: type={1}, item={2}",
                     task.SiteName,
                     task.TargetItemType,
                     task.TargetItemName),
-                CancellationToken.None,
-                TaskContinuationOptions.OnlyOnFaulted,
-                TaskScheduler.Default);
-
-            cancellationToken.ThrowIfCancellationRequested();
-            _logger.Warn(
-                "[{0}] 单目标下载超过 180 秒，已自动跳过: type={1}, item={2}",
-                task.SiteName,
-                task.TargetItemType,
-                task.TargetItemName);
-            return new DanmuEpisodeDownloadOutcome
-            {
-                Status = "skipped",
-                Message = "下载超过 180 秒，已自动跳过",
-            };
+                () =>
+                {
+                    _logger.Warn(
+                        "[{0}] 单目标下载超过 180 秒，已自动跳过: type={1}, item={2}",
+                        task.SiteName,
+                        task.TargetItemType,
+                        task.TargetItemName);
+                }).ConfigureAwait(false);
+            return outcome;
         }
 
         private async Task<DanmuDownloadTaskResult> RetryTrackedEpisode(DanmuParams request)

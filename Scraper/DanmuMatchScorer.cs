@@ -200,37 +200,84 @@ namespace Emby.Plugin.Danmu.Scraper
                    normalized == "tv" || normalized.Contains("series") || normalized.Contains("anime");
         }
 
-        public static bool CanAutoSelect(IList<DanmuMatchCandidate> candidates, bool allowProviderPriorityTie = true)
+        public static DanmuMatchCandidate SelectAutoCandidate(
+            IList<DanmuMatchCandidate> candidates,
+            bool allowProviderPriorityTie = true)
         {
             if (candidates == null || candidates.Count == 0 || candidates[0].Score < 0.78)
             {
-                return false;
+                return null;
             }
 
             if (candidates.Count == 1 || candidates[1].Score < 0.65)
             {
-                return true;
+                return candidates[0];
             }
 
-            if (candidates[0].Score - candidates[1].Score >= 0.08)
+            var competingCandidates = candidates
+                .Where(x => x.Score >= 0.65)
+                .ToList();
+            if (competingCandidates.All(x => IsSameSite(x, competingCandidates[0])))
             {
-                return true;
+                return SelectUniqueHighest(competingCandidates);
             }
 
-            if (!allowProviderPriorityTie)
+            var topScoreValue = candidates[0].Score;
+            var topScoreCandidates = competingCandidates
+                .Where(x => x.Score == topScoreValue)
+                .ToList();
+            if (topScoreCandidates.Count > 1 &&
+                topScoreCandidates.Any(x => !IsSameSite(x, topScoreCandidates[0])))
             {
-                return false;
+                if (!allowProviderPriorityTie)
+                {
+                    return null;
+                }
+
+                var topPriority = topScoreCandidates.Min(x => x.SourceOrder);
+                return SelectUniqueHighest(topScoreCandidates
+                    .Where(x => x.SourceOrder == topPriority)
+                    .ToList());
             }
 
-            var topScore = candidates[0].Score;
-            var tied = candidates.Where(x => x.Score == topScore).ToList();
-            if (tied.Count < 2 || tied.Select(x => x.Site).Distinct(StringComparer.OrdinalIgnoreCase).Count() < 2)
+            var topScore = (decimal)topScoreValue;
+            var closeCandidates = candidates
+                .Where(x => (decimal)x.Score >= 0.9500m &&
+                            topScore - (decimal)x.Score <= 0.0300m)
+                .ToList();
+            if (closeCandidates.Count == 1)
             {
-                return false;
+                return closeCandidates[0];
             }
 
-            var highestPriority = tied.Min(x => x.SourceOrder);
-            return tied.Count(x => x.SourceOrder == highestPriority) == 1;
+            if (closeCandidates.Count == 0 || !allowProviderPriorityTie)
+            {
+                return null;
+            }
+
+            var highestPriority = closeCandidates.Min(x => x.SourceOrder);
+            var preferredCandidates = closeCandidates
+                .Where(x => x.SourceOrder == highestPriority)
+                .ToList();
+            return SelectUniqueHighest(preferredCandidates);
+        }
+
+        public static bool CanAutoSelect(IList<DanmuMatchCandidate> candidates, bool allowProviderPriorityTie = true)
+        {
+            return SelectAutoCandidate(candidates, allowProviderPriorityTie) != null;
+        }
+
+        private static bool IsSameSite(DanmuMatchCandidate left, DanmuMatchCandidate right)
+        {
+            return left.SourceOrder == right.SourceOrder &&
+                   string.Equals(left.Site, right.Site, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static DanmuMatchCandidate SelectUniqueHighest(IList<DanmuMatchCandidate> candidates)
+        {
+            var highestScore = candidates.Max(x => x.Score);
+            var winners = candidates.Where(x => x.Score == highestScore).ToList();
+            return winners.Count == 1 ? winners[0] : null;
         }
 
         public static string Normalize(string value)

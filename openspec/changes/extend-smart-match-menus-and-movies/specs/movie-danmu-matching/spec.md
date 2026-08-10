@@ -26,6 +26,22 @@ The system SHALL automatically select only a sufficiently strong and unambiguous
 - **WHEN** the highest-ranked Movie candidate satisfies the configured confidence and separation rules
 - **THEN** the preview SHALL mark it as automatically selected
 
+#### Scenario: Close high-confidence movie candidates span providers
+- **WHEN** multiple Movie candidates score at least `0.9500` and are no more than `0.0300` below the highest score
+- **THEN** the preview SHALL automatically select the sole candidate from the earliest configured site in that close-score pool, even when it is not the highest-scoring candidate
+
+#### Scenario: Movie candidates from one site have different scores
+- **WHEN** all competing Movie candidates come from one site and one has a unique highest score
+- **THEN** the Movie preview SHALL automatically select that site's highest-scoring candidate without applying the cross-site close-pool floor
+
+#### Scenario: Movie candidates from one site share the highest score
+- **WHEN** one site has multiple Movie candidates sharing its highest score
+- **THEN** the Movie preview SHALL remain ambiguous for manual selection
+
+#### Scenario: Movie candidates from different sites share the highest score
+- **WHEN** Movie candidates from different sites share the highest score
+- **THEN** the preview SHALL resolve the tie by configured site priority even when the shared score is below `0.9500`
+
 #### Scenario: Movie candidates are ambiguous
 - **WHEN** no Movie candidate is both sufficiently strong and unambiguous
 - **THEN** the system SHALL avoid persisting an arbitrary binding and the frontend SHALL allow the user to select a candidate manually or search with another keyword

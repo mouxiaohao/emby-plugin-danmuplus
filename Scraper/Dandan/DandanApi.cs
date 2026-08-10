@@ -21,6 +21,7 @@ namespace Emby.Plugin.Danmu.Scraper.Dandan
     public class DandanApi : AbstractApi
     {
         private const string OfficialApiBaseUrl = "https://api.dandanplay.net/api/v2/";
+        private const string OfficialProxyCorsBaseUrl = "https://danmuplus-dandan-proxy.mouxiaohao.workers.dev/cors/";
         private static readonly object _lock = new object();
         private DateTime lastRequestTime = DateTime.Now.AddDays(-1);
         private readonly ILogger _logger;
@@ -78,8 +79,9 @@ namespace Emby.Plugin.Danmu.Scraper.Dandan
 
             var encodedKeyword = HttpUtility.UrlEncode(keyword);
             var officialUrl = $"{OfficialApiBaseUrl}search/anime?keyword={encodedKeyword}";
-            var useProxyApi = Config.UseProxyApi;
-            var url = RouteOfficialUrl(officialUrl, useProxyApi, Config.ProxyCorsUrl);
+            var config = Config;
+            var useProxyApi = config.UseProxyApi;
+            var url = RouteOfficialUrl(officialUrl, useProxyApi, ResolveUseOfficialProxyCors(config), config.ProxyCorsUrl);
             var httpRequestOptions = new HttpRequestOptions
             {
                 //Url = $"http://sub.xmp.sandai.net:8000/subxl/{cid}.json",
@@ -127,8 +129,9 @@ namespace Emby.Plugin.Danmu.Scraper.Dandan
             }
 
             var officialUrl = $"{OfficialApiBaseUrl}bangumi/{animeId}";
-            var useProxyApi = Config.UseProxyApi;
-            var url = RouteOfficialUrl(officialUrl, useProxyApi, Config.ProxyCorsUrl);
+            var config = Config;
+            var useProxyApi = config.UseProxyApi;
+            var url = RouteOfficialUrl(officialUrl, useProxyApi, ResolveUseOfficialProxyCors(config), config.ProxyCorsUrl);
             HttpRequestOptions httpRequestOptions = new HttpRequestOptions
             {
                 //Url = $"http://sub.xmp.sandai.net:8000/subxl/{cid}.json",
@@ -181,8 +184,9 @@ namespace Emby.Plugin.Danmu.Scraper.Dandan
             var withRelated = this.Config.WithRelatedDanmu ? "true" : "false";
             var chConvert = this.Config.ChConvert;
             var officialUrl = $"{OfficialApiBaseUrl}comment/{epId}?withRelated={withRelated}&chConvert={chConvert}";
-            var useProxyApi = Config.UseProxyApi;
-            var url = RouteOfficialUrl(officialUrl, useProxyApi, Config.ProxyCorsUrl);
+            var config = Config;
+            var useProxyApi = config.UseProxyApi;
+            var url = RouteOfficialUrl(officialUrl, useProxyApi, ResolveUseOfficialProxyCors(config), config.ProxyCorsUrl);
             HttpRequestOptions httpRequestOptions = GetDefaultHttpRequestOptions(url);
             AddAuthenticationIfRequired(httpRequestOptions, officialUrl, useProxyApi);
             var result = await httpClient.GetSelfResultAsync<CommentResult>(httpRequestOptions).ConfigureAwait(false);
@@ -226,14 +230,42 @@ namespace Emby.Plugin.Danmu.Scraper.Dandan
             return normalized.TrimEnd('/') + "/";
         }
 
-        internal static string RouteOfficialUrl(string officialUrl, bool useProxyApi, string proxyCorsUrl)
+        internal static bool ResolveUseOfficialProxyCors(DandanOption config)
+        {
+            if (config == null)
+            {
+                return true;
+            }
+
+            return config.UseOfficialProxyCors ?? string.IsNullOrWhiteSpace(config.ProxyCorsUrl);
+        }
+
+        internal static string RouteOfficialUrl(
+            string officialUrl,
+            bool useProxyApi,
+            bool useOfficialProxyCors,
+            string proxyCorsUrl)
         {
             if (!useProxyApi)
             {
                 return officialUrl;
             }
 
+            if (useOfficialProxyCors)
+            {
+                return OfficialProxyCorsBaseUrl + officialUrl;
+            }
+
             return NormalizeProxyCorsUrl(proxyCorsUrl) + officialUrl;
+        }
+
+        internal static string RouteOfficialUrl(string officialUrl, bool useProxyApi, string proxyCorsUrl)
+        {
+            return RouteOfficialUrl(
+                officialUrl,
+                useProxyApi,
+                useProxyApi && string.IsNullOrWhiteSpace(proxyCorsUrl),
+                proxyCorsUrl);
         }
 
         internal static bool ShouldAddLocalAuthentication(bool useProxyApi)

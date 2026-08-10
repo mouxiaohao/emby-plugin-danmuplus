@@ -303,7 +303,8 @@ namespace Emby.Plugin.Danmu.Scraper.Bilibili
                                 {
                                     Id = episodeId,
                                     Title = episode.Title,
-                                    CommentId = $"{episode.CId}"
+                                    CommentId = $"{episode.CId}",
+                                    EpisodeNumber = EpisodeContentClassifier.TryGetEpisodeNumber(episode.Title),
                                 });
                             }
                         }
@@ -321,7 +322,15 @@ namespace Emby.Plugin.Danmu.Scraper.Bilibili
                                 // ScraperEpisode 的 Id 可以是 BVID + 分P号，或者如果 CID 唯一，则仅为 CID。
                                 // Jellyfin uses CommentId = page.Cid
                                 var episodeId = aid > 0 ? $"{aid},{page.Cid}" : $"{page.Cid}";
-                                scraperMedia.Episodes.Add(new ScraperEpisode() { Id = episodeId, Title = page.PartName, CommentId = $"{page.Cid}" });
+                                scraperMedia.Episodes.Add(new ScraperEpisode()
+                                {
+                                    Id = episodeId,
+                                    Title = page.PartName,
+                                    CommentId = $"{page.Cid}",
+                                    EpisodeNumber = page.Page > 0
+                                        ? page.Page
+                                        : EpisodeContentClassifier.TryGetEpisodeNumber(page.PartName),
+                                });
                             }
                         }
                         else { log.Info($"Bilibili.GetMedia (BVID: {id}): 找到了 '{item.Name}' 的视频信息，但没有列出分P。"); }
@@ -355,8 +364,9 @@ namespace Emby.Plugin.Danmu.Scraper.Bilibili
                             scraperMedia.Episodes.Add(new ScraperEpisode() 
                             { 
                                 Id = episodeIdentifier, // Ensure this is the ep_id
-                                Title = ep.Title ?? item.Name, 
-                                CommentId = episodeIdentifier // Ensure this is also the ep_id
+                                Title = ep.Title ?? item.Name,
+                                CommentId = episodeIdentifier, // Ensure this is also the ep_id
+                                EpisodeNumber = EpisodeContentClassifier.TryGetEpisodeNumber(ep.Title),
                             });
                         }
                         log.Info($"Bilibili.GetMedia (Season ID: {id}): 在 Emby 项目 '{item.Name}' 的季度中找到 {scraperMedia.Episodes.Count} 个剧集。");
@@ -437,7 +447,15 @@ namespace Emby.Plugin.Danmu.Scraper.Bilibili
                     {
                         var firstPart = videoInfo.Pages.First();
                         log.Info($"Bilibili.GetMediaEpisode (BVID: {id}): 对于 Emby 项目 '{item?.Name ?? "未知项目"}', 使用第一个分P。CID: {firstPart.Cid}, 标题: '{firstPart.PartName}'。返回 CID 作为 CommentId。");
-                        return new ScraperEpisode() { Id = $"{firstPart.Cid}", CommentId = $"{firstPart.Cid}", Title = firstPart.PartName };
+                        return new ScraperEpisode()
+                        {
+                            Id = $"{firstPart.Cid}",
+                            CommentId = $"{firstPart.Cid}",
+                            Title = firstPart.PartName,
+                            EpisodeNumber = firstPart.Page > 0
+                                ? firstPart.Page
+                                : EpisodeContentClassifier.TryGetEpisodeNumber(firstPart.PartName),
+                        };
                     } else {
                         log.Warn($"Bilibili.GetMediaEpisode (BVID: {id}): 无法获取 BVID '{id}' (Emby 项目 '{item?.Name ?? "未知项目"}') 的视频信息或分P。"); // 明确返回 null
                         return null;
@@ -466,7 +484,13 @@ namespace Emby.Plugin.Danmu.Scraper.Bilibili
                             // 如果实现了 XML 回退，finalCommentId 可以是 episodeInfo.CId.ToString()
                         }
                         log.Info($"Bilibili.GetMediaEpisode (ep_id: {numericId}): 为 Emby 项目 '{item?.Name ?? "未知项目"}' 返回 ScraperEpisode。ID: {episodeInfo.Id}, CommentId: '{finalCommentId}', 标题: '{episodeInfo.Title}'");
-                        return new ScraperEpisode() { Id = $"{episodeInfo.Id}", CommentId = finalCommentId, Title = episodeInfo.Title };
+                        return new ScraperEpisode()
+                        {
+                            Id = $"{episodeInfo.Id}",
+                            CommentId = finalCommentId,
+                            Title = episodeInfo.Title,
+                            EpisodeNumber = EpisodeContentClassifier.TryGetEpisodeNumber(episodeInfo.Title),
+                        };
                     }
                     else
                     {

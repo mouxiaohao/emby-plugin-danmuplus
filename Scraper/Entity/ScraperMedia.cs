@@ -29,5 +29,13 @@ namespace Emby.Plugin.Danmu.Scraper.Entity
         public string Id { get; set; }
         public string CommentId { get; set; }
         public string Title { get; set; } = string.Empty;
+
+        /// <summary>
+        /// Provider source episode number when the upstream response exposes one
+        /// explicitly or it can be parsed unambiguously from the episode title.
+        /// Null retains compatibility with providers/legacy data that do not
+        /// expose reliable numbering.
+        /// </summary>
+        public int? EpisodeNumber { get; set; }
     }
 }

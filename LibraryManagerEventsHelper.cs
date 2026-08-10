@@ -738,7 +738,8 @@ namespace Emby.Plugin.Danmu
                                 null,
                                 _logger).ConfigureAwait(false);
 
-                            if (!DanmuMatchScorer.CanAutoSelect(search.Candidates))
+                            selectedCandidate = DanmuMatchScorer.SelectAutoCandidate(search.Candidates);
+                            if (selectedCandidate == null)
                             {
                                 var top = search.Candidates.FirstOrDefault();
                                 _logger.LogInformation(
@@ -751,7 +752,6 @@ namespace Emby.Plugin.Danmu
                                 continue;
                             }
 
-                            selectedCandidate = search.Candidates[0];
                             selectedScraper = scrapers.FirstOrDefault(x =>
                                 string.Equals(x.ProviderId, selectedCandidate.Site, StringComparison.OrdinalIgnoreCase));
                             selectedMediaId = selectedCandidate.Id;
@@ -1162,7 +1162,8 @@ namespace Emby.Plugin.Danmu
             }
 
             var indexNumber = sourceEpisodeNumber ?? episode.IndexNumber ?? 0;
-            if (indexNumber < 1 || indexNumber > media.Episodes.Count)
+            if (!DanmuEpisodeMatchHelper.TryGetSourceEpisode(
+                    media.Episodes, indexNumber, out var mediaEpisode))
             {
                 throw new DanmuDownloadErrorException(
                     $"缺少集号或集号超过弹幕数（本地第 {indexNumber} 集，来源共 {media.Episodes.Count} 集）");
@@ -1173,7 +1174,6 @@ namespace Emby.Plugin.Danmu
                 throw new DanmuDownloadErrorException("缺少季号，可能是特典或 extras 影片");
             }
 
-            var mediaEpisode = media.Episodes[indexNumber - 1];
             if (string.IsNullOrWhiteSpace(mediaEpisode.CommentId))
             {
                 throw new DanmuDownloadErrorException("弹幕来源没有返回该集的弹幕 ID");
@@ -1250,12 +1250,11 @@ namespace Emby.Plugin.Danmu
             var danmuPath = Path.Combine(
                 item.ContainingFolderPath,
                 item.GetDanmuXmlPath(scraper.ProviderId));
-            if (!forceRefresh && _fileSystem.Exists(danmuPath))
+            var fileExists = _fileSystem.Exists(danmuPath);
+            var lastWriteTime = fileExists ? _fileSystem.GetLastWriteTime(danmuPath) : DateTime.MinValue;
+            if (DanmuDownloadPolicy.ShouldSkipExistingDanmu(
+                    forceRefresh, fileExists, lastWriteTime, DateTime.Now))
             {
-                var lastWriteTime = _fileSystem.GetLastWriteTime(danmuPath);
-                var age = DateTime.Now - lastWriteTime;
-                if (age.TotalSeconds < 3600 * 24 * 7)
-                {
                     _logger.LogInformation(
                         "[{0}]弹幕文件在7天内更新过，重复已跳过：{1}.{2}，文件={3}",
                         scraper.Name,
@@ -1267,7 +1266,6 @@ namespace Emby.Plugin.Danmu
                         Status = "skipped",
                         Message = "重复已跳过",
                     };
-                }
             }
 
             var danmaku = await scraper.GetDanmuContent(item, mediaEpisode.CommentId).ConfigureAwait(false);

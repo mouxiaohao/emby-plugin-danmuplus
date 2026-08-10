@@ -97,7 +97,7 @@ namespace Emby.Plugin.Danmu
             {
                 new PluginPageInfo
                 {
-                    Name = "danmu",
+                    Name = GeneratedConfigurationPageResources.PageName,
                     DisplayName = "弹幕配置",
                     MenuIcon = "closed_caption",
                     MenuSection = "server",
@@ -106,7 +106,7 @@ namespace Emby.Plugin.Danmu
                 },
                 new PluginPageInfo
                 {
-                    Name = "danmuJs",
+                    Name = GeneratedConfigurationPageResources.ControllerName,
                     EmbeddedResourcePath = GetType().Namespace + ".Configuration.config.js"
                 }
             };

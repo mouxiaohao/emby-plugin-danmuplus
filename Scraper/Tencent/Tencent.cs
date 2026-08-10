@@ -155,7 +155,13 @@ namespace Emby.Plugin.Danmu.Scraper.Tencent
                         continue;
                     }
 
-                    media.Episodes.Add(new ScraperEpisode() { Id = $"{ep.Vid}", CommentId = $"{ep.Vid}", Title = ep.Title });
+                    media.Episodes.Add(new ScraperEpisode()
+                    {
+                        Id = $"{ep.Vid}",
+                        CommentId = $"{ep.Vid}",
+                        Title = ep.Title,
+                        EpisodeNumber = EpisodeContentClassifier.TryGetEpisodeNumber(ep.Title),
+                    });
                 }
             }
 
@@ -173,7 +179,14 @@ namespace Emby.Plugin.Danmu.Scraper.Tencent
                     return null;
                 }
 
-                return new ScraperEpisode() { Id = id, CommentId = $"{video.EpisodeList[0].Vid}" };
+                var firstEpisode = video.EpisodeList[0];
+                return new ScraperEpisode()
+                {
+                    Id = id,
+                    CommentId = $"{firstEpisode.Vid}",
+                    Title = firstEpisode.Title,
+                    EpisodeNumber = EpisodeContentClassifier.TryGetEpisodeNumber(firstEpisode.Title),
+                };
             }
 
             return new ScraperEpisode() { Id = id, CommentId = id };
@@ -275,7 +288,13 @@ namespace Emby.Plugin.Danmu.Scraper.Tencent
             {
                 foreach (var ep in video.EpisodeList)
                 {
-                    list.Add(new ScraperEpisode() { Id = $"{ep.Vid}", CommentId = $"{ep.Vid}", Title = ep.Title });
+                    list.Add(new ScraperEpisode()
+                    {
+                        Id = $"{ep.Vid}",
+                        CommentId = $"{ep.Vid}",
+                        Title = ep.Title,
+                        EpisodeNumber = EpisodeContentClassifier.TryGetEpisodeNumber(ep.Title),
+                    });
                 }
             }
 

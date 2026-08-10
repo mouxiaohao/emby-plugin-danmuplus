@@ -1,5 +1,5 @@
 <div id="TemplateConfigPage" data-role="page" class="page type-interior pluginConfigurationPage"
-     data-require="emby-input,emby-button,emby-select,emby-checkbox,emby-radio" data-controller="__plugin/danmuJs">
+     data-require="emby-input,emby-button,emby-select,emby-checkbox,emby-radio" data-controller="__plugin/danmuJs-__DANMU_CONFIG_CACHE_TOKEN__">
     <div data-role="content">
         <div class="content-primary">
             <div class="verticalSection verticalSection">
@@ -49,6 +49,14 @@
                     </div>
 
                     <div id="DandanProxyApiSettings">
+                        <div class="checkboxContainer checkboxContainer-withDescription">
+                            <label class="emby-checkbox-label">
+                                <input id="UseOfficialProxyCors" name="UseOfficialProxyCors" type="checkbox"
+                                       is="emby-checkbox" />
+                                <span>使用插件官方 CORS 地址</span>
+                            </label>
+                            <div class="fieldDescription">由插件维护的代理转发弹弹play官方 API 请求。</div>
+                        </div>
                         <div class="inputContainer">
                             <label class="inputLabel inputLabelUnfocused" for="ProxyCorsUrl">代理 CORS 地址</label>
                             <input id="ProxyCorsUrl" name="ProxyCorsUrl" type="url" is="emby-input"

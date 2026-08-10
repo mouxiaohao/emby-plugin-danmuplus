@@ -13,8 +13,16 @@ define(
 
             function updateDandanApiModeVisibility() {
                 var useProxyApi = container.querySelector('#UseProxyApi').checked;
+                var useOfficialProxyCors = container.querySelector('#UseOfficialProxyCors').checked;
                 container.querySelector('#DandanProxyApiSettings').classList.toggle('hide', !useProxyApi);
                 container.querySelector('#DandanCustomApiSettings').classList.toggle('hide', useProxyApi);
+                container.querySelector('#UseOfficialProxyCors').disabled = !useProxyApi;
+                container.querySelector('#ProxyCorsUrl').disabled = !useProxyApi || useOfficialProxyCors;
+            }
+
+            function resolveUseOfficialProxyCors(dandan) {
+                if (typeof dandan.UseOfficialProxyCors === 'boolean') return dandan.UseOfficialProxyCors;
+                return !(dandan.ProxyCorsUrl || '').trim();
             }
 
             function setButtons() {
@@ -63,6 +71,7 @@ define(
                     container.querySelector('#UseProxyApi').checked = config.Dandan.UseProxyApi === true;
                     container.querySelector('#UseCustomApi').checked = config.Dandan.UseProxyApi !== true;
                     container.querySelector('#ProxyCorsUrl').value = config.Dandan.ProxyCorsUrl || '';
+                    container.querySelector('#UseOfficialProxyCors').checked = resolveUseOfficialProxyCors(config.Dandan);
                     container.querySelector('#DandanApiId').value = config.Dandan.ApiId || '';
                     container.querySelector('#DandanApiSecret').value = config.Dandan.ApiSecret || '';
                     updateDandanApiModeVisibility();
@@ -143,6 +152,7 @@ define(
             container.addEventListener('viewshow', onLoad);
             container.querySelector('#UseProxyApi').addEventListener('change', updateDandanApiModeVisibility);
             container.querySelector('#UseCustomApi').addEventListener('change', updateDandanApiModeVisibility);
+            container.querySelector('#UseOfficialProxyCors').addEventListener('change', updateDandanApiModeVisibility);
 
             container.querySelector('#TemplateConfigForm')
                 .addEventListener('submit', function (e) {
@@ -175,6 +185,7 @@ define(
 
                         var dandan = config.Dandan || {};
                         dandan.UseProxyApi = container.querySelector('#UseProxyApi').checked;
+                        dandan.UseOfficialProxyCors = container.querySelector('#UseOfficialProxyCors').checked;
                         dandan.ProxyCorsUrl = container.querySelector('#ProxyCorsUrl').value.trim();
                         dandan.ApiId = container.querySelector('#DandanApiId').value.trim();
                         dandan.ApiSecret = container.querySelector('#DandanApiSecret').value.trim();
