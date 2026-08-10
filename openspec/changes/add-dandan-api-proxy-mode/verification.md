@@ -28,6 +28,10 @@ and deterministic descending-score selection.
 - A forced manual download for episode 1 using `DandanID=17617` completed with
   1 success and 0 failures. The Emby item subsequently contained a `DandanID`
   provider value.
+- A read-only direct signed `/api/v2/search/anime` request using the
+  administrator-supplied credential pair returned HTTP 200, `success=true`,
+  and Dandanplay anime ID `17617`. The credential values were not written to
+  source, configuration, artifacts, logs, or this record.
 - Other enabled providers continued returning candidates. The latest Emby log
   contained no Dandanplay error lines and no `X-AppId`, `X-Signature`,
   `ApiSecret`, or `API Secret` text.
@@ -37,12 +41,12 @@ Synology SSH namespace, so the generated XML could not be independently opened
 through SSH. The completed download result and persisted provider ID were
 verified through Emby's plugin and item APIs.
 
-## Direct-mode limitation
+## Direct-mode verification
 
-The deployed legacy configuration contains no Dandanplay API ID/secret pair.
-Custom mode migration and deterministic signing behavior are verified, but a
-live signed Dandanplay search cannot be completed without a valid credential
-pair. Proxy mode does not require those credentials.
+The existing custom/direct signing path and credential precedence remain
+unchanged. A live signed search completed with the administrator-supplied pair;
+the values were used only in memory for the read-only request and were not
+persisted or emitted.
 
 ## Deployment and rollback
 
