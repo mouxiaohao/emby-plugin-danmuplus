@@ -20,6 +20,7 @@ namespace Emby.Plugin.Danmu.Scraper.Dandan
 {
     public class DandanApi : AbstractApi
     {
+        private const string OfficialApiBaseUrl = "https://api.dandanplay.net/api/v2/";
         private static readonly object _lock = new object();
         private DateTime lastRequestTime = DateTime.Now.AddDays(-1);
         private readonly ILogger _logger;
@@ -75,8 +76,10 @@ namespace Emby.Plugin.Danmu.Scraper.Dandan
 
             this.LimitRequestFrequently();
 
-            keyword = HttpUtility.UrlEncode(keyword);
-            var url = $"https://api.dandanplay.net/api/v2/search/anime?keyword={keyword}";
+            var encodedKeyword = HttpUtility.UrlEncode(keyword);
+            var officialUrl = $"{OfficialApiBaseUrl}search/anime?keyword={encodedKeyword}";
+            var useProxyApi = Config.UseProxyApi;
+            var url = RouteOfficialUrl(officialUrl, useProxyApi, Config.ProxyCorsUrl);
             var httpRequestOptions = new HttpRequestOptions
             {
                 //Url = $"http://sub.xmp.sandai.net:8000/subxl/{cid}.json",
@@ -85,7 +88,7 @@ namespace Emby.Plugin.Danmu.Scraper.Dandan
                 TimeoutMs = 30000,
                 AcceptHeader = "application/json",
             };
-            injectAppId(httpRequestOptions, url);
+            AddAuthenticationIfRequired(httpRequestOptions, officialUrl, useProxyApi);
             var response = await httpClient.GetResponse(httpRequestOptions).ConfigureAwait(false);
 
             // _logger.Info("res = {0}", response.ToString());
@@ -123,7 +126,9 @@ namespace Emby.Plugin.Danmu.Scraper.Dandan
                 return anime;
             }
 
-            var url = $"https://api.dandanplay.net/api/v2/bangumi/{animeId}";
+            var officialUrl = $"{OfficialApiBaseUrl}bangumi/{animeId}";
+            var useProxyApi = Config.UseProxyApi;
+            var url = RouteOfficialUrl(officialUrl, useProxyApi, Config.ProxyCorsUrl);
             HttpRequestOptions httpRequestOptions = new HttpRequestOptions
             {
                 //Url = $"http://sub.xmp.sandai.net:8000/subxl/{cid}.json",
@@ -132,7 +137,7 @@ namespace Emby.Plugin.Danmu.Scraper.Dandan
                 TimeoutMs = 30000,
                 AcceptHeader = "application/json",
             };
-            injectAppId(httpRequestOptions, url);
+            AddAuthenticationIfRequired(httpRequestOptions, officialUrl, useProxyApi);
             var response = await httpClient.GetResponse(httpRequestOptions).ConfigureAwait(false);
             // var response = await httpClient.GetAsync(url, cancellationToken).ConfigureAwait(false);
             // response.EnsureSuccessStatusCode();
@@ -175,9 +180,11 @@ namespace Emby.Plugin.Danmu.Scraper.Dandan
 
             var withRelated = this.Config.WithRelatedDanmu ? "true" : "false";
             var chConvert = this.Config.ChConvert;
-            var url = $"https://api.dandanplay.net/api/v2/comment/{epId}?withRelated={withRelated}&chConvert={chConvert}";
+            var officialUrl = $"{OfficialApiBaseUrl}comment/{epId}?withRelated={withRelated}&chConvert={chConvert}";
+            var useProxyApi = Config.UseProxyApi;
+            var url = RouteOfficialUrl(officialUrl, useProxyApi, Config.ProxyCorsUrl);
             HttpRequestOptions httpRequestOptions = GetDefaultHttpRequestOptions(url);
-            injectAppId(httpRequestOptions, url);
+            AddAuthenticationIfRequired(httpRequestOptions, officialUrl, useProxyApi);
             var result = await httpClient.GetSelfResultAsync<CommentResult>(httpRequestOptions).ConfigureAwait(false);
             
             if (result != null)
@@ -204,7 +211,50 @@ namespace Emby.Plugin.Danmu.Scraper.Dandan
             }
         }
 
-        private void injectAppId(HttpRequestOptions httpRequestOptions, string url)
+        internal static string NormalizeProxyCorsUrl(string proxyCorsUrl)
+        {
+            var normalized = (proxyCorsUrl ?? string.Empty).Trim();
+            if (!Uri.TryCreate(normalized, UriKind.Absolute, out var uri)
+                || (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps)
+                || !string.IsNullOrEmpty(uri.Query)
+                || !string.IsNullOrEmpty(uri.Fragment))
+            {
+                throw new InvalidOperationException(
+                    "Dandanplay proxy API is enabled, but its CORS prefix is missing or invalid. Configure an absolute HTTP or HTTPS URL.");
+            }
+
+            return normalized.TrimEnd('/') + "/";
+        }
+
+        internal static string RouteOfficialUrl(string officialUrl, bool useProxyApi, string proxyCorsUrl)
+        {
+            if (!useProxyApi)
+            {
+                return officialUrl;
+            }
+
+            return NormalizeProxyCorsUrl(proxyCorsUrl) + officialUrl;
+        }
+
+        internal static bool ShouldAddLocalAuthentication(bool useProxyApi)
+        {
+            return !useProxyApi;
+        }
+
+        private void AddAuthenticationIfRequired(
+            HttpRequestOptions httpRequestOptions,
+            string officialUrl,
+            bool useProxyApi)
+        {
+            if (!ShouldAddLocalAuthentication(useProxyApi))
+            {
+                return;
+            }
+
+            InjectAppId(httpRequestOptions, officialUrl);
+        }
+
+        private void InjectAppId(HttpRequestOptions httpRequestOptions, string url)
         {
             var timestamp = DateTimeOffset.Now.ToUnixTimeSeconds();
             var credentials = ResolveCredentials();

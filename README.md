@@ -1,6 +1,6 @@
 # emby-plugin-danmuplus
 
-Emby 弹幕插件增强版，参考 [fengymi/emby-plugin-danmu](https://github.com/fengymi/emby-plugin-danmu) 开发。项目从原移植版继续演进，当前版本为 **2.0.1-r2**。
+Emby 弹幕插件增强版，参考 [fengymi/emby-plugin-danmu](https://github.com/fengymi/emby-plugin-danmu) 开发。项目从原移植版继续演进，当前版本为 **2.0.1-r3**。
 
 已验证的服务器环境：Synology 套件版 Emby **4.9.3.0**。其他 Emby 版本可能需要调整配置页或前端菜单兼容代码。
 
@@ -13,7 +13,14 @@ Emby 弹幕插件增强版，参考 [fengymi/emby-plugin-danmu](https://github.c
 - 腾讯分段重试、连接重置重试，以及已完成分段合并为部分弹幕 XML。
 - 七天 XML 重复跳过；支持强制刷新、后台队列、强制停止、单集重试和流式进度。
 - STRM、115 挂载等普通 Emby 媒体库场景兼容。
-- 配置页面版本显示为 `2.0.1-r2`。
+- 配置页面版本显示为 `2.0.1-r3`。
+
+## 2.0.1-r3 补丁
+
+- 弹弹 Play 配置新增互斥的“使用代理 API”和“使用自定义 API”模式。
+- 代理模式支持 `cf_worker.js` 的 CORS 前缀拼接协议，由 Worker 完成官方 API 签名，不要求 Emby 保存本地 API ID/Secret。
+- 自定义模式继续直连弹弹 Play 官方 API，并保留原有凭据优先级和本地签名逻辑。
+- 两种模式继续调用 `/search/anime`、`/bangumi` 和 `/comment`，沿用标题、年份、季度和集数匹配；不使用视频 Hash 或 `/match`。
 
 ## 2.0.1-r2 补丁
 
@@ -72,14 +79,21 @@ Emby 弹幕插件增强版，参考 [fengymi/emby-plugin-danmu](https://github.c
 
 1. 在 Emby 管理后台停用旧版弹幕插件。
 2. 将编译得到的 `Emby.Plugin.Danmu.dll` 复制到 Emby 插件目录。
-3. 重启 Emby，在“弹幕配置”中保存站点优先级和弹弹 Play API 凭据（如使用）。
+3. 重启 Emby，在“弹幕配置”中保存站点优先级和弹弹 Play API 模式（如使用）。
 4. 先扫描一个测试媒体，确认日志和 XML 输出正常，再用于整个媒体库。
 
 本项目保留原程序集名称 `Emby.Plugin.Danmu.dll`，这样可以兼容现有 Emby 插件配置和数据；仓库名称与项目发行名称为 `emby-plugin-danmuplus`。
 
-## 弹弹 Play API 凭据
+## 弹弹 Play API 配置
 
-插件不会自动申请、生成或附带第三方凭据。如需启用弹弹 Play，请先从弹弹 Play 开放平台取得属于自己的应用 API ID 与 API Secret，然后在 Emby 管理后台的“弹幕配置”中同时填写两项并保存。
+Emby 管理后台的“弹幕配置”提供两种互斥的调用方式：
+
+- **使用代理 API**：填写兼容 `cf_worker.js` 的代理 CORS 前缀，例如 `https://ddplay-api.7o7o.cc/cors/`。插件把现有弹弹 Play 官方 API 地址附加到该前缀后转发，由 Cloudflare Worker 等代理完成应用签名；此模式不需要在 Emby 中填写 API ID 或 API Secret。
+- **使用自定义 API**：插件继续直连弹弹 Play 官方 API，并使用本地配置的 API ID 与 API Secret 生成签名。插件不会自动申请、生成或附带第三方凭据，请先从弹弹 Play 开放平台取得属于自己的凭据，并同时填写两项。
+
+切换模式只改变请求的传输和签名位置，不会清空另一种模式已保存的值。两种模式均继续通过标题、年份、季度和集数进行服务端搜索与评分，使用相同的弹幕下载流程；不会计算视频 Hash，也不会调用弹弹 Play `/match` 接口。
+
+使用自定义 API 时还需注意：
 
 - API ID 与 API Secret 必须作为完整的一对填写；只填写一项会明确报配置不完整，不会与其他来源的值拼接。
 - 插件配置中的完整凭据优先；配置为空时才依次尝试环境变量 `DANDAN_API_ID`、`DANDAN_API_SECRET` 和旧版内置值。
@@ -123,9 +137,9 @@ node Frontend/DanmuSmartMatch.RegressionTests.js
 
 ## 下载 DLL
 
-仓库中的 [`dist/Emby.Plugin.Danmu.dll`](dist/Emby.Plugin.Danmu.dll) 是 2.0.1-r2 Release 构建，可直接下载后复制到 Emby 插件目录。该 DLL 保留程序集文件名 `Emby.Plugin.Danmu.dll`，以兼容已有插件配置。
+仓库中的 [`dist/Emby.Plugin.Danmu.dll`](dist/Emby.Plugin.Danmu.dll) 是 2.0.1-r3 Release 构建，可直接下载后复制到 Emby 插件目录。该 DLL 保留程序集文件名 `Emby.Plugin.Danmu.dll`，以兼容已有插件配置。
 
-SHA-256：`03b12feba16985f7f84780b766ff463af7bdc3befc5973f57b36e9fe4b27b8e1`
+SHA-256：`353e615afce38a5c7f6f7027af9092a7af94d04423e740faa527ca94366261a0`
 
 ## 按版本下载
 
@@ -134,6 +148,7 @@ SHA-256：`03b12feba16985f7f84780b766ff463af7bdc3befc5973f57b36e9fe4b27b8e1`
 - [`releases/v2.0.0/`](releases/v2.0.0/)
 - [`releases/v2.0.1-r1/`](releases/v2.0.1-r1/)
 - [`releases/v2.0.1-r2/`](releases/v2.0.1-r2/)
+- [`releases/v2.0.1-r3/`](releases/v2.0.1-r3/)
 
 后续版本不会覆盖旧版本文件，便于按 Emby 环境回退或比较。
 

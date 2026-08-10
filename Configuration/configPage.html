@@ -1,5 +1,5 @@
 <div id="TemplateConfigPage" data-role="page" class="page type-interior pluginConfigurationPage"
-     data-require="emby-input,emby-button,emby-select,emby-checkbox" data-controller="__plugin/danmuJs">
+     data-require="emby-input,emby-button,emby-select,emby-checkbox,emby-radio" data-controller="__plugin/danmuJs">
     <div data-role="content">
         <div class="content-primary">
             <div class="verticalSection verticalSection">
@@ -32,17 +32,45 @@
                         <h3>弹弹play配置</h3>
                     </legend>
 
-                    <div class="inputContainer">
-                        <label class="inputLabel inputLabelUnfocused" for="DandanApiId">弹弹play API ID</label>
-                        <input id="DandanApiId" name="DandanApiId" type="text" is="emby-input"
-                               autocomplete="off" autocapitalize="off" spellcheck="false" />
-                        <div class="fieldDescription">填写弹弹play开放平台分配的应用 ID；不会写入插件日志。</div>
+                    <div class="radioContainer">
+                        <label class="emby-radio-label">
+                            <input id="UseProxyApi" name="DandanApiMode" type="radio" value="proxy"
+                                   is="emby-radio" />
+                            <span>使用代理 API</span>
+                        </label>
+                        <div class="fieldDescription radioFieldDescription">通过兼容的代理转发弹弹play官方 API 请求，由代理完成应用签名。</div>
+
+                        <label class="emby-radio-label">
+                            <input id="UseCustomApi" name="DandanApiMode" type="radio" value="custom"
+                                   is="emby-radio" />
+                            <span>使用自定义 API</span>
+                        </label>
+                        <div class="fieldDescription radioFieldDescription">使用下方填写的弹弹play开放平台凭据直接访问官方 API。</div>
                     </div>
-                    <div class="inputContainer">
-                        <label class="inputLabel inputLabelUnfocused" for="DandanApiSecret">弹弹play API Secret</label>
-                        <input id="DandanApiSecret" name="DandanApiSecret" type="password" is="emby-input"
-                               autocomplete="new-password" autocapitalize="off" spellcheck="false" />
-                        <div class="fieldDescription">密钥保存在 Emby 插件配置中，页面以密码形式遮罩显示。</div>
+
+                    <div id="DandanProxyApiSettings">
+                        <div class="inputContainer">
+                            <label class="inputLabel inputLabelUnfocused" for="ProxyCorsUrl">代理 CORS 地址</label>
+                            <input id="ProxyCorsUrl" name="ProxyCorsUrl" type="url" is="emby-input"
+                                   placeholder="https://worker.example/cors/"
+                                   autocomplete="off" autocapitalize="off" spellcheck="false" />
+                            <div class="fieldDescription">填写 Cloudflare Worker 等兼容代理的 CORS 前缀，例如 https://worker.example/cors/。</div>
+                        </div>
+                    </div>
+
+                    <div id="DandanCustomApiSettings">
+                        <div class="inputContainer">
+                            <label class="inputLabel inputLabelUnfocused" for="DandanApiId">弹弹play API ID</label>
+                            <input id="DandanApiId" name="DandanApiId" type="text" is="emby-input"
+                                   autocomplete="off" autocapitalize="off" spellcheck="false" />
+                            <div class="fieldDescription">填写弹弹play开放平台分配的应用 ID；不会写入插件日志。</div>
+                        </div>
+                        <div class="inputContainer">
+                            <label class="inputLabel inputLabelUnfocused" for="DandanApiSecret">弹弹play API Secret</label>
+                            <input id="DandanApiSecret" name="DandanApiSecret" type="password" is="emby-input"
+                                   autocomplete="new-password" autocapitalize="off" spellcheck="false" />
+                            <div class="fieldDescription">密钥保存在 Emby 插件配置中，页面以密码形式遮罩显示。</div>
+                        </div>
                     </div>
 
                     <div class="checkboxContainer checkboxContainer-withDescription">

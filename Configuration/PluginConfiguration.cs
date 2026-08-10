@@ -14,7 +14,7 @@ namespace Emby.Plugin.Danmu.Configuration
         /// <summary>
         /// 版本信息
         /// </summary>
-        public string Version { get; } = "2.0.1-r2";//Assembly.GetExecutingAssembly().GetName().Version.ToString();
+        public string Version { get; } = "2.0.1-r3";//Assembly.GetExecutingAssembly().GetName().Version.ToString();
 
         public DandanOption Dandan { get; set; } = new DandanOption();
 
@@ -133,6 +133,16 @@ namespace Emby.Plugin.Danmu.Configuration
     /// </summary>
     public class DandanOption
     {
+        /// <summary>
+        /// Whether to route Dandanplay API requests through a configured proxy.
+        /// </summary>
+        public bool UseProxyApi { get; set; } = false;
+
+        /// <summary>
+        /// Cloudflare Worker-compatible CORS proxy prefix.
+        /// </summary>
+        public string ProxyCorsUrl { get; set; } = string.Empty;
+
         /// <summary>
         /// Dandanplay Open API application identifier.
         /// </summary>

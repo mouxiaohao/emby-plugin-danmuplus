@@ -6,6 +6,7 @@ using System.Text.Json;
 using System.Text;
 using System.Xml;
 using System.Xml.Serialization;
+using Emby.Plugin.Danmu.Configuration;
 using Emby.Plugin.Danmu.Core;
 using Emby.Plugin.Danmu.Core.Extensions;
 using Emby.Plugin.Danmu.Model;
@@ -41,6 +42,10 @@ namespace Emby.Plugin.Danmu.RegressionTests
             ClassifiesOnlyExplicitNonMainTitles();
             ResolvesDandanCredentialsByCompletePair();
             RejectsIncompleteDandanCredentialsWithoutLeakingValues();
+            PreservesLegacyDandanApiDefaults();
+            NormalizesAndValidatesDandanProxyPrefixes();
+            RoutesExistingDandanEndpointsWithoutLocalProxyAuthentication();
+            PreservesDandanTitleBasedMatchingEndpoints();
             EmbedsDandanCredentialSettings();
             PreservesValidUnicodeWhileRemovingInvalidXmlScalars();
             RemovesInvalidXmlCharacterReferences();
@@ -282,6 +287,107 @@ namespace Emby.Plugin.Danmu.RegressionTests
             }
         }
 
+        private static void PreservesLegacyDandanApiDefaults()
+        {
+            var serializer = new XmlSerializer(typeof(DandanOption));
+            DandanOption option;
+            using (var reader = new StringReader("<DandanOption />"))
+            {
+                option = (DandanOption)serializer.Deserialize(reader);
+            }
+
+            Assert(!option.UseProxyApi,
+                "legacy Dandan configuration without an API mode should remain in custom API mode");
+            Assert(option.ProxyCorsUrl == string.Empty,
+                "legacy Dandan configuration should default to an empty proxy CORS prefix");
+            Assert(option.WithRelatedDanmu && option.ChConvert == 0,
+                "adding proxy settings must not change existing Dandan option defaults");
+        }
+
+        private static void NormalizesAndValidatesDandanProxyPrefixes()
+        {
+            Assert(
+                DandanApi.NormalizeProxyCorsUrl("  https://worker.example/cors  ") ==
+                "https://worker.example/cors/",
+                "proxy CORS prefixes should be trimmed and receive one trailing slash");
+            Assert(
+                DandanApi.NormalizeProxyCorsUrl("https://worker.example/cors////") ==
+                "https://worker.example/cors/",
+                "repeated trailing slashes should normalize to exactly one slash");
+
+            var invalidPrefixes = new[]
+            {
+                string.Empty,
+                "relative/cors/",
+                "ftp://worker.example/cors/",
+                "https://worker.example/cors/?token=LEAK_QUERY",
+                "https://worker.example/cors/#LEAK_FRAGMENT"
+            };
+            foreach (var invalidPrefix in invalidPrefixes)
+            {
+                var message = CaptureProxyPrefixError(invalidPrefix);
+                Assert(message.Contains("missing or invalid"),
+                    "invalid proxy prefixes should produce a deterministic configuration error");
+                Assert((invalidPrefix.Length == 0 || !message.Contains(invalidPrefix)) &&
+                       !message.Contains("LEAK_QUERY") &&
+                       !message.Contains("LEAK_FRAGMENT"),
+                    "proxy configuration errors must not echo the configured value");
+            }
+        }
+
+        private static string CaptureProxyPrefixError(string proxyCorsUrl)
+        {
+            try
+            {
+                DandanApi.NormalizeProxyCorsUrl(proxyCorsUrl);
+                throw new InvalidOperationException("expected proxy prefix validation to fail");
+            }
+            catch (InvalidOperationException ex)
+            {
+                return ex.Message;
+            }
+        }
+
+        private static void RoutesExistingDandanEndpointsWithoutLocalProxyAuthentication()
+        {
+            const string proxyPrefix = "https://worker.example/cors/";
+            var officialUrls = new[]
+            {
+                "https://api.dandanplay.net/api/v2/search/anime?keyword=Frieren%20S2",
+                "https://api.dandanplay.net/api/v2/bangumi/12345",
+                "https://api.dandanplay.net/api/v2/comment/67890?withRelated=true&chConvert=2"
+            };
+
+            foreach (var officialUrl in officialUrls)
+            {
+                Assert(DandanApi.RouteOfficialUrl(officialUrl, false, string.Empty) == officialUrl,
+                    "custom API mode should preserve the exact official URL");
+                Assert(DandanApi.RouteOfficialUrl(officialUrl, true, proxyPrefix) ==
+                       proxyPrefix + officialUrl,
+                    "proxy API mode should preserve the complete endpoint and query string");
+            }
+
+            Assert(DandanApi.ShouldAddLocalAuthentication(false),
+                "custom API mode should retain local Dandanplay signing");
+            Assert(!DandanApi.ShouldAddLocalAuthentication(true),
+                "proxy API mode should not add local Dandanplay authentication");
+            Assert(DandanApi.RouteOfficialUrl(officialUrls[0], true, proxyPrefix).Contains("search/anime"),
+                "proxy routing should succeed independently of any local credential resolver");
+        }
+
+        private static void PreservesDandanTitleBasedMatchingEndpoints()
+        {
+            var sourcePath = Path.GetFullPath(Path.Combine(
+                AppContext.BaseDirectory, "..", "..", "..", "..", "Scraper", "Dandan", "DandanApi.cs"));
+            var source = File.ReadAllText(sourcePath);
+
+            Assert(source.Contains("search/anime") && source.Contains("bangumi/") && source.Contains("comment/"),
+                "Dandan should retain its search, bangumi, and comment endpoint pipeline");
+            Assert(source.IndexOf("/match", StringComparison.OrdinalIgnoreCase) < 0 &&
+                   source.IndexOf("fileHash", StringComparison.OrdinalIgnoreCase) < 0,
+                "Dandan must not introduce dd-danmaku hash matching");
+        }
+
         private static void EmbedsDandanCredentialSettings()
         {
             var assembly = typeof(DandanCredentialResolver).Assembly;
@@ -292,11 +398,42 @@ namespace Emby.Plugin.Danmu.RegressionTests
             Assert(html.Contains("id=\"DandanApiId\""), "settings page should contain the Dandan API ID input");
             Assert(html.Contains("id=\"DandanApiSecret\"") && html.Contains("type=\"password\""),
                 "settings page should mask the Dandan API Secret");
+            Assert(html.Contains("id=\"UseProxyApi\"") && html.Contains("id=\"UseCustomApi\"") &&
+                   CountOccurrences(html, "name=\"DandanApiMode\"") == 2,
+                "settings page should contain two mutually exclusive Dandan API mode radios");
+            Assert(html.Contains("id=\"ProxyCorsUrl\"") && html.Contains("id=\"DandanProxyApiSettings\"") &&
+                   html.Contains("id=\"DandanCustomApiSettings\""),
+                "settings page should contain the proxy CORS input and both conditional sections");
             Assert(script.Contains("config.Dandan.ApiId") && script.Contains("config.Dandan.ApiSecret"),
                 "settings script should load both Dandan credential values");
+            Assert(script.Contains("config.Dandan.UseProxyApi === true") &&
+                   script.Contains("config.Dandan.ProxyCorsUrl || ''"),
+                "settings script should load the API mode and proxy CORS prefix with legacy-safe defaults");
             Assert(script.Contains("dandan.ApiId") && script.Contains("dandan.ApiSecret") &&
                    script.Contains("dandan.WithRelatedDanmu") && script.Contains("dandan.ChConvert"),
                 "settings script should save credentials without dropping existing Dandan options");
+            Assert(script.Contains("dandan.UseProxyApi") && script.Contains("dandan.ProxyCorsUrl"),
+                "settings script should save the selected API mode and proxy CORS prefix");
+            Assert(script.Contains("classList.toggle('hide', !useProxyApi)") &&
+                   script.Contains("classList.toggle('hide', useProxyApi)"),
+                "settings script should switch proxy and custom field visibility");
+            Assert(!script.Contains("DandanApiId').value = ''") &&
+                   !script.Contains("DandanApiSecret').value = ''") &&
+                   !script.Contains("ProxyCorsUrl').value = ''"),
+                "switching API modes must not clear inactive values");
+        }
+
+        private static int CountOccurrences(string text, string value)
+        {
+            var count = 0;
+            var index = 0;
+            while ((index = text.IndexOf(value, index, StringComparison.Ordinal)) >= 0)
+            {
+                count++;
+                index += value.Length;
+            }
+
+            return count;
         }
 
         private static void PreservesValidUnicodeWhileRemovingInvalidXmlScalars()
