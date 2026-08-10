@@ -13,12 +13,13 @@ The smart-match workflow is currently exposed only from Series and Season detail
 - Add an editable source-episode-number input beside the selected Episode candidate, initialized from the smart-match suggestion and validated before downloading only the selected local Episode.
 - Pre-fill every Movie, Series, Season, and Episode manual-search input with its media parent name: the Movie title for Movies and the owning Series title for television content.
 - Resolve the target item reliably from both detail and card action sheets without leaking the previously opened card's identity into a later menu.
-- Preserve current Series/Season matching, manual-binding precedence, provider-specific download behavior, retry behavior, and duplicate-skipping semantics.
+- Preserve current Series/Season scoring and display ordering while allowing close high-confidence candidates to be resolved by configured site priority, and retain manual-binding precedence, provider-specific download behavior, retry behavior, and duplicate-skipping semantics.
 - Render Movie and Episode tracked downloads with the same per-item detail, status, and retry presentation as a Season download, with exactly one item row and Movie treated as a single downloadable item in the presentation layer.
 - Automatically mark a single Movie or Episode download as skipped after 180 seconds, allow force-stopped progress dialogs to close immediately, and keep late provider completion from changing the terminal task result.
 - Inject the same action on Android CustomJSS when an action sheet is opened by long-pressing a media card or a Season inside a detail page, even when no desktop-style more-button click occurs.
 - Place Movie and Episode actions at the same stable action-sheet position used by Series and Season actions.
 - Diagnose and harden non-Bilibili Movie downloads, including iQIYI failures and Tencent requests that otherwise remain running indefinitely.
+- Remove the requirement for an eight-point winning margin; when candidates are both high-confidence and within a narrow close-score pool, resolve the automatic selection by configured site priority while keeping the displayed candidate list score-ordered.
 - Non-goals: changing provider ranking configuration, adding Folder/Collection-level actions, or redesigning Emby's native action sheet.
 
 ## Capabilities
@@ -30,7 +31,7 @@ The smart-match workflow is currently exposed only from Series and Season detail
 
 ### Modified Capabilities
 
-- None.
+- `season-danmu-matching`: Resolves close high-confidence candidates by configured site priority without changing provider-neutral scoring or score-ordered candidate display.
 
 ## Impact
 

@@ -14,7 +14,7 @@
 
 | File | SHA-256 |
 | --- | --- |
-| `Emby.Plugin.Danmu.dll` | `c90b67b9ee9e72554beab79d07e239a639a6e4c816fb6893564344bc81dbcd97` |
+| `Emby.Plugin.Danmu.dll` | `b08186751fec8a407d1ae8ffb9975a952f25f8960b7143dc0bf159d012515d5c` |
 | `DanmuSmartMatch.CustomCssJS.js` | `058ab6b2385ae10a5b2bd4b1ab7e172e742cf84e793e6d63e6f8e06114d223f1` |
 
 The files were copied from the just-validated Release DLL and source frontend
@@ -53,7 +53,19 @@ candidate.
 - The final DLL was installed at
   `/volume2/@appdata/EmbyServer/plugins/Emby.Plugin.Danmu.dll`; its deployed
   SHA-256 exactly matched the packaged candidate
-  (`c90b67b9ee9e72554beab79d07e239a639a6e4c816fb6893564344bc81dbcd97`).
+  (`b08186751fec8a407d1ae8ffb9975a952f25f8960b7143dc0bf159d012515d5c`).
+- The post-margin-fix snapshot is
+  `/volume2/@appdata/EmbyServer/plugins/backups/danmu-2.0.1-r5-final-margin-20260810-111000`.
+  Its pre-replacement DLL checksum was
+  `09837f136b4c8a908eb85b0af26942aa2454f7c9bb5bc5248b5edd2eab2e69f1`
+  and its Danmu configuration checksum was
+  `959757ac17b4faa63db3ac32495914308e043b4ea6b6980740ffdf2524546d26`.
+- Synology's package stop/status wrapper left an older Emby process detached
+  from the `active/exited` systemd unit. The exact process executable, command
+  line, parent and start time were checked before sending that PID `TERM`.
+  The old PID exited without `KILL`; the replacement process started after the
+  final DLL timestamp, the systemd unit was active, and port 8096 returned
+  HTTP 200.
 - Emby was stopped for the paired replacement and restarted successfully.
 - CustomCssJS was updated only by replacing the unique Smart Match
   `content` node in its configuration XML. The configuration retained two
@@ -77,11 +89,12 @@ candidate.
   `danmu-2-0-1-r5` configuration page without clearing browser data. It
   displayed version `2.0.1-r5`, the official-CORS checkbox, and the current
   configuration form.
-- The saved legacy custom proxy value happens to equal the built-in route.
-  The r5 build did not inject that value, but migration rules require
-  preserving the user-saved custom value, so it remains visible in the custom
-  input/configuration response. The strict no-literal live criterion is
-  therefore not claimed.
+- At the time of the proxy-route smokes, the saved legacy custom proxy value
+  happened to equal the built-in route and was preserved. After the user later
+  saved direct-route credentials, the final configuration had direct mode,
+  official selection true, and an empty custom value. The direct smoke restored
+  that later state exactly; no custom value was invented or cleared by the
+  verification pass.
 - Official-CORS route: representative Episode preview was `matched` with 13
   candidates; Dandan media detail resolved source Episode 1; 11 candidates
   from other providers remained available; the tracked comment task completed
@@ -91,22 +104,29 @@ candidate.
   saved custom value was preserved.
 - Each successful proxy route isolated one other-provider search diagnostic
   without losing successful provider candidates.
-- Direct route reached preview/media-detail preparation, but tracked comment
-  download ended `completed_with_errors/failed`. Presence-only inspection
-  confirmed that AppId, AppSecret, and the legacy Secret were all absent.
-  This is recorded as a `credential_config` environment blocker; no
-  credentials were guessed or modified.
-- ASS generation was temporarily enabled for the proxy smokes and restored to
-  disabled in `finally`. The tracked comment outcomes succeeded, but the
-  subsequent file-side XML/ASS path probe did not produce conclusive output;
-  filesystem output is not claimed as verified.
+- Direct route was rerun after the user configured AppId/AppSecret. A
+  representative Dandan search returned a candidate, media-detail preparation
+  succeeded, and the tracked comment task completed with one success and no
+  failure. The file-side probe found a non-empty 309,656-byte XML and a
+  non-empty 448,949-byte ASS for the tested Episode.
+- ASS generation was temporarily enabled for the direct smoke and restored to
+  disabled in `finally`.
 - Configuration restoration was confirmed as semantically equivalent:
-  proxy mode enabled, custom value retained, official-CORS selection
-  explicitly persisted as false for the legacy custom configuration, and ASS
-  generation disabled.
+  direct mode remained selected, official selection remained true, the custom
+  proxy value remained empty, and ASS generation was disabled.
 - Automatic candidate selection was observed. A destructive manual-binding
   mutation was not performed, so automatic/manual binding coverage is not
   claimed.
-- A complete post-smoke sensitive-log scan was not completed. No credentials,
-  tokens, signatures, authentication headers, or full proxy URL are recorded
-  in this verification file.
+- The reported `3年Z组银八老师` Season was previewed without binding or
+  downloading it. Its unique Bilibili candidate scored `1.0000` at source
+  order 0 and its Dandan runner-up scored `0.9679` at source order 1. The
+  final loaded DLL returned `matched`, `AutoSelected=true`, and selected the
+  Bilibili candidate. An initial result from the detached old process was
+  discarded after the process-lifetime discrepancy was found.
+- The final-process log segment was scanned without printing credential
+  values. It contained none of the configured Dandan AppId/AppSecret, Emby
+  access token, NAS password, saved custom proxy literal, signature query
+  fields, or secret fields. Emby's request logger did record the
+  `X-Emby-Authorization` header name and non-secret client metadata for login
+  requests; therefore the stricter assertion that authentication-header text
+  is entirely absent is not claimed.

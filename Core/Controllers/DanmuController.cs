@@ -562,9 +562,7 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 _logger).ConfigureAwait(false);
             result.Candidates = search.Candidates;
             result.SearchErrors = search.SearchErrors;
-            var selected = DanmuMatchScorer.CanAutoSelect(result.Candidates)
-                ? result.Candidates[0]
-                : null;
+            var selected = DanmuMatchScorer.SelectAutoCandidate(result.Candidates);
             if (selected != null)
             {
                 result.Status = "matched";
@@ -740,9 +738,7 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 _logger).ConfigureAwait(false);
             result.Candidates = search.Candidates;
             result.SearchErrors = search.SearchErrors;
-            var selected = DanmuMatchScorer.CanAutoSelect(result.Candidates)
-                ? result.Candidates[0]
-                : null;
+            var selected = DanmuMatchScorer.SelectAutoCandidate(result.Candidates);
 
             if (selected != null)
             {

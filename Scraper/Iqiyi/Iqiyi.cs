@@ -245,12 +245,13 @@ namespace Emby.Plugin.Danmu.Scraper.Iqiyi
                 return result;
             }
 
-            if (DanmuMatchScorer.CanAutoSelect(result.Candidates))
+            var selected = DanmuMatchScorer.SelectAutoCandidate(result.Candidates);
+            if (selected != null)
             {
                 result.Status = "matched";
                 result.Message = "已根据季名、父剧名、年份和集数选出高置信度结果";
                 result.AutoSelected = true;
-                result.SelectedId = result.Candidates[0].Id;
+                result.SelectedId = selected.Id;
                 return result;
             }
 

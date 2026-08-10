@@ -36,7 +36,8 @@ namespace Emby.Plugin.Danmu.RegressionTests
             UsesIdentifierFallbackOrder();
             OmitsMalformedRecords();
             OrdersAndSelectsCrossProviderTies();
-            PreservesSameProviderTieAmbiguity();
+            PreservesSameSiteHighestScoreTieAmbiguity();
+            SelectsCloseHighConfidenceCandidatesBySitePriority();
             ScoresMoviesAndFiltersTelevisionCandidates();
             IsolatesMovieProviderFailures();
             ResolvesMovieProviderLookupIdentifiers();
@@ -138,15 +139,107 @@ namespace Emby.Plugin.Danmu.RegressionTests
             Assert(unequal[0].Id == "higher-score", "provider priority must not outrank a higher score");
         }
 
-        private static void PreservesSameProviderTieAmbiguity()
+        private static void PreservesSameSiteHighestScoreTieAmbiguity()
         {
             var candidates = DanmuMatchSearchEngine.OrderCandidates(new List<DanmuMatchCandidate>
             {
-                Candidate("a", "PrioritySite", 0, 0.90),
-                Candidate("b", "PrioritySite", 0, 0.90),
-                Candidate("c", "LaterSite", 1, 0.90)
+                Candidate("a", "PrioritySite", 0, 0.99),
+                Candidate("b", "PrioritySite", 0, 0.99),
+                Candidate("c", "LaterSite", 1, 0.99)
             });
-            Assert(!DanmuMatchScorer.CanAutoSelect(candidates), "multiple top candidates within the highest-priority provider must remain ambiguous");
+            Assert(!DanmuMatchScorer.CanAutoSelect(candidates),
+                "multiple same-score winners within the highest-priority site must remain ambiguous");
+
+            var oneSite = DanmuMatchSearchEngine.OrderCandidates(new List<DanmuMatchCandidate>
+            {
+                Candidate("same-site-high", "PrioritySite", 0, 0.90),
+                Candidate("same-site-low", "PrioritySite", 0, 0.89),
+                Candidate("non-competing-site", "LaterSite", 1, 0.64)
+            });
+            Assert(DanmuMatchScorer.SelectAutoCandidate(oneSite)?.Id == "same-site-high" &&
+                   DanmuMatchScorer.SelectAutoCandidate(oneSite, false)?.Id == "same-site-high",
+                "one-site competitors should select their unique highest score even during intermediate search");
+        }
+
+        private static void SelectsCloseHighConfidenceCandidatesBySitePriority()
+        {
+            var preferredRunnerUp = DanmuMatchSearchEngine.OrderCandidates(new List<DanmuMatchCandidate>
+            {
+                Candidate("full", "LaterSite", 2, 1.0),
+                Candidate("preferred", "PrioritySite", 0, 0.98)
+            });
+            Assert(preferredRunnerUp[0].Id == "full" &&
+                   DanmuMatchScorer.SelectAutoCandidate(preferredRunnerUp)?.Id == "preferred",
+                "display order must stay score-descending while the earlier site's 0.98 candidate is selected");
+
+            var outsideGap = DanmuMatchSearchEngine.OrderCandidates(new List<DanmuMatchCandidate>
+            {
+                Candidate("full", "FullSite", 1, 1.0),
+                Candidate("outside", "PrioritySite", 0, 0.969)
+            });
+            Assert(DanmuMatchScorer.SelectAutoCandidate(outsideGap)?.Id == "full",
+                "a candidate more than 0.03 below the top score must stay outside the close pool");
+
+            var belowPoolFloor = DanmuMatchSearchEngine.OrderCandidates(new List<DanmuMatchCandidate>
+            {
+                Candidate("higher", "LaterSite", 1, 0.949),
+                Candidate("lower", "PrioritySite", 0, 0.94)
+            });
+            Assert(DanmuMatchScorer.SelectAutoCandidate(belowPoolFloor) == null,
+                "candidates below 0.95 must remain ambiguous even when their scores are close");
+
+            var floorBoundary = DanmuMatchSearchEngine.OrderCandidates(new List<DanmuMatchCandidate>
+            {
+                Candidate("floor", "LaterSite", 1, 0.95),
+                Candidate("below-floor", "PrioritySite", 0, 0.92)
+            });
+            Assert(DanmuMatchScorer.SelectAutoCandidate(floorBoundary)?.Id == "floor",
+                "the 0.95 pool floor must exclude a 0.92 candidate even at the 0.03 gap boundary");
+
+            var samePreferredSite = DanmuMatchSearchEngine.OrderCandidates(new List<DanmuMatchCandidate>
+            {
+                Candidate("preferred-high", "PrioritySite", 0, 0.99),
+                Candidate("preferred-low", "PrioritySite", 0, 0.98),
+                Candidate("later", "LaterSite", 1, 0.97)
+            });
+            Assert(DanmuMatchScorer.SelectAutoCandidate(samePreferredSite)?.Id == "preferred-high",
+                "the highest-scoring close candidate within the earliest site should win when unique");
+
+            var preferredThirdScore = DanmuMatchSearchEngine.OrderCandidates(new List<DanmuMatchCandidate>
+            {
+                Candidate("full", "LateSite", 3, 1.0),
+                Candidate("second", "MiddleSite", 2, 0.99),
+                Candidate("preferred", "PrioritySite", 0, 0.98)
+            });
+            Assert(preferredThirdScore.Select(x => x.Id).SequenceEqual(new[] { "full", "second", "preferred" }) &&
+                   DanmuMatchScorer.SelectAutoCandidate(preferredThirdScore)?.Id == "preferred",
+                "the sole pooled candidate from the earliest site may win without changing score order");
+
+            Assert(DanmuMatchScorer.SelectAutoCandidate(preferredRunnerUp, false) == null,
+                "intermediate search must not resolve a multi-candidate close pool by site priority");
+            Assert(DanmuMatchScorer.SelectAutoCandidate(outsideGap, false)?.Id == "full",
+                "intermediate search may stop when only one candidate is in the close pool");
+
+            var exactTie = DanmuMatchSearchEngine.OrderCandidates(new List<DanmuMatchCandidate>
+            {
+                Candidate("late-tie", "LaterSite", 2, 0.98),
+                Candidate("priority-tie", "PrioritySite", 0, 0.98)
+            });
+            Assert(DanmuMatchScorer.SelectAutoCandidate(exactTie)?.Id == "priority-tie" &&
+                   DanmuMatchScorer.SelectAutoCandidate(exactTie, false) == null,
+                "exact ties must use the same final-only site-priority rule");
+
+            Assert(DanmuMatchScorer.SelectAutoCandidate(new List<DanmuMatchCandidate>
+                {
+                    Candidate("below-floor", "Site", 0, 0.77)
+                }) == null,
+                "the existing top-score floor must remain unchanged");
+            Assert(DanmuMatchScorer.SelectAutoCandidate(new List<DanmuMatchCandidate>
+                {
+                    Candidate("strong", "SiteA", 0, 0.78),
+                    Candidate("weak-runner-up", "SiteB", 1, 0.64)
+                })?.Id == "strong",
+                "the existing runner-up floor must remain unchanged");
         }
 
         private static void ScoresMoviesAndFiltersTelevisionCandidates()

@@ -30,6 +30,13 @@
 
 ## 6. 联合 r5 构建与发布前备份
 
+Verification note (2026-08-10): the final-process direct-route smoke covered
+`search`, `bangumi`, tracked `comment`, and non-empty XML/ASS output. The log
+segment contained no configured Dandan credential literals, access token,
+signature query, NAS password, or saved custom-proxy literal. Emby itself logs
+the `X-Emby-Authorization` header name and non-secret client metadata, so tasks
+5.3/5.4 remain unchecked pending their stricter full-matrix assertions.
+
 - [x] 6.1 与其他已确认的 r5 变更联合运行完整回归并构建 `2.0.1-r5` Release DLL；确认版本元数据和缓存版本标识来自同一候选构建，不单独发布本 change。
 - [x] 6.2 计算候选 DLL 与相关前端资源的 SHA-256，检查联合 diff 完整包含各 r5 变更且不包含凭据、签名或意外的工作区文件。（候选与扫描结果记录在 `artifacts/2.0.1-r5/VERIFICATION.md`。）
 - [x] 6.3 部署前备份 Emby 当前 DLL、插件配置和必要的前端脚本，记录绝对备份路径、原始 SHA-256、服务状态和可执行的回滚步骤。（最终快照与保留的 r4 回滚目标记录于 `artifacts/2.0.1-r5/VERIFICATION.md`。）
@@ -43,6 +50,13 @@
 - [ ] 7.5 检查 Emby 启动与请求日志无新增错误，并确认日志不含 AppId、Secret、签名、认证头或其他敏感信息；记录三路结果但不记录凭据。
 
 ## 8. 发布与回滚确认
+
+Verification note (2026-08-10): direct mode was already the saved mode. With
+ASS temporarily enabled, one representative Dandan tracked Episode completed
+1/1 successfully and produced non-empty XML and ASS; `finally` restored the
+saved direct/custom/official-selection semantics and disabled ASS. Task 7.4
+remains unchecked because its full automatic/manual and cross-route matrix was
+not repeated in this pass.
 
 - [x] 8.1 验证部署 DLL/前端资源 SHA-256 与候选产物一致，并在任何关键检查失败时恢复已记录的 DLL、配置与前端备份，重启 Emby 后用原始 SHA-256 确认回滚。（DLL 命中最终候选；CustomCssJS 目标内容精确匹配且插件本体未改；失败的首次配置保存已从快照恢复并复核原始 SHA-256。）
 - [ ] 8.2 在全部联合 r5 验证通过且获得用户确认后，编写中文 release 说明，说明官方/自定义 CORS 选择、迁移规则、UI 隐藏边界、三路回归结果及其他 r5 变更，不公开任何凭据。

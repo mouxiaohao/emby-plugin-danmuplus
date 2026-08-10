@@ -14,13 +14,15 @@ The design must remain compatible with Emby 4.9.x's dynamically rendered action 
 - Resolve an Episode through its Series/Season context, expose a suggested source Episode number, and permit a validated per-download override.
 - Initialize each manual-search input from one shared media-parent-name rule.
 - Reuse the proven provider-specific Movie resolution/download path behind an outcome-returning operation.
+- Resolve a narrow pool of close high-confidence results by configured site priority without changing score-ordered display.
 
 **Non-Goals:**
 
 - Supporting Folder, Collection, Person, or music item menus.
 - Changing Emby's action-sheet implementation or requiring a custom Emby web build.
 - Treating a Movie as a synthetic one-episode Season.
-- Altering automatic library-import behavior for movies or seasons.
+- Altering automatic library-import behavior for movies or seasons beyond the shared close-high-confidence site-priority rule.
+- Merging candidates across providers as if they were the same binding target.
 
 ## Decisions
 
@@ -65,6 +67,12 @@ The controller will validate and persist the selected binding, create a one-targ
 ### Persist only confirmed selections
 
 Preview and forced search are read-only. Automatic selection is persisted only after user confirmation; a manual choice is stored with the existing manual suffix convention. If candidate detail validation fails, no replacement binding is saved. Existing saved manual bindings remain authoritative until a new confirmed selection succeeds.
+
+### Resolve close high-confidence candidates by site priority
+
+The shared automatic selector will preserve the existing top-score floor and weak-runner shortcut, then apply three deterministic layers. If all competing candidates come from one site, its unique highest score wins at any score above the existing floor, while a site-local highest-score tie remains ambiguous. If the global highest score is exactly tied across sites, configured site priority resolves the tie at any qualifying score. Only when different sites have different but close scores does the selector build a pool from candidates whose rounded internal score is at least `0.9500` and no more than `0.0300` below the highest score, then choose the earliest site's unique site-local highest result. During the parent-title intermediate search round, cross-site priority resolution stays disabled so fallback keywords can add stronger evidence; same-site unique-highest selection does not depend on site priority and may stop early.
+
+Candidate display remains globally ordered by descending score; automatic selection therefore returns an explicit selected candidate rather than assuming the first displayed row won. This permits a configured higher-priority site's 0.98 result to win over a lower-priority site's 1.00 result without allowing a merely adequate result to displace a clearly stronger match. Cross-provider candidate clustering remains rejected because provider identifiers are actual binding targets and similar titles can represent remakes, split seasons, or different episode groupings.
 
 ## Risks / Trade-offs
 

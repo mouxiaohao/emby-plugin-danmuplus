@@ -3,7 +3,7 @@
 - [x] 1.1 Add additive Movie preview and generic tracked-target fields to the smart-match response models while retaining all existing Series/Season fields.
 - [x] 1.2 Implement movie-specific cross-provider search normalization, non-movie filtering, de-duplication, title/year scoring, deterministic ordering, diagnostics, and confidence gating.
 - [x] 1.3 Add Movie preview routing with saved-manual-binding precedence and forced keyword search that remains read-only until confirmation.
-- [x] 1.4 Add deterministic regression checks for descending Movie scores, ambiguous candidates, provider failure isolation, non-movie filtering, manual binding, and unchanged Season ranking.
+- [x] 1.4 Add deterministic regression checks for descending Movie scores, ambiguous cross-site candidates below the high-confidence pool, provider failure isolation, non-movie filtering, manual binding, unchanged Season ranking, and layered site-priority selection (including a 0.98 preferred-site winner over 1.00, pool boundaries, cross-site 0.90 ties, same-site 0.90/0.89 selection, same-site top-score ambiguity, and intermediate-search behavior).
 
 ## 2. Movie Binding and Tracked Download
 

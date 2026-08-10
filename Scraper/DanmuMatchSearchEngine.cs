@@ -79,9 +79,9 @@ namespace Emby.Plugin.Danmu.Scraper
                     seasonName,
                     expectedYear,
                     expectedEpisodes);
-                // A provider-priority tie may be auto-bound only after all fallback
-                // keywords have had a chance to add stronger season evidence.
-                if (DanmuMatchScorer.CanAutoSelect(currentCandidates, false))
+                // Close candidates may be resolved by site priority only after all
+                // fallback keywords have had a chance to add stronger season evidence.
+                if (DanmuMatchScorer.SelectAutoCandidate(currentCandidates, false) != null)
                 {
                     result.Candidates = currentCandidates;
                     return result;

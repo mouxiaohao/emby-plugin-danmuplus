@@ -738,7 +738,8 @@ namespace Emby.Plugin.Danmu
                                 null,
                                 _logger).ConfigureAwait(false);
 
-                            if (!DanmuMatchScorer.CanAutoSelect(search.Candidates))
+                            selectedCandidate = DanmuMatchScorer.SelectAutoCandidate(search.Candidates);
+                            if (selectedCandidate == null)
                             {
                                 var top = search.Candidates.FirstOrDefault();
                                 _logger.LogInformation(
@@ -751,7 +752,6 @@ namespace Emby.Plugin.Danmu
                                 continue;
                             }
 
-                            selectedCandidate = search.Candidates[0];
                             selectedScraper = scrapers.FirstOrDefault(x =>
                                 string.Equals(x.ProviderId, selectedCandidate.Site, StringComparison.OrdinalIgnoreCase));
                             selectedMediaId = selectedCandidate.Id;
