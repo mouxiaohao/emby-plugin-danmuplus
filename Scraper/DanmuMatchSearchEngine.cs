@@ -5,6 +5,7 @@ using System.Threading.Tasks;
 using Emby.Plugin.Danmu.Core.Extensions;
 using Emby.Plugin.Danmu.Model;
 using Emby.Plugin.Danmu.Scraper.Entity;
+using MediaBrowser.Controller.Entities.Movies;
 using MediaBrowser.Model.Logging;
 
 namespace Emby.Plugin.Danmu.Scraper
@@ -95,6 +96,68 @@ namespace Emby.Plugin.Danmu.Scraper
                 expectedYear,
                 expectedEpisodes);
 
+            return result;
+        }
+
+        public static async Task<DanmuMatchSearchResult> SearchMovieAsync(
+            IEnumerable<AbstractScraper> scraperSource,
+            Movie movie,
+            string keywordOverride,
+            ILogger logger)
+        {
+            var result = new DanmuMatchSearchResult();
+            var scrapers = (scraperSource ?? Enumerable.Empty<AbstractScraper>()).ToList();
+            var movieName = string.IsNullOrWhiteSpace(keywordOverride) ? movie?.Name : keywordOverride.Trim();
+            var sources = new Dictionary<string, ScraperSearchInfo>(StringComparer.OrdinalIgnoreCase);
+
+            for (var sourceOrder = 0; sourceOrder < scrapers.Count; sourceOrder++)
+            {
+                var scraper = scrapers[sourceOrder];
+                try
+                {
+                    // Search(BaseItem) lets every provider apply its existing Movie-specific filtering.
+                    var searchItem = new Movie
+                    {
+                        Name = movieName ?? string.Empty,
+                        ProductionYear = movie?.ProductionYear,
+                    };
+                    var searchResults = await scraper.Search(searchItem).ConfigureAwait(false);
+                    foreach (var searchInfo in searchResults ?? new List<ScraperSearchInfo>())
+                    {
+                        if (searchInfo == null || string.IsNullOrWhiteSpace(searchInfo.Id) ||
+                            string.IsNullOrWhiteSpace(searchInfo.Name) ||
+                            DanmuMatchScorer.IsIdentifiableNonMovie(searchInfo.Category))
+                        {
+                            continue;
+                        }
+
+                        sources[BuildKey(scraper.ProviderId, searchInfo.Id)] = searchInfo;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    result.SearchErrors.Add(scraper.ProviderName + "：搜索失败");
+                    logger?.LogError(ex, "[{0}] 电影智能匹配搜索失败: movie={1}", scraper.Name, movieName);
+                }
+            }
+
+            var candidates = new List<DanmuMatchCandidate>();
+            for (var sourceOrder = 0; sourceOrder < scrapers.Count; sourceOrder++)
+            {
+                var scraper = scrapers[sourceOrder];
+                var prefix = scraper.ProviderId + "\u001f";
+                candidates.AddRange(sources
+                    .Where(x => x.Key.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                    .Select(x => DanmuMatchScorer.ScoreMovie(
+                        x.Value,
+                        scraper.ProviderId,
+                        scraper.ProviderName,
+                        sourceOrder,
+                        movieName,
+                        movie?.ProductionYear)));
+            }
+
+            result.Candidates = OrderCandidates(candidates.Where(x => x.Score > 0));
             return result;
         }
 

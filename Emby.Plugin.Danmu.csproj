@@ -3,8 +3,8 @@
         <TargetFramework>netstandard2.0</TargetFramework>
         <Description>弹幕插件</Description>
         <AssemblyVersion>2.0.1.0</AssemblyVersion>
-        <FileVersion>2.0.1.1</FileVersion>
-        <InformationalVersion>2.0.1-r1</InformationalVersion>
+        <FileVersion>2.0.1.2</FileVersion>
+        <InformationalVersion>2.0.1-r2</InformationalVersion>
         <PackageTags>emby;plugin;pms;media;server;</PackageTags>
         <LangVersion>8.0</LangVersion>
     </PropertyGroup>

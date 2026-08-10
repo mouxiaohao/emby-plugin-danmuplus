@@ -78,6 +78,9 @@ namespace Emby.Plugin.Danmu.Core.Controllers
 
         [DataMember(Name="seasonYear")]
         public int? SeasonYear { get; set; }
+
+        [DataMember(Name="sourceEpisodeNumber")]
+        public int? SourceEpisodeNumber { get; set; }
     }
 
     public class DanmuController : BaseApiService
@@ -421,8 +424,33 @@ namespace Emby.Plugin.Danmu.Core.Controllers
             {
                 ItemId = item.Id.ToString(),
                 ItemName = item.Name ?? string.Empty,
-                ItemType = item is Series ? "Series" : item is Season ? "Season" : item.GetType().Name,
+                ItemType = item is Series ? "Series" : item is Season ? "Season" :
+                    item is Episode ? "Episode" : item is Movie ? "Movie" : item.GetType().Name,
             };
+
+            if (item is Movie movie)
+            {
+                result.Target = await GetMovieMatchPreview(
+                    movie,
+                    request.Keyword,
+                    request.Force || !string.IsNullOrWhiteSpace(request.Keyword)).ConfigureAwait(false);
+                result.CanStart = result.Target.AutoSelected;
+                result.Status = result.Target.Status;
+                result.Message = result.Target.Message;
+                return result;
+            }
+
+            if (item is Episode episode)
+            {
+                result.Target = await GetEpisodeMatchPreview(
+                    episode,
+                    request.Keyword,
+                    request.Force || !string.IsNullOrWhiteSpace(request.Keyword)).ConfigureAwait(false);
+                result.CanStart = result.Target.AutoSelected;
+                result.Status = result.Target.Status;
+                result.Message = result.Target.Message;
+                return result;
+            }
 
             var seasons = new List<Season>();
             if (item is Season season)
@@ -483,6 +511,171 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                     result.Status = result.Seasons.Any(x => x.Status == "ambiguous") ? "ambiguous" : "no_match";
                     result.Message = result.Seasons.FirstOrDefault()?.Message ?? "没有可用的匹配结果";
                 }
+            }
+
+            return result;
+        }
+
+        private async Task<DanmuItemMatchResult> GetMovieMatchPreview(
+            Movie movie,
+            string keywordOverride,
+            bool forceSearch)
+        {
+            var latest = _libraryManager.GetItemById(movie.Id) as Movie ?? movie;
+            var result = new DanmuItemMatchResult
+            {
+                ItemId = latest.Id.ToString(),
+                ItemName = latest.Name ?? string.Empty,
+                ItemType = "Movie",
+                ParentName = latest.Name ?? string.Empty,
+                Year = latest.ProductionYear,
+                Keyword = string.IsNullOrWhiteSpace(keywordOverride) ? latest.Name ?? string.Empty : keywordOverride,
+            };
+            var scrapers = _scraperManager.All();
+            if (!forceSearch && latest.ProviderIds != null)
+            {
+                foreach (var scraper in scrapers)
+                {
+                    if (!latest.ProviderIds.TryGetValue(scraper.ProviderId + "Manual", out var manualId) ||
+                        string.IsNullOrWhiteSpace(manualId))
+                    {
+                        continue;
+                    }
+
+                    result.Status = "bound";
+                    result.Message = "使用已经保存的电影手动匹配";
+                    result.AutoSelected = true;
+                    result.SelectedId = manualId;
+                    result.SelectedSite = scraper.ProviderId;
+                    result.SelectedSiteName = scraper.ProviderName;
+                    result.Candidates.Add(new DanmuMatchCandidate
+                    {
+                        Id = manualId,
+                        Site = scraper.ProviderId,
+                        SiteName = scraper.ProviderName,
+                        SourceOrder = scraper.DefaultOrder,
+                        Name = "已手动绑定的电影",
+                        Score = 1,
+                        ManualBound = true,
+                        Reason = "使用已保存的手动绑定",
+                    });
+                    return result;
+                }
+            }
+
+            var search = await DanmuMatchSearchEngine.SearchMovieAsync(
+                scrapers,
+                latest,
+                keywordOverride,
+                _logger).ConfigureAwait(false);
+            result.Candidates = search.Candidates;
+            result.SearchErrors = search.SearchErrors;
+            var selected = DanmuMatchScorer.CanAutoSelect(result.Candidates)
+                ? result.Candidates[0]
+                : null;
+            if (selected != null)
+            {
+                result.Status = "matched";
+                result.Message = "已根据电影名和年份选出高置信度结果";
+                result.AutoSelected = true;
+                result.SelectedId = selected.Id;
+                result.SelectedSite = selected.Site;
+                result.SelectedSiteName = selected.SiteName;
+            }
+            else if (result.Candidates.Count == 0)
+            {
+                result.Status = "no_match";
+                result.Message = result.SearchErrors.Count > 0
+                    ? "没有搜索到电影候选，且部分网站搜索失败"
+                    : "没有搜索到电影候选，可更换关键词重试";
+            }
+            else
+            {
+                result.Status = result.Candidates[0].Score >= 0.60 ? "ambiguous" : "no_match";
+                result.Message = result.Status == "ambiguous"
+                    ? "存在多个接近的电影结果，需要手动选择"
+                    : "电影自动评分不足，需要手动选择或更换关键词";
+            }
+
+            return result;
+        }
+
+        private async Task<DanmuItemMatchResult> GetEpisodeMatchPreview(
+            Episode episode,
+            string keywordOverride,
+            bool forceSearch)
+        {
+            var latest = _libraryManager.GetItemById(episode.Id) as Episode ?? episode;
+            var season = latest.GetParent() as Season;
+            var series = season?.GetParent() as Series;
+            var result = new DanmuItemMatchResult
+            {
+                ItemId = latest.Id.ToString(),
+                ItemName = latest.Name ?? string.Empty,
+                ItemType = "Episode",
+                ParentName = series?.Name ?? string.Empty,
+                SeriesId = series?.Id.ToString() ?? string.Empty,
+                SeasonId = season?.Id.ToString() ?? string.Empty,
+                SeasonName = season?.Name ?? string.Empty,
+                EpisodeNumber = latest.IndexNumber,
+                Year = latest.ProductionYear ?? season?.ProductionYear,
+                Keyword = string.IsNullOrWhiteSpace(keywordOverride) ? series?.Name ?? string.Empty : keywordOverride,
+            };
+            if (season == null)
+            {
+                result.Status = "unsupported";
+                result.Message = "找不到本集所属季度";
+                return result;
+            }
+
+            var seasonMatch = await GetSeasonMatchPreview(season, keywordOverride, forceSearch).ConfigureAwait(false);
+            result.Candidates = seasonMatch.Candidates;
+            result.SearchErrors = seasonMatch.SearchErrors;
+            foreach (var candidate in result.Candidates)
+            {
+                var scraper = _scraperManager.All().FirstOrDefault(x =>
+                    string.Equals(x.ProviderId, candidate.Site, StringComparison.OrdinalIgnoreCase));
+                if (scraper == null)
+                {
+                    continue;
+                }
+
+                try
+                {
+                    var media = await scraper.GetMedia(season, candidate.Id).ConfigureAwait(false);
+                    candidate.SuggestedEpisodeNumber = DanmuEpisodeMatchHelper.SuggestSourceEpisodeNumber(
+                        latest.IndexNumber,
+                        media?.Episodes.Count ?? 0);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "[{0}] 解析单集候选失败: episode={1}, candidate={2}",
+                        scraper.Name, latest.Name, candidate.Id);
+                }
+            }
+
+            var selected = result.Candidates.FirstOrDefault(x =>
+                string.Equals(x.Id, seasonMatch.SelectedId, StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(x.Site, seasonMatch.SelectedSite, StringComparison.OrdinalIgnoreCase) &&
+                x.SuggestedEpisodeNumber.HasValue);
+            if (selected != null)
+            {
+                result.Status = seasonMatch.Status;
+                result.Message = "已匹配本集候选和来源集数";
+                result.AutoSelected = true;
+                result.SelectedId = selected.Id;
+                result.SelectedSite = selected.Site;
+                result.SelectedSiteName = selected.SiteName;
+            }
+            else if (result.Candidates.Count == 0)
+            {
+                result.Status = "no_match";
+                result.Message = seasonMatch.Message;
+            }
+            else
+            {
+                result.Status = "ambiguous";
+                result.Message = "请选择候选并确认来源集数";
             }
 
             return result;
@@ -741,6 +934,12 @@ namespace Emby.Plugin.Danmu.Core.Controllers
 
         private async Task<DanmuBindResult> BindMatch(DanmuParams request)
         {
+            var directItem = string.IsNullOrWhiteSpace(request.Id) ? null : _libraryManager.GetItemById(request.Id);
+            if (directItem is Movie movie)
+            {
+                return await BindMovieMatch(movie, request).ConfigureAwait(false);
+            }
+
             var result = new DanmuBindResult
             {
                 SeasonId = request.Id ?? string.Empty,
@@ -798,8 +997,62 @@ namespace Emby.Plugin.Danmu.Core.Controllers
             }
         }
 
+        private async Task<DanmuBindResult> BindMovieMatch(Movie movie, DanmuParams request)
+        {
+            var result = new DanmuBindResult
+            {
+                ItemId = movie.Id.ToString(),
+                ItemType = "Movie",
+                Site = request.Site ?? string.Empty,
+                CandidateId = request.CandidateId ?? string.Empty,
+                Manual = request.Manual,
+            };
+            var scraper = _scraperManager.All().FirstOrDefault(x =>
+                string.Equals(x.ProviderId, request.Site, StringComparison.OrdinalIgnoreCase));
+            if (scraper == null || string.IsNullOrWhiteSpace(request.CandidateId))
+            {
+                result.Message = "弹幕网站或候选 ID 无效";
+                return result;
+            }
+
+            try
+            {
+                var media = await scraper.GetMedia(movie, request.CandidateId).ConfigureAwait(false);
+                if (media == null)
+                {
+                    result.Message = "电影候选已失效或无法读取";
+                    return result;
+                }
+
+                var providerValue = string.IsNullOrWhiteSpace(media.Id) ? request.CandidateId : media.Id;
+                await _libraryManagerEventsHelper.SaveProviderId(
+                    movie, scraper.ProviderId, providerValue, request.Manual).ConfigureAwait(false);
+                result.Success = true;
+                result.CandidateId = providerValue;
+                result.Message = "电影匹配已保存";
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "[{0}] 绑定电影候选失败: movie={1}, candidate={2}",
+                    scraper.Name, movie.Name, request.CandidateId);
+                result.Message = "绑定失败：" + ex.Message;
+            }
+
+            return result;
+        }
+
         private async Task<DanmuDownloadTaskResult> StartTrackedDownload(DanmuParams request)
         {
+            var directItem = string.IsNullOrWhiteSpace(request.Id) ? null : _libraryManager.GetItemById(request.Id);
+            if (directItem is Movie movie)
+            {
+                return await StartTrackedMovieDownload(movie, request).ConfigureAwait(false);
+            }
+            if (directItem is Episode episode)
+            {
+                return await StartTrackedSingleEpisodeDownload(episode, request).ConfigureAwait(false);
+            }
+
             var failed = new DanmuDownloadTaskResult
             {
                 SeasonId = request.Id ?? string.Empty,
@@ -1012,6 +1265,279 @@ namespace Emby.Plugin.Danmu.Core.Controllers
             return Snapshot(task);
         }
 
+        private async Task<DanmuDownloadTaskResult> StartTrackedMovieDownload(Movie movie, DanmuParams request)
+        {
+            var failed = FailedTarget(movie, request, "Movie");
+            var scraper = _scraperManager.All().FirstOrDefault(x =>
+                string.Equals(x.ProviderId, request.Site, StringComparison.OrdinalIgnoreCase));
+            if (scraper == null || string.IsNullOrWhiteSpace(request.CandidateId))
+            {
+                failed.Message = "弹幕网站或电影候选 ID 无效";
+                return failed;
+            }
+
+            ScraperMedia media;
+            try
+            {
+                media = await scraper.GetMedia(movie, request.CandidateId).ConfigureAwait(false);
+                if (media == null)
+                {
+                    failed.SiteName = scraper.ProviderName;
+                    failed.Message = "电影候选已失效或无法读取";
+                    return failed;
+                }
+
+                var providerValue = string.IsNullOrWhiteSpace(media.Id) ? request.CandidateId : media.Id;
+                await _libraryManagerEventsHelper.SaveProviderId(
+                    movie, scraper.ProviderId, providerValue, request.Manual).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "[{0}] 创建电影下载任务失败: movie={1}", scraper.Name, movie.Name);
+                failed.SiteName = scraper.ProviderName;
+                failed.Message = "准备电影下载失败：" + ex.Message;
+                return failed;
+            }
+
+            var task = CreateSingleTargetTask(movie, request, scraper, "Movie", null);
+            task.CandidateId = string.IsNullOrWhiteSpace(media.Id) ? request.CandidateId : media.Id;
+            return QueueSingleTargetDownload(
+                task,
+                () => _libraryManagerEventsHelper.DownloadMovieForProgress(
+                    movie, media, scraper, request.ForceRefresh),
+                request.ForceRefresh ? "正在强制刷新电影弹幕" : "正在下载电影弹幕");
+        }
+
+        private async Task<DanmuDownloadTaskResult> StartTrackedSingleEpisodeDownload(
+            Episode episode,
+            DanmuParams request)
+        {
+            var failed = FailedTarget(episode, request, "Episode");
+            var season = episode.GetParent() as Season;
+            if (season == null)
+            {
+                failed.Message = "找不到本集所属季度";
+                return failed;
+            }
+
+            var sourceEpisodeNumber = request.SourceEpisodeNumber ?? 0;
+            if (sourceEpisodeNumber <= 0)
+            {
+                failed.Message = "来源集数必须是正整数";
+                return failed;
+            }
+
+            var scraper = _scraperManager.All().FirstOrDefault(x =>
+                string.Equals(x.ProviderId, request.Site, StringComparison.OrdinalIgnoreCase));
+            if (scraper == null || string.IsNullOrWhiteSpace(request.CandidateId))
+            {
+                failed.Message = "弹幕网站或季度候选 ID 无效";
+                return failed;
+            }
+
+            ScraperMedia media;
+            try
+            {
+                media = await scraper.GetMedia(season, request.CandidateId).ConfigureAwait(false);
+                if (media == null || !DanmuEpisodeMatchHelper.IsValidSourceEpisodeNumber(
+                        sourceEpisodeNumber, media.Episodes.Count) ||
+                    string.IsNullOrWhiteSpace(media.Episodes[sourceEpisodeNumber - 1].CommentId))
+                {
+                    failed.SiteName = scraper.ProviderName;
+                    failed.Message = $"候选中不存在可下载的第 {sourceEpisodeNumber} 集";
+                    return failed;
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "[{0}] 创建单集下载任务失败: episode={1}", scraper.Name, episode.Name);
+                failed.SiteName = scraper.ProviderName;
+                failed.Message = "准备本集下载失败：" + ex.Message;
+                return failed;
+            }
+
+            var task = CreateSingleTargetTask(episode, request, scraper, "Episode", sourceEpisodeNumber);
+            task.SeasonId = season.Id.ToString();
+            task.SeasonName = season.Name ?? string.Empty;
+            task.SeasonNumber = season.IndexNumber;
+            task.SeasonYear = season.ProductionYear;
+            task.SeriesId = season.GetParent()?.Id.ToString() ?? string.Empty;
+            task.CandidateId = string.IsNullOrWhiteSpace(media.Id) ? request.CandidateId : media.Id;
+            return QueueSingleTargetDownload(
+                task,
+                () => _libraryManagerEventsHelper.DownloadEpisodeForProgress(
+                    episode, media, scraper, request.ForceRefresh, sourceEpisodeNumber),
+                request.ForceRefresh
+                    ? $"正在强制刷新本地第 {episode.IndexNumber ?? 0} 集（来源第 {sourceEpisodeNumber} 集）"
+                    : $"正在下载本地第 {episode.IndexNumber ?? 0} 集（来源第 {sourceEpisodeNumber} 集）");
+        }
+
+        private DanmuDownloadTaskResult FailedTarget(BaseItem item, DanmuParams request, string itemType)
+        {
+            return new DanmuDownloadTaskResult
+            {
+                TargetItemId = item.Id.ToString(),
+                TargetItemName = item.Name ?? string.Empty,
+                TargetItemType = itemType,
+                Site = request.Site ?? string.Empty,
+                CandidateId = request.CandidateId ?? string.Empty,
+                Status = "failed",
+            };
+        }
+
+        private DanmuDownloadTaskResult CreateSingleTargetTask(
+            BaseItem item,
+            DanmuParams request,
+            AbstractScraper scraper,
+            string itemType,
+            int? sourceEpisodeNumber)
+        {
+            return new DanmuDownloadTaskResult
+            {
+                TaskId = Guid.NewGuid().ToString("N"),
+                TargetItemId = item.Id.ToString(),
+                TargetItemName = item.Name ?? string.Empty,
+                TargetItemType = itemType,
+                SourceEpisodeNumber = sourceEpisodeNumber,
+                Site = scraper.ProviderId,
+                SiteName = scraper.ProviderName,
+                CandidateId = request.CandidateId ?? string.Empty,
+                Status = "queued",
+                Message = "等待后台下载队列",
+                Total = 1,
+                ForceRefresh = request.ForceRefresh,
+                Episodes = new List<DanmuEpisodeDownloadResult>
+                {
+                    new DanmuEpisodeDownloadResult
+                    {
+                        ItemId = item.Id.ToString(),
+                        EpisodeNumber = item.IndexNumber,
+                        SourceEpisodeNumber = sourceEpisodeNumber,
+                        EpisodeName = item.Name ?? string.Empty,
+                        Status = "pending",
+                        Message = "等待下载",
+                    },
+                },
+            };
+        }
+
+        private DanmuDownloadTaskResult QueueSingleTargetDownload(
+            DanmuDownloadTaskResult task,
+            Func<Task<DanmuEpisodeDownloadOutcome>> download,
+            string runningMessage)
+        {
+            DownloadTasks[task.TaskId] = task;
+            var cancellation = new CancellationTokenSource();
+            DownloadTaskCancellations[task.TaskId] = cancellation;
+            _ = Task.Run(async () =>
+            {
+                var enteredQueue = false;
+                var itemResult = task.Episodes[0];
+                try
+                {
+                    await TrackedDownloadQueue.WaitAsync(cancellation.Token).ConfigureAwait(false);
+                    enteredQueue = true;
+                    cancellation.Token.ThrowIfCancellationRequested();
+                    lock (task)
+                    {
+                        task.Status = "running";
+                        task.Message = runningMessage;
+                        itemResult.Status = "running";
+                        itemResult.Message = "正在下载";
+                    }
+
+                    var outcome = await AwaitSingleTargetDownload(
+                        download(), cancellation.Token, task).ConfigureAwait(false);
+                    lock (task)
+                    {
+                        itemResult.Status = outcome.Status;
+                        itemResult.Message = outcome.Message;
+                        UpdateCompletedTaskSummary(task);
+                        task.Message = $"处理完成：成功 {task.Succeeded}，部分缺失 {task.Partial}，重复已跳过 {task.Skipped}，失败 {task.Failed}";
+                    }
+                }
+                catch (OperationCanceledException)
+                {
+                    lock (task)
+                    {
+                        itemResult.Status = "cancelled";
+                        itemResult.Message = "已强制停止";
+                        task.Status = "cancelled";
+                        task.Message = "下载已停止";
+                        RecalculateTaskCounts(task);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "[{0}] 单目标下载失败: type={1}, item={2}",
+                        task.SiteName, task.TargetItemType, task.TargetItemName);
+                    lock (task)
+                    {
+                        itemResult.Status = "failed";
+                        itemResult.Message = ex.Message;
+                        UpdateCompletedTaskSummary(task);
+                        task.Message = "下载失败：" + ex.Message;
+                    }
+                }
+                finally
+                {
+                    if (enteredQueue)
+                    {
+                        TrackedDownloadQueue.Release();
+                    }
+                    if (DownloadTaskCancellations.TryRemove(task.TaskId, out var removedCancellation))
+                    {
+                        removedCancellation.Dispose();
+                    }
+                }
+            });
+
+            return Snapshot(task);
+        }
+
+        private async Task<DanmuEpisodeDownloadOutcome> AwaitSingleTargetDownload(
+            Task<DanmuEpisodeDownloadOutcome> providerTask,
+            CancellationToken cancellationToken,
+            DanmuDownloadTaskResult task)
+        {
+            var timeoutTask = Task.Delay(TimeSpan.FromSeconds(180));
+            var cancellationSignal = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            Task completedTask;
+            using (cancellationToken.Register(() => cancellationSignal.TrySetResult(true)))
+            {
+                completedTask = await Task.WhenAny(providerTask, timeoutTask, cancellationSignal.Task).ConfigureAwait(false);
+            }
+            if (completedTask == providerTask)
+            {
+                return await providerTask.ConfigureAwait(false);
+            }
+
+            // Observe a provider request that ignores cancellation and finishes after the
+            // tracked task has already reached its immutable terminal state.
+            _ = providerTask.ContinueWith(
+                lateTask => _logger.LogError(
+                    lateTask.Exception,
+                    "[{0}] 单目标下载在任务结束后返回异常: type={1}, item={2}",
+                    task.SiteName,
+                    task.TargetItemType,
+                    task.TargetItemName),
+                CancellationToken.None,
+                TaskContinuationOptions.OnlyOnFaulted,
+                TaskScheduler.Default);
+
+            cancellationToken.ThrowIfCancellationRequested();
+            _logger.Warn(
+                "[{0}] 单目标下载超过 180 秒，已自动跳过: type={1}, item={2}",
+                task.SiteName,
+                task.TargetItemType,
+                task.TargetItemName);
+            return new DanmuEpisodeDownloadOutcome
+            {
+                Status = "skipped",
+                Message = "下载超过 180 秒，已自动跳过",
+            };
+        }
+
         private async Task<DanmuDownloadTaskResult> RetryTrackedEpisode(DanmuParams request)
         {
             if (string.IsNullOrWhiteSpace(request.TaskId) ||
@@ -1045,6 +1571,11 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                     task.Message = "该季度已有下载或重试正在执行，请稍后再试";
                 }
                 return Snapshot(task);
+            }
+
+            if (string.Equals(task.TargetItemType, "Movie", StringComparison.OrdinalIgnoreCase))
+            {
+                return await RetryTrackedMovie(request, task, episodeResult).ConfigureAwait(false);
             }
 
             var season = ResolveSeason(new DanmuParams
@@ -1135,11 +1666,15 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                         task.Message = $"正在重试第 {episode.IndexNumber ?? 0} 集：{episode.Name}";
                     }
 
-                    var outcome = await _libraryManagerEventsHelper.DownloadEpisodeForProgress(
-                        episode,
-                        media,
-                        scraper,
-                        true).ConfigureAwait(false);
+                    var outcome = await AwaitSingleTargetDownload(
+                        _libraryManagerEventsHelper.DownloadEpisodeForProgress(
+                            episode,
+                            media,
+                            scraper,
+                            true,
+                            task.SourceEpisodeNumber),
+                        cancellation.Token,
+                        task).ConfigureAwait(false);
                     lock (task)
                     {
                         episodeResult.Status = outcome.Status;
@@ -1182,6 +1717,70 @@ namespace Emby.Plugin.Danmu.Core.Controllers
             });
 
             return Snapshot(task);
+        }
+
+        private async Task<DanmuDownloadTaskResult> RetryTrackedMovie(
+            DanmuParams request,
+            DanmuDownloadTaskResult task,
+            DanmuEpisodeDownloadResult movieResult)
+        {
+            if (!Guid.TryParse(request.Id, out var movieId) ||
+                !(_libraryManager.GetItemById(movieId) is Movie movie))
+            {
+                lock (task)
+                {
+                    task.Message = "重试失败：找不到电影媒体项";
+                }
+                return Snapshot(task);
+            }
+
+            var scraper = _scraperManager.All().FirstOrDefault(x =>
+                string.Equals(x.ProviderId, task.Site, StringComparison.OrdinalIgnoreCase));
+            var candidateId = string.IsNullOrWhiteSpace(task.CandidateId)
+                ? movie.GetProviderId(task.Site)
+                : task.CandidateId;
+            if (scraper == null || string.IsNullOrWhiteSpace(candidateId))
+            {
+                lock (task)
+                {
+                    task.Message = "重试失败：原弹幕来源或电影绑定已经失效";
+                }
+                return Snapshot(task);
+            }
+
+            ScraperMedia media;
+            try
+            {
+                media = await scraper.GetMedia(movie, candidateId).ConfigureAwait(false);
+                if (media == null)
+                {
+                    throw new DanmuDownloadErrorException("弹幕来源无法读取电影信息");
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "[{0}] 准备电影重试失败: movie={1}", scraper.Name, movie.Name);
+                lock (task)
+                {
+                    task.Message = "重试准备失败：" + ex.Message;
+                }
+                return Snapshot(task);
+            }
+
+            lock (task)
+            {
+                movieResult.Status = "queued";
+                movieResult.Message = "等待重试";
+                task.Status = "queued";
+                task.Message = "电影已加入重试队列";
+                task.ForceRefresh = true;
+                RecalculateTaskCounts(task);
+            }
+
+            return QueueSingleTargetDownload(
+                task,
+                () => _libraryManagerEventsHelper.DownloadMovieForProgress(movie, media, scraper, true),
+                "正在强制重新下载电影弹幕");
         }
 
         private static void RecalculateTaskCounts(DanmuDownloadTaskResult task)
@@ -1268,6 +1867,10 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 return new DanmuDownloadTaskResult
                 {
                     TaskId = task.TaskId,
+                    TargetItemId = task.TargetItemId,
+                    TargetItemName = task.TargetItemName,
+                    TargetItemType = task.TargetItemType,
+                    SourceEpisodeNumber = task.SourceEpisodeNumber,
                     SeasonId = task.SeasonId,
                     SeriesId = task.SeriesId,
                     SeasonName = task.SeasonName,
@@ -1289,6 +1892,7 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                     {
                         ItemId = x.ItemId,
                         EpisodeNumber = x.EpisodeNumber,
+                        SourceEpisodeNumber = x.SourceEpisodeNumber,
                         EpisodeName = x.EpisodeName,
                         Status = x.Status,
                         Message = x.Message,

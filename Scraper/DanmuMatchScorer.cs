@@ -145,6 +145,61 @@ namespace Emby.Plugin.Danmu.Scraper
             };
         }
 
+        public static DanmuMatchCandidate ScoreMovie(
+            ScraperSearchInfo source,
+            string site,
+            string siteName,
+            int sourceOrder,
+            string movieName,
+            int? expectedYear)
+        {
+            var titleScore = SimilarityAgainstTitle(Normalize(movieName), Normalize(source.Name));
+            var yearScore = GetYearScore(expectedYear, source.Year);
+            var score = titleScore * 0.82 + yearScore * 0.18;
+            if (IsIdentifiableNonMovie(source.Category))
+            {
+                score = 0;
+            }
+
+            return new DanmuMatchCandidate
+            {
+                Id = source.Id ?? string.Empty,
+                Site = site ?? string.Empty,
+                SiteName = siteName ?? string.Empty,
+                SourceOrder = sourceOrder,
+                Name = source.Name ?? string.Empty,
+                Category = source.Category ?? string.Empty,
+                Year = source.Year,
+                EpisodeSize = source.EpisodeSize,
+                Score = Round(Clamp(score)),
+                TitleScore = Round(titleScore),
+                ParentTitleScore = Round(titleScore),
+                YearScore = Round(yearScore),
+                Reason = titleScore >= 0.95 && yearScore >= 0.95
+                    ? "电影名和年份吻合"
+                    : titleScore >= 0.95 ? "电影名吻合" : "需要人工确认",
+            };
+        }
+
+        public static bool IsIdentifiableNonMovie(string category)
+        {
+            var normalized = (category ?? string.Empty).Trim().ToLowerInvariant();
+            if (normalized.Length == 0)
+            {
+                return false;
+            }
+
+            if (normalized.Contains("电影") || normalized.Contains("movie") || normalized.Contains("film"))
+            {
+                return false;
+            }
+
+            return normalized.Contains("电视剧") || normalized.Contains("番剧") ||
+                   normalized.Contains("动漫") || normalized.Contains("动画") ||
+                   normalized.Contains("综艺") || normalized.Contains("season") ||
+                   normalized == "tv" || normalized.Contains("series") || normalized.Contains("anime");
+        }
+
         public static bool CanAutoSelect(IList<DanmuMatchCandidate> candidates, bool allowProviderPriorityTie = true)
         {
             if (candidates == null || candidates.Count == 0 || candidates[0].Score < 0.78)

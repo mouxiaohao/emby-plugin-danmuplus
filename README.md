@@ -1,6 +1,6 @@
 # emby-plugin-danmuplus
 
-Emby 弹幕插件增强版，参考 [fengymi/emby-plugin-danmu](https://github.com/fengymi/emby-plugin-danmu) 开发。项目从原移植版继续演进，当前版本为 **2.0.1-r1**。
+Emby 弹幕插件增强版，参考 [fengymi/emby-plugin-danmu](https://github.com/fengymi/emby-plugin-danmu) 开发。项目从原移植版继续演进，当前版本为 **2.0.1-r2**。
 
 已验证的服务器环境：Synology 套件版 Emby **4.9.3.0**。其他 Emby 版本可能需要调整配置页或前端菜单兼容代码。
 
@@ -13,7 +13,15 @@ Emby 弹幕插件增强版，参考 [fengymi/emby-plugin-danmu](https://github.c
 - 腾讯分段重试、连接重置重试，以及已完成分段合并为部分弹幕 XML。
 - 七天 XML 重复跳过；支持强制刷新、后台队列、强制停止、单集重试和流式进度。
 - STRM、115 挂载等普通 Emby 媒体库场景兼容。
-- 配置页面版本显示为 `2.0.1-r1`。
+- 配置页面版本显示为 `2.0.1-r2`。
+
+## 2.0.1-r2 补丁
+
+- 智能匹配菜单扩展到电视剧、季度、单集和电影的详情页、卡片与 Android 长按菜单。
+- 新增电影跨站候选、评分、绑定、跟踪下载、超时和重试流程。
+- 单集匹配支持候选来源集数建议与手动覆盖，且不会改写整季绑定。
+- 单目标进度使用与季度一致的明细行、状态、停止和重试体验。
+- 修复爱奇艺电影 `qips://tvid` 解析，并限制腾讯弹幕请求超时。
 
 ## 2.0.1-r1 补丁
 
@@ -88,9 +96,15 @@ Emby 弹幕插件增强版，参考 [fengymi/emby-plugin-danmu](https://github.c
 2. 在 CustomCssJS 中新建一个自定义 JavaScript 条目。
 3. 将 `Frontend/DanmuSmartMatch.CustomCssJS.js` 的完整内容粘贴到脚本框。
 4. 将脚本状态设为启用，并刷新 Emby 网页端。
-5. 在电视剧或季度详情页的“更多”菜单中使用“智能匹配并下载整部剧弹幕”或“智能匹配并下载本季弹幕”。
+5. 在以下详情页或封面/列表卡片右侧的三点“更多”菜单中使用智能匹配：
+   - 电视剧：整部剧详情页以及电视、动画媒体库中的剧集卡片；
+   - 季度：季度详情页以及剧集详情页中的季度卡片；
+   - 单集：单集详情页以及季度详情页中的单集行或卡片；
+   - 电影：电影详情页以及电影卡片。
 
-脚本提供季度候选确认、手动绑定、强制刷新、后台下载、强制停止、流式进度和单集重试。它只调用插件已有的 `plugin/danmu` API，不包含账号、密码或 API Secret。
+对应菜单项分别为“智能匹配并下载整部剧弹幕”“智能匹配并下载本季弹幕”“智能匹配并下载本集弹幕”和“智能匹配并下载电影弹幕”。单集界面会同时标出本地集数和候选来源集数；选中候选后，可在右侧的“来源集数”输入框中修改实际下载的集数，修改只影响当前本地单集，不会覆盖整季绑定。
+
+所有手动搜索框都会预填媒体父名：电影使用电影名，整剧、季度和单集使用所属剧集名，仍可直接修改后重新搜索。脚本还提供候选确认、手动绑定、强制刷新、后台下载、强制停止、流式进度和季度任务的单集重试。它只调用插件已有的 `plugin/danmu` API，不包含账号、密码或 API Secret。
 
 Android 原生客户端不加载 Emby 网页端的 CustomCssJS，因此不会显示该菜单。需要在 Android 客户端使用时，请先参考 [Emby.CustomCssJS 仓库](https://github.com/Shurelol/Emby.CustomCssJS) 的 Android 客户端修改方法，将对应脚本注入支持集成到客户端；未修改客户端时请使用 Emby Web 客户端或浏览器操作。
 
@@ -102,15 +116,16 @@ Android 原生客户端不加载 Emby 网页端的 CustomCssJS，因此不会显
 dotnet restore Emby.Plugin.Danmu.sln
 dotnet build Emby.Plugin.Danmu.sln -c Release
 dotnet run --project RegressionTests/Emby.Plugin.Danmu.RegressionTests.csproj -c Release
+node Frontend/DanmuSmartMatch.RegressionTests.js
 ```
 
 构建产物为 `bin/Release/netstandard2.0/Emby.Plugin.Danmu.dll`。
 
 ## 下载 DLL
 
-仓库中的 [`dist/Emby.Plugin.Danmu.dll`](dist/Emby.Plugin.Danmu.dll) 是 2.0.1-r1 Release 构建，可直接下载后复制到 Emby 插件目录。该 DLL 保留程序集文件名 `Emby.Plugin.Danmu.dll`，以兼容已有插件配置。
+仓库中的 [`dist/Emby.Plugin.Danmu.dll`](dist/Emby.Plugin.Danmu.dll) 是 2.0.1-r2 Release 构建，可直接下载后复制到 Emby 插件目录。该 DLL 保留程序集文件名 `Emby.Plugin.Danmu.dll`，以兼容已有插件配置。
 
-SHA-256：`636675edb9eb1f97f7b215f6b14adf495e62e966a60b4a2f226e0241d425a0f2`
+SHA-256：`03b12feba16985f7f84780b766ff463af7bdc3befc5973f57b36e9fe4b27b8e1`
 
 ## 按版本下载
 
@@ -118,6 +133,7 @@ SHA-256：`636675edb9eb1f97f7b215f6b14adf495e62e966a60b4a2f226e0241d425a0f2`
 
 - [`releases/v2.0.0/`](releases/v2.0.0/)
 - [`releases/v2.0.1-r1/`](releases/v2.0.1-r1/)
+- [`releases/v2.0.1-r2/`](releases/v2.0.1-r2/)
 
 后续版本不会覆盖旧版本文件，便于按 Emby 环境回退或比较。
 

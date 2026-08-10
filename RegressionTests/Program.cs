@@ -15,6 +15,10 @@ using Emby.Plugin.Danmu.Scraper.Bilibili.Entity;
 using Emby.Plugin.Danmu.Scraper.Dandan;
 using Emby.Plugin.Danmu.Scraper.Entity;
 using Emby.Plugin.Danmu.Scraper.Iqiyi;
+using MediaBrowser.Controller.Entities;
+using MediaBrowser.Controller.Entities.Movies;
+using MediaBrowser.Model.Logging;
+using System.Threading.Tasks;
 using BilibiliMedia = Emby.Plugin.Danmu.Scraper.Bilibili.Entity.Media;
 
 namespace Emby.Plugin.Danmu.RegressionTests
@@ -29,6 +33,10 @@ namespace Emby.Plugin.Danmu.RegressionTests
             OmitsMalformedRecords();
             OrdersAndSelectsCrossProviderTies();
             PreservesSameProviderTieAmbiguity();
+            ScoresMoviesAndFiltersTelevisionCandidates();
+            IsolatesMovieProviderFailures();
+            ResolvesMovieProviderLookupIdentifiers();
+            MapsEpisodeSourceNumbersSafely();
             DeserializesAndNormalizesBilibiliEpisodes();
             ClassifiesOnlyExplicitNonMainTitles();
             ResolvesDandanCredentialsByCompletePair();
@@ -38,6 +46,7 @@ namespace Emby.Plugin.Danmu.RegressionTests
             RemovesInvalidXmlCharacterReferences();
             PreservesCharacterReferenceTextInsideCdata();
             RecoversIqiyiXmlContainingInvalidCharacters();
+            ParsesIqiyiQipsMovieTvId();
             RecoversBilibiliXmlContainingInvalidCharacters();
             SanitizesFinalXmlForEveryProviderAndAcceptsSmallValidOutput();
             Console.WriteLine("Danmu plugin regression checks passed.");
@@ -124,6 +133,78 @@ namespace Emby.Plugin.Danmu.RegressionTests
                 Candidate("c", "LaterSite", 1, 0.90)
             });
             Assert(!DanmuMatchScorer.CanAutoSelect(candidates), "multiple top candidates within the highest-priority provider must remain ambiguous");
+        }
+
+        private static void ScoresMoviesAndFiltersTelevisionCandidates()
+        {
+            var exact = DanmuMatchScorer.ScoreMovie(
+                new ScraperSearchInfo { Id = "movie", Name = "流浪地球", Category = "电影", Year = 2019 },
+                "MovieSite", "Movie Site", 1, "流浪地球", 2019);
+            var weaker = DanmuMatchScorer.ScoreMovie(
+                new ScraperSearchInfo { Id = "weaker", Name = "流浪地球2", Category = "电影", Year = 2023 },
+                "MovieSite", "Movie Site", 1, "流浪地球", 2019);
+            var television = DanmuMatchScorer.ScoreMovie(
+                new ScraperSearchInfo { Id = "tv", Name = "流浪地球", Category = "电视剧", Year = 2019 },
+                "MovieSite", "Movie Site", 1, "流浪地球", 2019);
+            var ordered = DanmuMatchSearchEngine.OrderCandidates(new[] { weaker, exact });
+
+            Assert(ordered[0].Id == "movie" && ordered[0].Score >= ordered[1].Score,
+                "movie candidates should be ordered by deterministic descending score");
+            Assert(DanmuMatchScorer.CanAutoSelect(ordered), "a distinct exact movie match should auto-select");
+            Assert(television.Score == 0 && DanmuMatchScorer.IsIdentifiableNonMovie("番剧"),
+                "identifiable television candidates must be rejected for movies");
+        }
+
+        private static void IsolatesMovieProviderFailures()
+        {
+            var search = DanmuMatchSearchEngine.SearchMovieAsync(
+                    new AbstractScraper[]
+                    {
+                        new FakeScraper("WorkingID", new List<ScraperSearchInfo>
+                        {
+                            new ScraperSearchInfo { Id = "1", Name = "测试电影", Category = "电影", Year = 2024 },
+                        }),
+                        new FakeScraper("DandanID", null, true),
+                    },
+                    new Movie { Name = "测试电影", ProductionYear = 2024 },
+                    string.Empty,
+                    null)
+                .GetAwaiter().GetResult();
+
+            Assert(search.Candidates.Count == 1, "successful movie providers should still contribute candidates");
+            Assert(search.SearchErrors.Count == 1 && search.SearchErrors[0].Contains("DandanID"),
+                "a failed Dandan proxy provider should be isolated in diagnostics");
+        }
+
+        private static void ResolvesMovieProviderLookupIdentifiers()
+        {
+            var media = new ScraperMedia
+            {
+                Id = "season-or-album-id",
+                CommentId = "bilibili-ep-id",
+                Episodes = new List<ScraperEpisode>
+                {
+                    new ScraperEpisode { CommentId = "fallback-episode-id" },
+                },
+            };
+            Assert(DanmuMovieMatchHelper.ResolveEpisodeLookupId("BilibiliID", media) == "bilibili-ep-id",
+                "Bilibili movies should resolve through their ep id");
+            Assert(DanmuMovieMatchHelper.ResolveEpisodeLookupId("IqiyiID", media) == "season-or-album-id",
+                "non-Bilibili movies should resolve through their provider media id");
+            media.CommentId = string.Empty;
+            Assert(DanmuMovieMatchHelper.ResolveEpisodeLookupId("BilibiliID", media) == "fallback-episode-id",
+                "Bilibili movie lookup should fall back to the first episode comment id");
+        }
+
+        private static void MapsEpisodeSourceNumbersSafely()
+        {
+            Assert(DanmuEpisodeMatchHelper.SuggestSourceEpisodeNumber(3, 12) == 3,
+                "the local episode number should be the default source suggestion when available");
+            Assert(!DanmuEpisodeMatchHelper.SuggestSourceEpisodeNumber(13, 12).HasValue,
+                "a source suggestion outside the candidate episode list should be omitted");
+            Assert(!DanmuEpisodeMatchHelper.IsValidSourceEpisodeNumber(0, 12) &&
+                   DanmuEpisodeMatchHelper.IsValidSourceEpisodeNumber(12, 12),
+                "source episode validation should accept only positive existing numbers");
         }
 
         private static void DeserializesAndNormalizesBilibiliEpisodes()
@@ -345,6 +426,48 @@ namespace Emby.Plugin.Danmu.RegressionTests
                 SourceOrder = sourceOrder,
                 Score = score
             };
+        }
+
+        private static void ParsesIqiyiQipsMovieTvId()
+        {
+            var method = typeof(IqiyiApi).GetMethod(
+                "ExtractTvId",
+                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+            var parsed = (long)method.Invoke(null, new object[]
+            {
+                "qips://tvid=243967400;vid=eb299ecdb0803913ed5139ee05062de9;"
+            });
+            Assert(parsed == 243967400, "iQIYI qips movie URLs should expose their TvId");
+        }
+
+        private sealed class FakeScraper : AbstractScraper
+        {
+            private readonly string _providerId;
+            private readonly List<ScraperSearchInfo> _results;
+            private readonly bool _throws;
+
+            public FakeScraper(string providerId, List<ScraperSearchInfo> results, bool throws = false)
+                : base(null)
+            {
+                _providerId = providerId;
+                _results = results;
+                _throws = throws;
+            }
+
+            public override string Name => _providerId;
+            public override string ProviderName => _providerId;
+            public override string ProviderId => _providerId;
+
+            public override Task<List<ScraperSearchInfo>> Search(BaseItem item)
+            {
+                if (_throws) throw new InvalidOperationException("provider failed");
+                return Task.FromResult(_results ?? new List<ScraperSearchInfo>());
+            }
+
+            public override Task<string> SearchMediaId(BaseItem item) => Task.FromResult(string.Empty);
+            public override Task<ScraperMedia> GetMedia(BaseItem item, string id) => Task.FromResult<ScraperMedia>(null);
+            public override Task<ScraperEpisode> GetMediaEpisode(BaseItem item, string id) => Task.FromResult<ScraperEpisode>(null);
+            public override Task<ScraperDanmaku> GetDanmuContent(BaseItem item, string commentId) => Task.FromResult<ScraperDanmaku>(null);
         }
 
         private static void Assert(bool condition, string message)

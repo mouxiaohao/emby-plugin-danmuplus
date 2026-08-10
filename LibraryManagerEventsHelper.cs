@@ -423,7 +423,7 @@ namespace Emby.Plugin.Danmu
                                 if (!string.IsNullOrEmpty(idToUseForDanmakuProcessing)) {
                                     // 对于B站, DownloadDanmu 会调用 GetMediaEpisode 并传入此 ep_id 来获取 aid,cid
                                     // 对于爱奇艺, DownloadDanmu 会直接使用此 TvId
-                                    await this.DownloadDanmu(scraper, item, idToUseForDanmakuProcessing).ConfigureAwait(false);
+                                    await this.DownloadMovieForProgress(item, media, scraper, false).ConfigureAwait(false);
                                 } else {
                                     _logger.Warn($"[{scraper.Name}]为电影 '{item.Name}' (SearchMediaId: {mediaId}) 未能从GetMedia结果中确定有效的ID (media.CommentId 或首个 episode 的 CommentId) 用于下载弹幕. media.Id='{media.Id}', media.CommentId='{media.CommentId}'");
                                 }
@@ -501,7 +501,7 @@ namespace Emby.Plugin.Danmu
                                         {
                                             // episodeDetails.CommentId is the FINAL ID for danmaku (e.g. "aid,cid" for Bili, "TvId" for Iqiyi)
                                             _logger.LogInformation("[{0}]为电影 '{1}' (ProviderVal: {2}, ID for GetMediaEpisode: {3}) 成功获取剧集信息，最终CommentId for Danmaku: {4}", scraper.Name, item.Name, providerVal, idForGetMediaEpisode, episodeDetails.CommentId);
-                                            await this.DownloadDanmu(scraper, item, episodeDetails.CommentId).ConfigureAwait(false);
+                                            await this.DownloadMovieForProgress(item, media, scraper, false).ConfigureAwait(false);
                                         } else
                                         {
                                              _logger.Warn($"[{scraper.Name}]为电影 '{item.Name}' (ProviderVal: {providerVal}, ID for GetMediaEpisode: {idForGetMediaEpisode}) 调用 GetMediaEpisode 返回了 null 或无效CommentId。");
@@ -573,7 +573,7 @@ namespace Emby.Plugin.Danmu
                         if (episode != null)
                         {
                             // 下载弹幕xml文件
-                            await this.DownloadDanmu(scraper, item, episode.CommentId, true).ConfigureAwait(false);
+                            await this.DownloadMovieForProgress((Movie)item, media, scraper, true).ConfigureAwait(false);
                         }
                         else
                         {
@@ -1153,14 +1153,15 @@ namespace Emby.Plugin.Danmu
             Episode episode,
             ScraperMedia media,
             AbstractScraper scraper,
-            bool forceRefresh)
+            bool forceRefresh,
+            int? sourceEpisodeNumber = null)
         {
             if (episode == null || media == null || scraper == null)
             {
                 throw new ArgumentException("剧集、媒体信息或弹幕来源无效");
             }
 
-            var indexNumber = episode.IndexNumber ?? 0;
+            var indexNumber = sourceEpisodeNumber ?? episode.IndexNumber ?? 0;
             if (indexNumber < 1 || indexNumber > media.Episodes.Count)
             {
                 throw new DanmuDownloadErrorException(
@@ -1178,9 +1179,77 @@ namespace Emby.Plugin.Danmu
                 throw new DanmuDownloadErrorException("弹幕来源没有返回该集的弹幕 ID");
             }
 
+            return await DownloadItemForProgress(
+                episode,
+                mediaEpisode,
+                scraper,
+                forceRefresh).ConfigureAwait(false);
+        }
+
+        public async Task<DanmuEpisodeDownloadOutcome> DownloadMovieForProgress(
+            Movie movie,
+            ScraperMedia media,
+            AbstractScraper scraper,
+            bool forceRefresh)
+        {
+            if (movie == null || media == null || scraper == null)
+            {
+                throw new ArgumentException("电影、媒体信息或弹幕来源无效");
+            }
+
+            var lookupId = DanmuMovieMatchHelper.ResolveEpisodeLookupId(scraper.ProviderId, media);
+
+            ScraperEpisode mediaEpisode = null;
+            if (!string.IsNullOrWhiteSpace(lookupId))
+            {
+                try
+                {
+                    mediaEpisode = await scraper.GetMediaEpisode(movie, lookupId).ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    if (string.IsNullOrWhiteSpace(media.CommentId))
+                    {
+                        throw;
+                    }
+
+                    _logger.Warn(
+                        $"[{scraper.Name}] 电影 '{movie.Name}' 查询播放条目失败，改用搜索结果中的弹幕 ID：{ex.Message}");
+                }
+            }
+            if ((mediaEpisode == null || string.IsNullOrWhiteSpace(mediaEpisode.CommentId)) &&
+                !string.IsNullOrWhiteSpace(media.CommentId))
+            {
+                mediaEpisode = new ScraperEpisode
+                {
+                    Id = string.IsNullOrWhiteSpace(media.Id) ? lookupId : media.Id,
+                    CommentId = media.CommentId,
+                    Title = movie.Name ?? string.Empty,
+                };
+            }
+            if (mediaEpisode == null || string.IsNullOrWhiteSpace(mediaEpisode.CommentId))
+            {
+                throw new DanmuDownloadErrorException("弹幕来源没有返回电影弹幕 ID");
+            }
+
+            return await DownloadItemForProgress(
+                movie,
+                mediaEpisode,
+                scraper,
+                forceRefresh,
+                false).ConfigureAwait(false);
+        }
+
+        private async Task<DanmuEpisodeDownloadOutcome> DownloadItemForProgress(
+            BaseItem item,
+            ScraperEpisode mediaEpisode,
+            AbstractScraper scraper,
+            bool forceRefresh,
+            bool saveItemProviderId = true)
+        {
             var danmuPath = Path.Combine(
-                episode.ContainingFolderPath,
-                episode.GetDanmuXmlPath(scraper.ProviderId));
+                item.ContainingFolderPath,
+                item.GetDanmuXmlPath(scraper.ProviderId));
             if (!forceRefresh && _fileSystem.Exists(danmuPath))
             {
                 var lastWriteTime = _fileSystem.GetLastWriteTime(danmuPath);
@@ -1190,8 +1259,8 @@ namespace Emby.Plugin.Danmu
                     _logger.LogInformation(
                         "[{0}]弹幕文件在7天内更新过，重复已跳过：{1}.{2}，文件={3}",
                         scraper.Name,
-                        episode.IndexNumber,
-                        episode.Name,
+                        item.IndexNumber,
+                        item.Name,
                         danmuPath);
                     return new DanmuEpisodeDownloadOutcome
                     {
@@ -1201,7 +1270,7 @@ namespace Emby.Plugin.Danmu
                 }
             }
 
-            var danmaku = await scraper.GetDanmuContent(episode, mediaEpisode.CommentId).ConfigureAwait(false);
+            var danmaku = await scraper.GetDanmuContent(item, mediaEpisode.CommentId).ConfigureAwait(false);
             if (danmaku == null)
             {
                 throw new DanmuDownloadErrorException("弹幕来源返回空内容");
@@ -1217,10 +1286,10 @@ namespace Emby.Plugin.Danmu
             // 部分分段失败时，仍保存其他已下载分段组成的合法 XML；不再以文件大小判断内容是否有效。
             var bytes = DanmuDownloadContent.Serialize(danmaku);
 
-            await SaveDanmu(scraper, episode, bytes).ConfigureAwait(false);
-            if (!string.IsNullOrWhiteSpace(mediaEpisode.Id))
+            await SaveDanmu(scraper, item, bytes).ConfigureAwait(false);
+            if (saveItemProviderId && !string.IsNullOrWhiteSpace(mediaEpisode.Id))
             {
-                await ForceSaveProviderId(episode, scraper.ProviderId, mediaEpisode.Id).ConfigureAwait(false);
+                await ForceSaveProviderId(item, scraper.ProviderId, mediaEpisode.Id).ConfigureAwait(false);
             }
             if (isPartial)
             {

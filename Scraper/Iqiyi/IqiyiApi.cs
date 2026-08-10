@@ -501,7 +501,9 @@ namespace Emby.Plugin.Danmu.Scraper.Iqiyi
             return 0;
         }
 
-        var match = Regex.Match(playUrl, @"(?:^|[;?&])tvid=(\d+)", RegexOptions.IgnoreCase);
+        // Newer TV-client responses use qips://tvid=... rather than a query string.
+        // Matching the key itself is safe here because only its numeric value is accepted.
+        var match = Regex.Match(playUrl, @"(?:^|[^a-z0-9_])tvid=(\d+)", RegexOptions.IgnoreCase);
         return match.Success && long.TryParse(match.Groups[1].Value, out var tvId) ? tvId : 0;
     }
 
