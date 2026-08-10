@@ -18,7 +18,7 @@ and deterministic descending-score selection.
 
 ## Live proxy and Emby checks
 
-- Worker prefix: `https://ddplay-api.7o7o.cc/cors/`.
+- Worker prefix: supplied out of band for deployment verification and intentionally omitted from repository artifacts.
 - A read-only proxied `/api/v2/search/anime` request for `葬送的芙莉莲`
   returned HTTP 200 and Dandanplay anime ID `17617`.
 - Emby 4.9.3.0 loaded the legacy configuration as custom mode, then persisted

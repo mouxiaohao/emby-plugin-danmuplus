@@ -10,7 +10,7 @@ DanmuPlus currently requires every Emby server to store Dandanplay credentials a
 - In proxy mode, rely on the Worker to supply Dandanplay application authentication; do not require, expose, or send the Emby server's local API ID/secret.
 - In custom API mode, preserve the current direct official API calls, credential precedence, and local `X-AppId`/`X-Signature`/`X-Timestamp` generation.
 - Validate missing or malformed proxy configuration deterministically, preserve provider-level failure isolation, and keep inactive-mode settings when administrators switch modes.
-- Add deterministic regressions plus a minimal live smoke check using `https://ddplay-api.7o7o.cc/cors/`.
+- Add deterministic regressions plus a minimal live smoke check using an administrator-supplied Worker URL that is never embedded as a plugin default.
 - Non-goals: deploy or manage a Cloudflare Worker; introduce Dandanplay `/match` or file-hash recognition; replace local title/year/episode scoring; add the dd-danmaku browser overlay; change other danmu providers.
 
 ## Capabilities
