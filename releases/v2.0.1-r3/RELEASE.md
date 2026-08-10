@@ -34,7 +34,7 @@ this r3 Dandanplay proxy release in order.
 - Configuration JavaScript syntax check: passed.
 - Both r2 and r3 OpenSpec changes passed strict validation.
 - Live proxy search, automatic/manual matching, and Episode download for
-  `葬送的芙莉莲` succeeded through `https://ddplay-api.7o7o.cc/cors/`.
+  `葬送的芙莉莲` succeeded through the configured test Worker.
 - Emby persisted `DandanID`; logs contained no Dandan errors or local
   credential/signature material.
 

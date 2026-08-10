@@ -1,6 +1,6 @@
 # emby-plugin-danmuplus
 
-Emby 弹幕插件增强版，参考 [fengymi/emby-plugin-danmu](https://github.com/fengymi/emby-plugin-danmu) 开发。项目从原移植版继续演进，当前版本为 **2.0.1-r3**。
+Emby 弹幕插件增强版，参考 [fengymi/emby-plugin-danmu](https://github.com/fengymi/emby-plugin-danmu) 开发。项目从原移植版继续演进，当前版本为 **2.0.1-r4**。
 
 已验证的服务器环境：Synology 套件版 Emby **4.9.3.0**。其他 Emby 版本可能需要调整配置页或前端菜单兼容代码。
 
@@ -13,7 +13,13 @@ Emby 弹幕插件增强版，参考 [fengymi/emby-plugin-danmu](https://github.c
 - 腾讯分段重试、连接重置重试，以及已完成分段合并为部分弹幕 XML。
 - 七天 XML 重复跳过；支持强制刷新、后台队列、强制停止、单集重试和流式进度。
 - STRM、115 挂载等普通 Emby 媒体库场景兼容。
-- 配置页面版本显示为 `2.0.1-r3`。
+- 配置页面版本显示为 `2.0.1-r4`。
+
+## 2.0.1-r4 补丁
+
+- 移除仓库、发行说明和源码包中的共享测试 Worker 地址，仅保留通用格式示例。
+- 明确代理地址必须由管理员自行部署或选择，并且插件不会预填或内置任何公共代理地址。
+- 增加配置页面回归检查，确保新安装默认使用自定义 API 模式且代理 CORS 地址为空。
 
 ## 2.0.1-r3 补丁
 
@@ -88,7 +94,7 @@ Emby 弹幕插件增强版，参考 [fengymi/emby-plugin-danmu](https://github.c
 
 Emby 管理后台的“弹幕配置”提供两种互斥的调用方式：
 
-- **使用代理 API**：填写兼容 `cf_worker.js` 的代理 CORS 前缀，例如 `https://ddplay-api.7o7o.cc/cors/`。插件把现有弹弹 Play 官方 API 地址附加到该前缀后转发，由 Cloudflare Worker 等代理完成应用签名；此模式不需要在 Emby 中填写 API ID 或 API Secret。
+- **使用代理 API**：填写你自己部署或信任的、兼容 `cf_worker.js` 的代理 CORS 前缀，例如 `https://worker.example/cors/`。插件把现有弹弹 Play 官方 API 地址附加到该前缀后转发，由 Cloudflare Worker 等代理完成应用签名；此模式不需要在 Emby 中填写 API ID 或 API Secret。插件不会预填或内置任何公共代理地址。
 - **使用自定义 API**：插件继续直连弹弹 Play 官方 API，并使用本地配置的 API ID 与 API Secret 生成签名。插件不会自动申请、生成或附带第三方凭据，请先从弹弹 Play 开放平台取得属于自己的凭据，并同时填写两项。
 
 切换模式只改变请求的传输和签名位置，不会清空另一种模式已保存的值。两种模式均继续通过标题、年份、季度和集数进行服务端搜索与评分，使用相同的弹幕下载流程；不会计算视频 Hash，也不会调用弹弹 Play `/match` 接口。
@@ -137,7 +143,7 @@ node Frontend/DanmuSmartMatch.RegressionTests.js
 
 ## 下载 DLL
 
-仓库中的 [`dist/Emby.Plugin.Danmu.dll`](dist/Emby.Plugin.Danmu.dll) 是 2.0.1-r3 Release 构建，可直接下载后复制到 Emby 插件目录。该 DLL 保留程序集文件名 `Emby.Plugin.Danmu.dll`，以兼容已有插件配置。
+仓库中的 [`dist/Emby.Plugin.Danmu.dll`](dist/Emby.Plugin.Danmu.dll) 是 2.0.1-r4 Release 构建，可直接下载后复制到 Emby 插件目录。该 DLL 保留程序集文件名 `Emby.Plugin.Danmu.dll`，以兼容已有插件配置。
 
 SHA-256：`353e615afce38a5c7f6f7027af9092a7af94d04423e740faa527ca94366261a0`
 
@@ -148,7 +154,7 @@ SHA-256：`353e615afce38a5c7f6f7027af9092a7af94d04423e740faa527ca94366261a0`
 - [`releases/v2.0.0/`](releases/v2.0.0/)
 - [`releases/v2.0.1-r1/`](releases/v2.0.1-r1/)
 - [`releases/v2.0.1-r2/`](releases/v2.0.1-r2/)
-- [`releases/v2.0.1-r3/`](releases/v2.0.1-r3/)
+- [`releases/v2.0.1-r4/`](releases/v2.0.1-r4/)
 
 后续版本不会覆盖旧版本文件，便于按 Emby 环境回退或比较。
 

@@ -19,7 +19,7 @@
 
 ## 4. Live Proxy and Emby Regression
 
-- [x] 4.1 Perform a minimal read-only smoke request through `https://ddplay-api.7o7o.cc/cors/` and confirm the existing official search endpoint and JSON response work without local credentials.
+- [x] 4.1 Perform a minimal read-only smoke request through an administrator-supplied Worker URL and confirm the existing official search endpoint and JSON response work without local credentials; do not record the concrete URL as a plugin default or public test fixture.
 - [x] 4.2 Back up the deployed Synology DLL and Emby plugin configuration before replacement, then deploy the verified Release artifact and restart Emby.
 - [ ] 4.3 Verify the existing saved configuration loads in custom mode and a direct signed Dandanplay search still works.
 - [x] 4.4 Select proxy mode in the Emby settings page, save the supplied CORS prefix, restart, and exercise manual plus automatic title-based preview/download on representative series, season, episode, and movie items.

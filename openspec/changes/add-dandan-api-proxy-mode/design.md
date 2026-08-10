@@ -53,7 +53,7 @@ Only request routing changes. `Dandan` continues searching `/search/anime`, load
 
 Expose or isolate pure routing decisions sufficiently for the existing regression executable to assert default migration, prefix normalization, exact endpoint/query preservation, direct-mode signing eligibility, proxy-mode credential independence, and sanitized invalid-input failures. Embedded-page assertions cover radio controls plus load/save round-tripping.
 
-After deterministic checks pass, issue only a small number of read-only requests through `https://ddplay-api.7o7o.cc/cors/`. The live Synology/Emby verification uses credentials supplied out of band and never records them in source, artifacts, command output, or diagnostics.
+After deterministic checks pass, issue only a small number of read-only requests through an administrator-supplied Worker URL. The live Synology/Emby verification uses the URL and credentials supplied out of band and never records them in source, artifacts, command output, or diagnostics. No public proxy URL is embedded or prefilled by the plugin.
 
 ## Risks / Trade-offs
 

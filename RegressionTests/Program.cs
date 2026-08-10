@@ -404,6 +404,8 @@ namespace Emby.Plugin.Danmu.RegressionTests
             Assert(html.Contains("id=\"ProxyCorsUrl\"") && html.Contains("id=\"DandanProxyApiSettings\"") &&
                    html.Contains("id=\"DandanCustomApiSettings\""),
                 "settings page should contain the proxy CORS input and both conditional sections");
+            Assert(!html.Contains("id=\"ProxyCorsUrl\" value="),
+                "settings page must not prefill or embed a proxy CORS URL");
             Assert(script.Contains("config.Dandan.ApiId") && script.Contains("config.Dandan.ApiSecret"),
                 "settings script should load both Dandan credential values");
             Assert(script.Contains("config.Dandan.UseProxyApi === true") &&
