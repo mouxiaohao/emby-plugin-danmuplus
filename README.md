@@ -1,6 +1,6 @@
 # emby-plugin-danmuplus
 
-Emby 弹幕插件增强版，参考 [fengymi/emby-plugin-danmu](https://github.com/fengymi/emby-plugin-danmu) 开发。项目从原移植版继续演进，当前版本为 **2.0.1-r4**。
+Emby 弹幕插件增强版，参考 [fengymi/emby-plugin-danmu](https://github.com/fengymi/emby-plugin-danmu) 开发。项目从原移植版继续演进，当前版本为 **2.0.1-r5**。
 
 已验证的服务器环境：Synology 套件版 Emby **4.9.3.0**。其他 Emby 版本可能需要调整配置页或前端菜单兼容代码。
 
@@ -13,7 +13,15 @@ Emby 弹幕插件增强版，参考 [fengymi/emby-plugin-danmu](https://github.c
 - 腾讯分段重试、连接重置重试，以及已完成分段合并为部分弹幕 XML。
 - 七天 XML 重复跳过；支持强制刷新、后台队列、强制停止、单集重试和流式进度。
 - STRM、115 挂载等普通 Emby 媒体库场景兼容。
-- 配置页面版本显示为 `2.0.1-r4`。
+- 配置页面版本显示为 `2.0.1-r5`，页面与控制器使用同一构建版本标识，升级后无需清理旧页面缓存。
+
+## 2.0.1-r5 补丁
+
+- 弹弹 Play 代理模式新增“使用插件官方 CORS 地址”选项。新安装或没有既有自定义地址的旧配置默认选择官方 CORS；已有自定义地址的旧配置继续沿用原地址。
+- 官方 CORS 地址只保存在插件后端路由中，不写入配置 XML、配置 API 响应或配置页；切换官方/自定义来源不会清空用户保存的自定义地址。
+- 官方 CORS、自定义 CORS 与官方直连继续共用原有 `search`、`bangumi`、`comment`、标题/年份/季度/集数评分及 XML/ASS 流程，不引入媒体 Hash 或 `/match`。
+- 智能匹配菜单覆盖电视剧、季度、单集和电影；单集可单独调整来源集数，电影/单集任务具备超时、停止、重试和明细进度。
+- 高置信度候选处于接近分数区间时按站点优先级选择，同时保持候选列表按分数降序展示；同一优先站点的最高分并列仍要求手动确认。
 
 ## 2.0.1-r4 补丁
 
@@ -92,12 +100,13 @@ Emby 弹幕插件增强版，参考 [fengymi/emby-plugin-danmu](https://github.c
 
 ## 弹弹 Play API 配置
 
-Emby 管理后台的“弹幕配置”提供两种互斥的调用方式：
+Emby 管理后台的“弹幕配置”提供以下调用方式：
 
-- **使用代理 API**：填写你自己部署或信任的、兼容 `cf_worker.js` 的代理 CORS 前缀，例如 `https://worker.example/cors/`。插件把现有弹弹 Play 官方 API 地址附加到该前缀后转发，由 Cloudflare Worker 等代理完成应用签名；此模式不需要在 Emby 中填写 API ID 或 API Secret。插件不会预填或内置任何公共代理地址。
-- **使用自定义 API**：插件继续直连弹弹 Play 官方 API，并使用本地配置的 API ID 与 API Secret 生成签名。插件不会自动申请、生成或附带第三方凭据，请先从弹弹 Play 开放平台取得属于自己的凭据，并同时填写两项。
+- **代理 API + 插件官方 CORS**：勾选“使用插件官方 CORS 地址”，由插件后端选择维护的代理并由代理完成应用签名；配置页和配置数据不会展示或保存该地址。
+- **代理 API + 自定义 CORS**：取消勾选官方 CORS 后，填写你自己部署或信任的、兼容 `cf_worker.js` 的代理 CORS 前缀，例如 `https://worker.example/cors/`。代理完成应用签名，此模式不需要在 Emby 中填写 API ID 或 API Secret。
+- **官方直连**：关闭代理 API，插件直连弹弹 Play 官方 API，并使用本地配置的 API ID 与 API Secret 生成签名。插件不会自动申请、生成或附带第三方凭据，请先从弹弹 Play 开放平台取得属于自己的凭据，并同时填写两项。
 
-切换模式只改变请求的传输和签名位置，不会清空另一种模式已保存的值。两种模式均继续通过标题、年份、季度和集数进行服务端搜索与评分，使用相同的弹幕下载流程；不会计算视频 Hash，也不会调用弹弹 Play `/match` 接口。
+切换模式只改变请求的传输和签名位置，不会清空另一种模式已保存的值。三种路由均继续通过标题、年份、季度和集数进行服务端搜索与评分，使用相同的弹幕下载流程；不会计算视频 Hash，也不会调用弹弹 Play `/match` 接口。
 
 使用自定义 API 时还需注意：
 
@@ -143,9 +152,9 @@ node Frontend/DanmuSmartMatch.RegressionTests.js
 
 ## 下载 DLL
 
-仓库中的 [`dist/Emby.Plugin.Danmu.dll`](dist/Emby.Plugin.Danmu.dll) 是 2.0.1-r4 Release 构建，可直接下载后复制到 Emby 插件目录。该 DLL 保留程序集文件名 `Emby.Plugin.Danmu.dll`，以兼容已有插件配置。
+仓库中的 [`dist/Emby.Plugin.Danmu.dll`](dist/Emby.Plugin.Danmu.dll) 是 2.0.1-r5 Release 构建，可直接下载后复制到 Emby 插件目录。该 DLL 保留程序集文件名 `Emby.Plugin.Danmu.dll`，以兼容已有插件配置。
 
-SHA-256：`353e615afce38a5c7f6f7027af9092a7af94d04423e740faa527ca94366261a0`
+SHA-256：`b08186751fec8a407d1ae8ffb9975a952f25f8960b7143dc0bf159d012515d5c`
 
 ## 按版本下载
 
@@ -154,7 +163,9 @@ SHA-256：`353e615afce38a5c7f6f7027af9092a7af94d04423e740faa527ca94366261a0`
 - [`releases/v2.0.0/`](releases/v2.0.0/)
 - [`releases/v2.0.1-r1/`](releases/v2.0.1-r1/)
 - [`releases/v2.0.1-r2/`](releases/v2.0.1-r2/)
+- [`releases/v2.0.1-r3/`](releases/v2.0.1-r3/)
 - [`releases/v2.0.1-r4/`](releases/v2.0.1-r4/)
+- [`releases/v2.0.1-r5/`](releases/v2.0.1-r5/)
 
 后续版本不会覆盖旧版本文件，便于按 Emby 环境回退或比较。
 
