@@ -1,5 +1,5 @@
 define(
-    ['baseView', 'emby-scroller', 'emby-select', 'emby-input', 'emby-checkbox', 'emby-button'],
+    ['baseView', 'emby-scroller', 'emby-select', 'emby-input', 'emby-checkbox', 'emby-button', 'emby-radio'],
     function (BaseView) {
         'use strict';
 
@@ -10,6 +10,12 @@ define(
                 pluginUniqueId: 'cdbc5624-3ea9-4f9d-94cc-3be20585f926'
             };
             var container = document.querySelector('#TemplateConfigPage');
+
+            function updateDandanApiModeVisibility() {
+                var useProxyApi = container.querySelector('#UseProxyApi').checked;
+                container.querySelector('#DandanProxyApiSettings').classList.toggle('hide', !useProxyApi);
+                container.querySelector('#DandanCustomApiSettings').classList.toggle('hide', useProxyApi);
+            }
 
             function setButtons() {
                 // 设置所有按钮的可见性为 'visible'
@@ -54,8 +60,12 @@ define(
 
                     container.querySelector('#WithRelatedDanmu').checked = config.Dandan.WithRelatedDanmu;
                     container.querySelector('#ChConvert').value = config.Dandan.ChConvert;
+                    container.querySelector('#UseProxyApi').checked = config.Dandan.UseProxyApi === true;
+                    container.querySelector('#UseCustomApi').checked = config.Dandan.UseProxyApi !== true;
+                    container.querySelector('#ProxyCorsUrl').value = config.Dandan.ProxyCorsUrl || '';
                     container.querySelector('#DandanApiId').value = config.Dandan.ApiId || '';
                     container.querySelector('#DandanApiSecret').value = config.Dandan.ApiSecret || '';
+                    updateDandanApiModeVisibility();
 
                     var scrapersElement = container.querySelector('#Scrapers');
                     scrapersElement.innerHTML = ''; // 清空旧内容
@@ -131,6 +141,8 @@ define(
             }
 
             container.addEventListener('viewshow', onLoad);
+            container.querySelector('#UseProxyApi').addEventListener('change', updateDandanApiModeVisibility);
+            container.querySelector('#UseCustomApi').addEventListener('change', updateDandanApiModeVisibility);
 
             container.querySelector('#TemplateConfigForm')
                 .addEventListener('submit', function (e) {
@@ -161,7 +173,9 @@ define(
 
                         config.Scrapers = scrapers;
 
-                        var dandan = {};
+                        var dandan = config.Dandan || {};
+                        dandan.UseProxyApi = container.querySelector('#UseProxyApi').checked;
+                        dandan.ProxyCorsUrl = container.querySelector('#ProxyCorsUrl').value.trim();
                         dandan.ApiId = container.querySelector('#DandanApiId').value.trim();
                         dandan.ApiSecret = container.querySelector('#DandanApiSecret').value.trim();
                         dandan.WithRelatedDanmu = container.querySelector('#WithRelatedDanmu').checked;

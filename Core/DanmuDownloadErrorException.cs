@@ -8,6 +8,10 @@ namespace Emby.Plugin.Danmu.Core
         {
         }
 
+        public DanmuDownloadErrorException(string message, Exception innerException) : base(message, innerException)
+        {
+        }
+
         /// <summary>
         /// Don't display call stack as it's irrelevant
         /// </summary>

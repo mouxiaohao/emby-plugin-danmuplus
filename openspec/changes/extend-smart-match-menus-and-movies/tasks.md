@@ -1,0 +1,53 @@
+## 1. Movie Match Contracts and Ranking
+
+- [x] 1.1 Add additive Movie preview and generic tracked-target fields to the smart-match response models while retaining all existing Series/Season fields.
+- [x] 1.2 Implement movie-specific cross-provider search normalization, non-movie filtering, de-duplication, title/year scoring, deterministic ordering, diagnostics, and confidence gating.
+- [x] 1.3 Add Movie preview routing with saved-manual-binding precedence and forced keyword search that remains read-only until confirmation.
+- [ ] 1.4 Add deterministic regression checks for descending Movie scores, ambiguous candidates, provider failure isolation, non-movie filtering, manual binding, and unchanged Season ranking.
+
+## 2. Movie Binding and Tracked Download
+
+- [x] 2.1 Extract an outcome-returning single-Movie provider download operation from queued Movie processing and route existing automatic Movie events through it without changing duplicate, partial XML, STRM, or provider-ID behavior.
+- [x] 2.2 Extend binding validation to accept Movie candidates, persist automatic versus manual provider identifiers correctly, and leave an existing binding intact when validation fails.
+- [x] 2.3 Create serialized, cancellable single-Movie tracked tasks with generic target identity and queued/running/success/skipped/partial/failed/cancelled snapshots.
+- [ ] 2.4 Add regression checks for Bilibili and non-Bilibili identifier routing, invalid candidate preparation, duplicate skip, forced refresh, cancellation, and Series/Season task compatibility.
+
+## 3. Frontend Menu Integration
+
+- [x] 3.1 Recognize detail-page and card overflow clicks, derive card or page item-id candidates, correlate them with the currently open action sheet, and invalidate stale asynchronous contexts.
+- [x] 3.2 Fetch the authoritative item and inject one correctly labelled action only for Series, Season, Episode, or Movie, including Series library cards, Season cards within Series details, and Episode card/detail menus.
+- [x] 3.3 Add Movie-specific dialog text, preview/candidate search, automatic/manual confirmation, tracked progress, cancellation, and completion rendering without routing Movie data through Season fields.
+- [x] 3.4 Add a shared manual-search default helper that uses the Movie title for Movie and the owning Series title for Series, Season, and Episode while preserving user edits in the active view.
+- [ ] 3.5 Bump the frontend installation flag and add deterministic DOM-level checks for repeated observer runs, two rapidly opened card menus, unresolved identity, unsupported item types, search defaults, and one workflow per click.
+
+## 4. Episode Match and Single-Episode Download
+
+- [x] 4.1 Extend preview contracts and routing for Episode identity, owning Series/Season context, local Episode number, and per-candidate suggested source Episode numbers.
+- [x] 4.2 Resolve candidate media Episodes and deterministically suggest the best source Episode number without changing the containing Season's binding.
+- [x] 4.3 Reuse the Season candidate-picker layout for Episode, show local and candidate source numbers, and render an editable source-number input only beside the selected candidate.
+- [x] 4.4 Validate the submitted source Episode as a positive integer that exists in freshly resolved candidate media, then run a cancellable tracked download for only the target local Episode.
+- [ ] 4.5 Add regressions for automatic suggestion, manual override, invalid/missing source Episodes, specials or numbering gaps, sibling isolation, cancellation, and existing Season binding preservation.
+
+## 5. Build, Documentation, and Live Verification
+
+- [x] 5.1 Update README installation and usage guidance for Series/Season/Episode card menus, Episode source-number override, search defaults, and Movie detail/card smart matching.
+- [x] 5.2 Run the regression executable and a Release build, and verify the packaged frontend asset and DLL are generated from the changed sources.
+- [x] 5.3 In Emby 4.9.x, verify a Series card menu in television and animation libraries, a Season card menu within a Series detail page, both Episode menu locations, and ensure unsupported card menus receive no action.
+- [ ] 5.4 Live-test Movie detail/card workflows and Episode detail/card workflows with representative Bilibili and non-Bilibili media, STRM media, ambiguous manual selection, edited source Episode number, saved binding, duplicate skip, force refresh, failure, and cancellation.
+- [x] 5.5 Verify Movie, whole-Series, Season, and Episode manual-search inputs start with their specified media parent names and submit user-edited text.
+- [ ] 5.6 Deploy the paired DLL and browser script to a test instance, refresh the web client, confirm existing Series/Season preview and retry behavior, and document rollback verification.
+
+## 6. Single-Target Reliability and Progress Parity
+
+- [x] 6.1 Reproduce or trace the iQIYI Movie failure and Tencent Movie hang, identify the provider-specific causes, and harden the affected paths without regressing Bilibili.
+- [x] 6.2 Add a 180-second Movie/Episode task deadline, cancellation race, immutable terminal result, and target-aware retry support for both Movie and Episode.
+- [x] 6.3 Replace the summary-only Movie/Episode progress view with the Season-style one-item detail view, including concrete status, diagnostic text, and retry.
+- [x] 6.4 Make force-stop immediately enable the dialog close control and apply one stable action-sheet insertion anchor order to Series, Season, Episode, and Movie.
+- [ ] 6.5 Add deterministic backend and frontend regressions for timeout, cancellation, late completion, Movie retry, Episode retry, close-after-stop, one-row rendering, and consistent menu ordering.
+- [ ] 6.6 Run strict OpenSpec validation, regression tests, and Release build; deploy a backed-up pair to Emby and live-verify iQIYI/Tencent failure handling, timeout/stop closing, retry, and existing Series/Season behavior.
+
+## 7. Android Long-Press Integration
+
+- [x] 7.1 Capture Android long-press media context from contextmenu/pointer/touch origins and bootstrap injection when an opened action sheet exposes its own media id without a prior desktop click.
+- [x] 7.2 Preserve authoritative target correlation for a long-pressed Season inside a Series detail page and reject stale, mismatched, or unsupported action sheets.
+- [x] 7.3 Bump the frontend installation flag, add deterministic long-press/action-sheet regressions, build, deploy with backup, and verify desktop menu injection remains functional.

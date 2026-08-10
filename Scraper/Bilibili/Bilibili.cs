@@ -590,10 +590,17 @@ namespace Emby.Plugin.Danmu.Scraper.Bilibili
             return null;
         }
 
-        private ScraperDanmaku ParseXml(string xml)
+        internal static ScraperDanmaku ParseXml(string xml)
         {
             var doc = new XmlDocument();
-            doc.LoadXml(xml);
+            try
+            {
+                doc.LoadXml(xml);
+            }
+            catch (XmlException)
+            {
+                doc.LoadXml(Xml10Sanitizer.SanitizeDocument(xml));
+            }
 
             var result = new ScraperDanmaku();
             var nodes = doc.GetElementsByTagName("d");

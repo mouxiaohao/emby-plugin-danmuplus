@@ -22,7 +22,7 @@ The system SHALL search the parent series title on every enabled danmu provider 
 - **THEN** the system MAY stop before unnecessary fallback search rounds without skipping any provider in the completed round
 
 ### Requirement: Provider-neutral global ranking
-The system SHALL merge and de-duplicate candidates from all searched providers and rank them by composite matching evidence, including title, parent title, season keyword, year, and episode count. Provider configuration priority MUST NOT affect candidate score, automatic selection, or displayed order.
+The system SHALL merge and de-duplicate candidates from all searched providers and rank them by composite matching evidence, including title, parent title, season keyword, year, and episode count. Provider configuration priority MUST NOT affect candidate score or the ordering of candidates with different final scores, but SHALL determine the displayed order of candidates whose final composite scores are exactly equal.
 
 #### Scenario: Better candidate is on a lower-priority provider
 - **WHEN** a lower-priority provider candidate has a higher composite score than every higher-priority provider candidate
@@ -33,18 +33,30 @@ The system SHALL merge and de-duplicate candidates from all searched providers a
 - **THEN** their scores SHALL be monotonically non-increasing in the returned list
 
 #### Scenario: Candidates have equal scores
-- **WHEN** two candidates have identical composite scoring fields
-- **THEN** the system SHALL apply deterministic provider-name, title, and identifier tie breakers that do not depend on configured provider order
+- **WHEN** two candidates have exactly equal final composite scores
+- **THEN** the candidate from the provider earlier in the current configured provider order SHALL appear first
+
+#### Scenario: Equal-score ordering supplies a provider winner
+- **WHEN** the highest final composite score is shared by candidates from different providers
+- **THEN** the candidate from the earliest configured provider SHALL be evaluated first for priority-based automatic selection
 
 ### Requirement: Confidence-gated automatic selection
-The system SHALL automatically select a candidate only when the globally ranked candidate set satisfies the configured minimum score and separation requirements.
+The system SHALL automatically select a candidate when the globally ranked candidate set either satisfies the configured minimum score and separation requirements or has a highest-score tie that is uniquely resolved by configured provider priority. Provider priority MUST NOT resolve a tie between multiple highest-scoring candidates from the same highest-priority provider.
 
 #### Scenario: Global winner is sufficiently strong and distinct
 - **WHEN** the top global candidate meets the minimum score and is sufficiently separated from the runner-up
 - **THEN** the match result SHALL identify that candidate as automatically selected
 
+#### Scenario: Top score is tied across providers
+- **WHEN** the top score meets the minimum score and the earliest configured provider among the tied candidates has exactly one top-scoring candidate
+- **THEN** the system SHALL automatically select that candidate
+
+#### Scenario: Highest-priority provider remains internally ambiguous
+- **WHEN** the earliest configured provider among the top-scoring candidates has multiple candidates with that same score
+- **THEN** the system SHALL return candidates for manual selection without automatically binding an arbitrary result
+
 #### Scenario: Global result is ambiguous
-- **WHEN** no candidate satisfies the global confidence rules
+- **WHEN** no candidate satisfies the standard confidence rules or the priority-resolved tie rule
 - **THEN** the system SHALL return candidates for manual selection without automatically binding an arbitrary provider result
 
 ### Requirement: Manual binding precedence
@@ -75,3 +87,22 @@ The system SHALL continue matching other enabled providers when one provider sea
 #### Scenario: One provider search throws an error
 - **WHEN** an enabled provider fails during a search round
 - **THEN** candidates from successful providers SHALL still be ranked and the failed provider SHALL be recorded in the search-error list
+
+### Requirement: Enabled-provider candidate participation
+The system SHALL include usable search results from every enabled danmu provider in the shared candidate set used by manual match preview and automatic library-import matching. A usable result MUST contain a provider media identifier accepted by that provider's media-detail path, a non-empty display title, and the available year, category, and episode-count metadata.
+
+#### Scenario: Bilibili anime result is available
+- **WHEN** Bilibili is enabled and returns one or more valid anime seasons for the parent series title
+- **THEN** the manual match preview SHALL include those Bilibili seasons in the globally scored candidate list
+
+#### Scenario: Bilibili live-action result is available
+- **WHEN** Bilibili is enabled and returns one or more valid live-action television seasons for the parent series title
+- **THEN** the manual match preview SHALL include those Bilibili seasons with their titles, years, categories, and episode counts
+
+#### Scenario: Automatic matching searches Bilibili
+- **WHEN** a newly added non-special season is processed by automatic library-import matching and Bilibili is enabled
+- **THEN** valid Bilibili results SHALL participate in the same global scoring and confidence rules as results from other enabled providers
+
+#### Scenario: Bilibili result has no usable identifier
+- **WHEN** Bilibili returns a search entry without a positive season or media identifier accepted by its media-detail path
+- **THEN** the system SHALL omit that entry without preventing results from Bilibili or other providers from being ranked

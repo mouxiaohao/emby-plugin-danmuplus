@@ -240,8 +240,10 @@ namespace Emby.Plugin.Danmu.Scraper.Tencent
             }
 
             var url = $"https://dm.video.qq.com/barrage/base/{vid}";
+            var baseRequestOptions = GetDefaultHttpRequestOptions(url, null, cancellationToken);
+            baseRequestOptions.TimeoutMs = 15000;
             var result = await httpClient.GetSelfResultAsyncWithError<TencentCommentResult>(
-                GetDefaultHttpRequestOptions(url, null, cancellationToken)).ConfigureAwait(false);
+                baseRequestOptions).ConfigureAwait(false);
             if (result != null && result.SegmentIndex != null)
             {
                 var start = result.SegmentStart.ToLong();
@@ -261,6 +263,7 @@ namespace Emby.Plugin.Danmu.Scraper.Tencent
                         try
                         {
                             var requestOptions = GetDefaultHttpRequestOptions(segmentUrl, null, cancellationToken);
+                            requestOptions.TimeoutMs = 15000;
                             // 重试时不再复用可能已经被腾讯 CDN 关闭的长连接。
                             if (attempt > 0)
                             {

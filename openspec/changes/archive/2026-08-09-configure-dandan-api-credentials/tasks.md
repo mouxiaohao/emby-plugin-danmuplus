@@ -19,4 +19,4 @@
 
 - [x] 4.1 Back up and deploy the Release DLL to Synology, restart Emby, and verify the plugin configuration schema exposes both new fields.
 - [x] 4.2 Confirm missing credentials remain isolated to Dandanplay until a real pair is supplied.
-- [ ] 4.3 Package the DLL, source archive, hashes, backup path, and credential setup notes as user-facing outputs.
+- [x] 4.3 Package the DLL, source archive, hashes, backup path, and credential setup notes as user-facing outputs.

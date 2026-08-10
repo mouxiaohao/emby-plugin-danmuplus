@@ -1,11 +1,11 @@
 ﻿/*
- * Emby.CustomCssJS: 电视剧/季智能匹配并一键下载弹幕
+ * Emby.CustomCssJS: 电视剧/季/集/电影智能匹配并一键下载弹幕
  * 适用于 Emby 4.9.x + 本方案配套的 Emby.Plugin.Danmu DLL
  */
 (function () {
     "use strict";
 
-    var INSTALL_FLAG = "__embyDanmuSmartMenuV6";
+    var INSTALL_FLAG = "__embyDanmuSmartMenuV9";
     var BUTTON_ID = "danmu-bulk-download";
 
     if (window[INSTALL_FLAG]) {
@@ -15,6 +15,7 @@
 
     var pendingContext = null;
     var retryTimer = 0;
+    var contextGeneration = 0;
 
     function value(object, pascal, camel, fallback) {
         if (!object) {
@@ -46,10 +47,87 @@
     }
 
     function getMenuItemId(menu) {
+        var dataset = menu.dataset || {};
+        var direct = plausibleItemId(dataset.itemId || dataset.itemid);
+        if (direct) return direct;
         var image = menu.querySelector(".actionsheetItemPreviewImage-bg");
         var background = image && image.style.backgroundImage;
         var match = background && background.match(/\/Items\/([^/?]+)\/Images/i);
-        return match ? decodeURIComponent(match[1]) : null;
+        if (match) return decodeURIComponent(match[1]);
+        var links = Array.from(menu.querySelectorAll ? menu.querySelectorAll("a[href]") : []);
+        for (var index = 0; index < links.length; index++) {
+            var href = links[index].getAttribute("href");
+            var hrefMatch = href && href.match(/[?&]id=([^&#]+)/i);
+            var fromHref = hrefMatch && plausibleItemId(decodeURIComponent(hrefMatch[1]));
+            if (fromHref) return fromHref;
+        }
+        return null;
+    }
+
+    function plausibleItemId(value) {
+        var id = String(value || "").trim();
+        return id.length >= 8 && !/^(menu|more|scan|none)$/i.test(id) ? id : null;
+    }
+
+    function getTriggerItemId(trigger) {
+        var nodes = [];
+        var current = trigger;
+        while (current && current !== document.body && nodes.length < 8) {
+            nodes.push(current);
+            if (current.matches && current.matches(".card,.listItem,.visualCardBox")) break;
+            current = current.parentElement;
+        }
+        for (var index = 0; index < nodes.length; index++) {
+            var node = nodes[index];
+            var dataset = node.dataset || {};
+            var direct = plausibleItemId(dataset.itemId || dataset.itemid || dataset.id);
+            if (direct) return direct;
+            var links = [node].concat(Array.from(node.querySelectorAll ? node.querySelectorAll("a[href]") : []));
+            for (var linkIndex = 0; linkIndex < links.length; linkIndex++) {
+                var href = links[linkIndex].getAttribute && links[linkIndex].getAttribute("href");
+                var match = href && href.match(/[?&]id=([^&#]+)/i);
+                var fromHref = match && plausibleItemId(decodeURIComponent(match[1]));
+                if (fromHref) return fromHref;
+            }
+        }
+        return null;
+    }
+
+    function manualSearchDefault(item, target) {
+        if (item && item.Type === "Movie") return item.Name || value(target, "ItemName", "itemName", "");
+        return value(target, "ParentName", "parentName",
+            value(target, "SeriesName", "seriesName", item && (item.SeriesName || item.Name) || ""));
+    }
+
+    function isSupportedItemType(type) {
+        return ["Series", "Season", "Episode", "Movie"].indexOf(type) >= 0;
+    }
+
+    function actionLabel(type) {
+        return type === "Series" ? "智能匹配并下载整部剧弹幕" :
+            (type === "Season" ? "智能匹配并下载本季弹幕" :
+                (type === "Episode" ? "智能匹配并下载本集弹幕" : "智能匹配并下载电影弹幕"));
+    }
+
+    function setPendingContext(id) {
+        contextGeneration++;
+        pendingContext = { id: id, generation: contextGeneration, expires: Date.now() + 5000 };
+        return pendingContext;
+    }
+
+    function resolveMenuContextId(contextId, menuItemId) {
+        if (contextId && menuItemId && contextId !== menuItemId) return null;
+        return contextId || menuItemId || null;
+    }
+
+    function getGestureItemId(target) {
+        return target && target.closest ? getTriggerItemId(target) : null;
+    }
+
+    function openedActionSheetContextId(context, menuItemId, menuCount, now) {
+        if (menuCount !== 1) return null;
+        if (menuItemId) return menuItemId;
+        return context && context.id && now <= context.expires ? context.id : null;
     }
 
     function api(itemId, option, parameters) {
@@ -118,6 +196,7 @@
             ".danmuSmartSearch{display:flex;gap:.6rem;margin-bottom:1rem}.danmuSmartSearch input{flex:1;min-width:0;padding:.65rem .75rem;border:1px solid #777;border-radius:.35rem;background:#111;color:#fff;font-size:1rem}",
             ".danmuCandidate{display:flex;gap:.7rem;padding:.8rem;border:1px solid rgba(255,255,255,.16);border-radius:.4rem;margin:.55rem 0;cursor:pointer;background:rgba(255,255,255,.035)}",
             ".danmuCandidate:hover{background:rgba(255,255,255,.08)}.danmuCandidate input{margin-top:.3rem}",
+            ".danmuSourceEpisode{display:none;align-items:center;gap:.35rem;white-space:nowrap;margin-left:.6rem}.danmuSourceEpisode.active{display:flex}.danmuSourceEpisode input{width:5.2rem;margin:0;padding:.45rem;border:1px solid #777;border-radius:.3rem;background:#111;color:#fff}",
             ".danmuCandidateMain{flex:1;min-width:0}.danmuCandidateTitle{font-weight:600;word-break:break-all}",
             ".danmuCandidateMeta{opacity:.8;font-size:.9rem;margin-top:.2rem}.danmuCandidateReason{color:#8dd7f2;font-size:.88rem;margin-top:.25rem}",
             ".danmuSeasonProblem{padding:.75rem 0;border-bottom:1px solid rgba(255,255,255,.12)}",
@@ -441,6 +520,12 @@
             try {
                 var result = await api("all", "StopAllTrackedDownloads");
                 notify(value(result, "Message", "message", "已提交停止请求"), false);
+                // Some legacy provider calls cannot be physically cancelled. Let the
+                // user close immediately after the server accepted the stop request.
+                dialog.closable = true;
+                close.style.display = "";
+                background.style.display = "none";
+                stop.style.display = "none";
             } catch (error) {
                 stopRequested = false;
                 stop.disabled = false;
@@ -670,7 +755,9 @@
         var input = document.createElement("input");
         input.type = "search";
         input.placeholder = "输入本季关键词重新搜索";
-        input.value = keywords[selectionKey] || "";
+        input.value = Object.prototype.hasOwnProperty.call(keywords, selectionKey)
+            ? keywords[selectionKey]
+            : value(season, "SeriesName", "seriesName", item.SeriesName || item.Name || "");
         var searchButton = document.createElement("button");
         searchButton.className = "danmuSmartButton";
         searchButton.textContent = "重新搜索";
@@ -786,7 +873,7 @@
         var input = document.createElement("input");
         input.type = "search";
         input.placeholder = "换一个关键词重新搜索，例如：唐诡奇潭";
-        input.value = keyword || "";
+        input.value = keyword || value(season, "SeriesName", "seriesName", item.SeriesName || item.Name || "");
         var searchButton = document.createElement("button");
         searchButton.className = "danmuSmartButton";
         searchButton.textContent = "重新搜索";
@@ -879,6 +966,350 @@
         });
     }
 
+    function itemCandidates(target) {
+        return value(target, "Candidates", "candidates", []) || [];
+    }
+
+    function itemSelectedCandidate(target) {
+        var selectedId = value(target, "SelectedId", "selectedId", "");
+        var selectedSite = value(target, "SelectedSite", "selectedSite", "");
+        return itemCandidates(target).find(function (candidate) {
+            return value(candidate, "Id", "id", "") === selectedId &&
+                value(candidate, "Site", "site", "") === selectedSite;
+        }) || null;
+    }
+
+    function renderItemCandidatePicker(dialog, item, target, keyword) {
+        dialog.body.replaceChildren();
+        dialog.footer.replaceChildren();
+        var isEpisode = item.Type === "Episode";
+        var candidates = itemCandidates(target);
+        var selected = itemSelectedCandidate(target);
+        var summary = document.createElement("p");
+        if (isEpisode) {
+            summary.textContent = "库内信息：" + value(target, "ParentName", "parentName", "") + " / " +
+                value(target, "SeasonName", "seasonName", "") + " / 第 " +
+                (value(target, "EpisodeNumber", "episodeNumber", "?") || "?") + " 集 · " +
+                value(target, "ItemName", "itemName", item.Name || "未命名剧集") +
+                "。请选择季度候选并确认要使用的来源集数。";
+        } else {
+            summary.textContent = "库内信息：" + value(target, "ItemName", "itemName", item.Name || "未命名电影") +
+                "，" + (value(target, "Year", "year", null) || "年份未知") + "。请选择正确电影。";
+        }
+        dialog.body.appendChild(summary);
+
+        var search = document.createElement("div");
+        search.className = "danmuSmartSearch";
+        var input = document.createElement("input");
+        input.type = "search";
+        input.placeholder = "输入关键词重新搜索";
+        input.value = keyword || manualSearchDefault(item, target);
+        var searchButton = document.createElement("button");
+        searchButton.className = "danmuSmartButton";
+        searchButton.textContent = "重新搜索";
+        search.append(input, searchButton);
+        dialog.body.appendChild(search);
+
+        var list = document.createElement("div");
+        if (!candidates.length) {
+            var empty = document.createElement("p");
+            empty.className = "danmuMuted";
+            empty.textContent = value(target, "Message", "message", "没有候选结果，请更换关键词重试。");
+            list.appendChild(empty);
+        }
+        function refreshEpisodeInputs() {
+            Array.from(list.querySelectorAll(".danmuSourceEpisode")).forEach(function (control) {
+                var radio = control.parentElement.querySelector('input[type="radio"]');
+                control.classList.toggle("active", Boolean(radio && radio.checked));
+            });
+        }
+        candidates.forEach(function (candidate, index) {
+            var row = document.createElement("label");
+            row.className = "danmuCandidate";
+            var radio = document.createElement("input");
+            radio.type = "radio";
+            radio.name = "danmuItemCandidateChoice";
+            radio.value = String(index);
+            radio.checked = Boolean(selected &&
+                value(selected, "Id", "id", "") === value(candidate, "Id", "id", "") &&
+                value(selected, "Site", "site", "") === value(candidate, "Site", "site", "")) ||
+                (!selected && index === 0);
+            var main = document.createElement("div");
+            main.className = "danmuCandidateMain";
+            var title = document.createElement("div");
+            title.className = "danmuCandidateTitle";
+            title.textContent = value(candidate, "SiteName", "siteName", value(candidate, "Site", "site", "未知网站")) +
+                " · " + value(candidate, "Name", "name", "未命名项目");
+            var suggested = value(candidate, "SuggestedEpisodeNumber", "suggestedEpisodeNumber", null);
+            var meta = document.createElement("div");
+            meta.className = "danmuCandidateMeta";
+            meta.textContent = "年份：" + (value(candidate, "Year", "year", null) || "未知") +
+                "　集数：" + (value(candidate, "EpisodeSize", "episodeSize", 0) || "未知") +
+                (isEpisode ? "　候选源集数：第 " + (suggested || "?") + " 集" : "") +
+                "　类型：" + (value(candidate, "Category", "category", "未知") || "未知") +
+                "　评分：" + Math.round(Number(value(candidate, "Score", "score", 0)) * 100);
+            var reason = document.createElement("div");
+            reason.className = "danmuCandidateReason";
+            reason.textContent = value(candidate, "Reason", "reason", "需要人工确认");
+            main.append(title, meta, reason);
+            row.append(radio, main);
+            if (isEpisode) {
+                var sourceControl = document.createElement("span");
+                sourceControl.className = "danmuSourceEpisode";
+                var sourceLabel = document.createElement("span");
+                sourceLabel.textContent = "来源集数";
+                var sourceInput = document.createElement("input");
+                sourceInput.type = "number";
+                sourceInput.min = "1";
+                sourceInput.step = "1";
+                sourceInput.value = suggested || "";
+                sourceInput.dataset.candidateIndex = String(index);
+                sourceInput.addEventListener("click", function (event) { event.stopPropagation(); });
+                sourceControl.append(sourceLabel, sourceInput);
+                row.appendChild(sourceControl);
+            }
+            radio.addEventListener("change", refreshEpisodeInputs);
+            list.appendChild(row);
+        });
+        dialog.body.appendChild(list);
+        refreshEpisodeInputs();
+        appendForceRefreshOption(dialog);
+
+        searchButton.addEventListener("click", async function () {
+            var newKeyword = input.value.trim();
+            if (!newKeyword) {
+                notify("请输入搜索关键词。", true);
+                return;
+            }
+            setBusy(dialog, "正在使用新关键词搜索所有已启用网站…");
+            try {
+                var refreshed = await api(item.Id, "MatchPreview", { keyword: newKeyword, force: "true" });
+                var refreshedTarget = value(refreshed, "Target", "target", null);
+                if (!refreshedTarget) throw new Error("服务器没有返回媒体候选");
+                renderItemCandidatePicker(dialog, item, refreshedTarget, newKeyword);
+            } catch (error) {
+                renderItemCandidatePicker(dialog, item, target, newKeyword);
+                notify("重新搜索失败：" + (error.message || error), true);
+            }
+        });
+        input.addEventListener("keydown", function (event) {
+            if (event.key === "Enter") {
+                event.preventDefault();
+                searchButton.click();
+            }
+        });
+
+        var cancel = document.createElement("button");
+        cancel.className = "danmuSmartButton";
+        cancel.textContent = "取消";
+        cancel.addEventListener("click", dialog.close);
+        var start = document.createElement("button");
+        start.className = "danmuSmartButton primary";
+        start.textContent = isEpisode ? "下载本集弹幕" : "绑定并下载电影弹幕";
+        start.disabled = !candidates.length;
+        start.addEventListener("click", function () {
+            var checked = list.querySelector('input[name="danmuItemCandidateChoice"]:checked');
+            if (!checked) {
+                notify("请选择一个候选结果。", true);
+                return;
+            }
+            var candidateIndex = Number(checked.value);
+            var candidate = candidates[candidateIndex];
+            var sourceEpisodeNumber = null;
+            if (isEpisode) {
+                var sourceInput = list.querySelector('.danmuSourceEpisode input[data-candidate-index="' + candidateIndex + '"]');
+                sourceEpisodeNumber = Number(sourceInput && sourceInput.value);
+                if (!Number.isInteger(sourceEpisodeNumber) || sourceEpisodeNumber <= 0) {
+                    notify("来源集数必须是正整数。", true);
+                    return;
+                }
+                var available = Number(value(candidate, "EpisodeSize", "episodeSize", 0));
+                if (available > 0 && sourceEpisodeNumber > available) {
+                    notify("该候选不存在第 " + sourceEpisodeNumber + " 集。", true);
+                    return;
+                }
+            }
+            var manual = !selected ||
+                value(selected, "Id", "id", "") !== value(candidate, "Id", "id", "") ||
+                value(selected, "Site", "site", "") !== value(candidate, "Site", "site", "");
+            renderSingleTargetProgress(dialog, item, target, candidate, sourceEpisodeNumber, manual);
+        });
+        dialog.footer.append(cancel, start);
+    }
+
+    async function renderSingleTargetProgress(dialog, item, target, candidate, sourceEpisodeNumber, manual) {
+        dialog.closable = false;
+        setBusy(dialog, "正在提交下载任务…");
+        var parameters = {
+            site: value(candidate, "Site", "site", ""),
+            candidateId: value(candidate, "Id", "id", ""),
+            manual: manual ? "true" : "false",
+            forceRefresh: dialog.forceRefresh ? "true" : "false"
+        };
+        if (sourceEpisodeNumber) parameters.sourceEpisodeNumber = sourceEpisodeNumber;
+        var task = await api(item.Id, "StartTrackedDownload", parameters);
+        var taskId = value(task, "TaskId", "taskId", "");
+        var monitoring = false;
+
+        dialog.body.replaceChildren();
+        dialog.footer.replaceChildren();
+        var summary = document.createElement("div");
+        summary.className = "danmuProgressSummary";
+        var block = document.createElement("div");
+        block.className = "danmuProgressSeason running";
+        var title = document.createElement("div");
+        title.className = "danmuProgressTitle";
+        var name = document.createElement("span");
+        name.textContent = item.Type === "Episode"
+            ? "本地第 " + (value(target, "EpisodeNumber", "episodeNumber", "?") || "?") + " 集 · " + item.Name
+            : item.Name;
+        var state = document.createElement("span");
+        title.append(name, state);
+        var meta = document.createElement("div");
+        meta.className = "danmuProgressMeta";
+        var items = document.createElement("div");
+        block.append(title, meta, items);
+        dialog.body.append(summary, block);
+
+        var background = document.createElement("button");
+        background.className = "danmuSmartButton";
+        background.textContent = "后台下载";
+        background.addEventListener("click", function () {
+            dialog.forceClose();
+            notify("下载任务已转入服务器后台队列，关闭页面不会取消任务。", false);
+        });
+        var stop = document.createElement("button");
+        stop.className = "danmuSmartButton danger";
+        stop.textContent = "强制停止全部下载";
+        var close = document.createElement("button");
+        close.className = "danmuSmartButton primary";
+        close.textContent = "关闭";
+        close.style.display = "none";
+        close.addEventListener("click", dialog.close);
+        dialog.footer.append(background, stop, close);
+
+        function terminal(status) {
+            return status === "completed" || status === "completed_with_warnings" ||
+                status === "completed_with_errors" || status === "failed" ||
+                status === "cancelled" || status === "not_found";
+        }
+
+        function update(current) {
+            var status = value(current, "Status", "status", "failed");
+            var succeeded = value(current, "Succeeded", "succeeded", 0);
+            var skipped = value(current, "Skipped", "skipped", 0);
+            var partial = value(current, "Partial", "partial", 0);
+            var failed = value(current, "Failed", "failed", 0);
+            state.textContent = status === "queued" ? "后台队列中" :
+                (status === "running" ? "进行中" :
+                    (status === "stopping" ? "正在停止" :
+                        (status === "completed" ? "完成 ✓" :
+                            (status === "cancelled" ? "已停止" :
+                                (status === "completed_with_warnings" ? "完成（部分缺失）" : "完成（有失败）")))));
+            summary.textContent = value(current, "Message", "message", "");
+            meta.textContent = candidateLine(candidate) +
+                (sourceEpisodeNumber ? "　来源第 " + sourceEpisodeNumber + " 集" : "") +
+                "　成功 " + succeeded + " / 部分缺失 " + partial +
+                " / 重复已跳过 " + skipped + " / 失败 " + failed;
+            block.className = "danmuProgressSeason " +
+                (status === "completed" ? "success" :
+                    (status === "completed_with_warnings" ? "warning" :
+                        (status === "cancelled" ? "cancelled" :
+                            ((status === "queued" || status === "running" || status === "stopping") ? "running" : "failed"))));
+
+            items.replaceChildren();
+            (value(current, "Episodes", "episodes", []) || []).forEach(function (resultItem) {
+                var resultStatus = value(resultItem, "Status", "status", "pending");
+                var row = document.createElement("div");
+                row.className = "danmuEpisodeProgress " + resultStatus;
+                var number = document.createElement("span");
+                number.textContent = item.Type === "Movie"
+                    ? "电影"
+                    : "第 " + (value(resultItem, "EpisodeNumber", "episodeNumber", "?") || "?") + " 集";
+                var itemName = document.createElement("span");
+                itemName.textContent = value(resultItem, "EpisodeName", "episodeName", item.Name);
+                var resultText = document.createElement("span");
+                var message = value(resultItem, "Message", "message", "");
+                resultText.textContent = resultStatus === "success" ? "✓ 下载成功" :
+                    (resultStatus === "running" ? "● 正在下载" :
+                        (resultStatus === "queued" ? "● 等待重试" :
+                            (resultStatus === "partial" ? "⚠ " + (message || "部分弹幕缺失") :
+                                (resultStatus === "skipped" ? "↷ " + (message || "已跳过") :
+                                    (resultStatus === "cancelled" ? "■ 已强制停止" :
+                                        (resultStatus === "failed" ? "✕ " + (message || "下载失败") : "等待中"))))));
+                var retry = document.createElement("button");
+                retry.className = "danmuEpisodeRetry";
+                retry.textContent = "重试";
+                retry.title = item.Type === "Movie" ? "强制重新下载电影弹幕" : "强制重新下载本集弹幕";
+                var resultItemId = value(resultItem, "ItemId", "itemId", "");
+                retry.disabled = !taskId || !terminal(status) || !resultItemId;
+                retry.addEventListener("click", async function () {
+                    retry.disabled = true;
+                    retry.textContent = "提交中…";
+                    try {
+                        task = await api(resultItemId, "RetryTrackedEpisode", { taskId: taskId });
+                        update(task);
+                        monitorTask();
+                    } catch (error) {
+                        retry.disabled = false;
+                        retry.textContent = "重试";
+                        notify((item.Type === "Movie" ? "电影" : "单集") + "重试提交失败：" + (error.message || error), true);
+                    }
+                });
+                row.append(number, itemName, resultText, retry);
+                items.appendChild(row);
+            });
+
+            if (terminal(status)) {
+                background.style.display = "none";
+                stop.style.display = "none";
+                close.style.display = "";
+                dialog.closable = true;
+            } else {
+                background.style.display = "";
+                stop.style.display = "";
+                close.style.display = "none";
+                dialog.closable = false;
+            }
+        }
+
+        async function monitorTask() {
+            if (monitoring || !taskId) return;
+            monitoring = true;
+            try {
+                while (!terminal(value(task, "Status", "status", "failed")) && dialog.overlay.isConnected) {
+                    await wait(1000);
+                    if (!dialog.overlay.isConnected) break;
+                    task = await api(item.Id, "GetDownloadProgress", { taskId: taskId });
+                    update(task);
+                }
+            } finally {
+                monitoring = false;
+            }
+        }
+
+        stop.addEventListener("click", async function () {
+            stop.disabled = true;
+            stop.textContent = "正在停止…";
+            try {
+                var result = await api(item.Id, "StopAllTrackedDownloads");
+                notify(value(result, "Message", "message", "已提交停止请求"), false);
+                // The provider may ignore cancellation. Closing must never wait for it.
+                dialog.closable = true;
+                close.style.display = "";
+                background.style.display = "none";
+                stop.style.display = "none";
+            } catch (error) {
+                stop.disabled = false;
+                stop.textContent = "强制停止全部下载";
+                notify("停止下载失败：" + (error.message || error), true);
+            }
+        });
+
+        update(task);
+        monitorTask();
+    }
+
     async function runSmartDownload(item, dialog) {
         setBusy(dialog, item.Type === "Series" ? "正在逐季搜索并综合评分，请稍候…" : "正在搜索所有已启用网站并综合评分，请稍候…");
         var preview = await api(item.Id, "MatchPreview");
@@ -889,6 +1320,13 @@
             return;
         }
 
+        if (item.Type === "Movie" || item.Type === "Episode") {
+            var target = value(preview, "Target", "target", null);
+            if (!target) throw new Error(value(preview, "Message", "message", "服务器没有返回媒体信息"));
+            renderItemCandidatePicker(dialog, item, target, "");
+            return;
+        }
+
         var season = seasons[0];
         if (!season) {
             throw new Error(value(preview, "Message", "message", "服务器没有返回季度信息"));
@@ -896,13 +1334,28 @@
         renderCandidatePicker(dialog, item, season, "");
     }
 
+    function findMenuInsertionAnchor(menu) {
+        var selectors = [
+            '[data-id="scan"]',
+            '[data-id="scanmedialibraryfiles"]',
+            '[data-id="refreshmetadata"]',
+            '[data-id="identify"]',
+            '[data-id="edit"]'
+        ];
+        for (var index = 0; index < selectors.length; index++) {
+            var anchor = menu.querySelector(selectors[index]);
+            if (anchor) return anchor;
+        }
+        return null;
+    }
+
     function makeButton(menu, item) {
-        var template = menu.querySelector('[data-id="scan"]') || menu.querySelector(".actionSheetMenuItem");
+        var template = findMenuInsertionAnchor(menu) || menu.querySelector(".actionSheetMenuItem");
         if (!template) {
             return null;
         }
         var button = template.cloneNode(true);
-        var label = item.Type === "Series" ? "智能匹配并下载整部剧弹幕" : "智能匹配并下载本季弹幕";
+        var label = actionLabel(item.Type);
         var icon = button.querySelector(".actionsheetMenuItemIcon");
         var text = button.querySelector(".actionSheetItemText");
         button.dataset.id = BUTTON_ID;
@@ -920,7 +1373,9 @@
             if (button.dataset.running === "1") return;
             button.dataset.running = "1";
             closeMenu(menu);
-            var dialog = openDialog(item.Type === "Series" ? "整部剧弹幕智能匹配" : "本季弹幕智能匹配");
+            var dialog = openDialog(item.Type === "Series" ? "整部剧弹幕智能匹配" :
+                (item.Type === "Season" ? "本季弹幕智能匹配" :
+                    (item.Type === "Episode" ? "本集弹幕智能匹配" : "电影弹幕智能匹配")));
             runSmartDownload(item, dialog).catch(function (error) {
                 dialog.close();
                 console.error("[Danmu Smart Match] 执行失败", error);
@@ -935,22 +1390,34 @@
         var context = pendingContext;
         if (!context || Date.now() > context.expires) return;
         var menus = Array.from(document.querySelectorAll(".actionSheet.opened"));
-        var menu = menus.find(function (candidate) { return getMenuItemId(candidate) === context.id; });
+        var menu = context.id
+            ? menus.find(function (candidate) { return getMenuItemId(candidate) === context.id; })
+            : (menus.length === 1 ? menus[0] : null);
+        if (!menu && context.id && menus.length === 1 && !getMenuItemId(menus[0])) menu = menus[0];
         if (!menu || menu.querySelector('[data-id="' + BUTTON_ID + '"]')) return;
         if (menu.dataset.danmuBulkResolving === "1") return;
         menu.dataset.danmuBulkResolving = "1";
         try {
-            var item = await ApiClient.getItem(ApiClient.getCurrentUserId(), context.id);
-            if (!item || (item.Type !== "Series" && item.Type !== "Season")) {
+            var menuItemId = getMenuItemId(menu);
+            var resolvedItemId = resolveMenuContextId(context.id, menuItemId);
+            if (!resolvedItemId) {
+                menu.dataset.danmuBulkResolving = "done";
+                return;
+            }
+            var item = await ApiClient.getItem(ApiClient.getCurrentUserId(), resolvedItemId);
+            if (pendingContext !== context || context.generation !== contextGeneration) return;
+            if (!item || !isSupportedItemType(item.Type)) {
                 menu.dataset.danmuBulkResolving = "done";
                 return;
             }
             if (!menu.isConnected || !menu.classList.contains("opened")) return;
+            var menuItemId = getMenuItemId(menu);
+            if (menuItemId && menuItemId !== resolvedItemId) return;
             var button = makeButton(menu, item);
             if (!button) return;
-            var scanButton = menu.querySelector('[data-id="scan"]');
-            if (scanButton) scanButton.before(button);
-            else menu.querySelector(".actionsheetScrollSlider").appendChild(button);
+            var insertionAnchor = findMenuInsertionAnchor(menu);
+            if (insertionAnchor) insertionAnchor.before(button);
+            else (menu.querySelector(".actionsheetScrollSlider") || menu).appendChild(button);
             menu.dataset.danmuBulkResolving = "done";
         } catch (error) {
             delete menu.dataset.danmuBulkResolving;
@@ -964,18 +1431,53 @@
     }
 
     document.addEventListener("click", function (event) {
-        var moreButton = event.target.closest(".page:not(.hide) .mainDetailButtons .btnMoreCommands");
+        var moreButton = event.target.closest(
+            ".btnMoreCommands,[data-action='menu'],.cardOverlayButton-br,.listItemButton[data-action='menu']");
         if (!moreButton) return;
-        var id = getCurrentItemId();
-        if (!id) return;
-        pendingContext = { id: id, expires: Date.now() + 5000 };
+        var isDetailButton = Boolean(moreButton.closest(".page:not(.hide) .mainDetailButtons"));
+        var id = isDetailButton ? getCurrentItemId() : getTriggerItemId(moreButton);
+        if (!id && isDetailButton) return;
+        setPendingContext(id);
         scheduleInjection();
     }, true);
 
+    function captureLongPressContext(event) {
+        var id = getGestureItemId(event.target);
+        if (id) setPendingContext(id);
+    }
+
+    // Android Emby/CustomJSS long-press paths do not necessarily emit a click on
+    // the more button. Capture the card before Emby creates its action sheet.
+    document.addEventListener("pointerdown", captureLongPressContext, true);
+    document.addEventListener("touchstart", captureLongPressContext, true);
+    document.addEventListener("contextmenu", captureLongPressContext, true);
+
     new MutationObserver(function () {
+        var menus = Array.from(document.querySelectorAll(".actionSheet.opened"));
+        if (menus.length === 1) {
+            var menuItemId = getMenuItemId(menus[0]);
+            var contextId = openedActionSheetContextId(
+                pendingContext, menuItemId, menus.length, Date.now());
+            if (contextId && (!pendingContext || pendingContext.id !== contextId ||
+                Date.now() > pendingContext.expires)) {
+                setPendingContext(contextId);
+            }
+        }
         if (pendingContext && Date.now() <= pendingContext.expires) scheduleInjection();
     }).observe(document.body, { childList: true, subtree: true });
 
-    console.info("[Danmu Smart Match] 电视剧/季智能匹配菜单已启用");
+    window.__embyDanmuSmartMatchTest = {
+        plausibleItemId: plausibleItemId,
+        getTriggerItemId: getTriggerItemId,
+        manualSearchDefault: manualSearchDefault,
+        isSupportedItemType: isSupportedItemType,
+        actionLabel: actionLabel,
+        findMenuInsertionAnchor: findMenuInsertionAnchor,
+        getGestureItemId: getGestureItemId,
+        openedActionSheetContextId: openedActionSheetContextId,
+        setPendingContext: setPendingContext,
+        resolveMenuContextId: resolveMenuContextId
+    };
+    console.info("[Danmu Smart Match] 电视剧/季/集/电影智能匹配菜单已启用");
 }());
 
