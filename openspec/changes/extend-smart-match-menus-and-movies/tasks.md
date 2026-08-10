@@ -3,14 +3,14 @@
 - [x] 1.1 Add additive Movie preview and generic tracked-target fields to the smart-match response models while retaining all existing Series/Season fields.
 - [x] 1.2 Implement movie-specific cross-provider search normalization, non-movie filtering, de-duplication, title/year scoring, deterministic ordering, diagnostics, and confidence gating.
 - [x] 1.3 Add Movie preview routing with saved-manual-binding precedence and forced keyword search that remains read-only until confirmation.
-- [ ] 1.4 Add deterministic regression checks for descending Movie scores, ambiguous candidates, provider failure isolation, non-movie filtering, manual binding, and unchanged Season ranking.
+- [x] 1.4 Add deterministic regression checks for descending Movie scores, ambiguous candidates, provider failure isolation, non-movie filtering, manual binding, and unchanged Season ranking.
 
 ## 2. Movie Binding and Tracked Download
 
 - [x] 2.1 Extract an outcome-returning single-Movie provider download operation from queued Movie processing and route existing automatic Movie events through it without changing duplicate, partial XML, STRM, or provider-ID behavior.
 - [x] 2.2 Extend binding validation to accept Movie candidates, persist automatic versus manual provider identifiers correctly, and leave an existing binding intact when validation fails.
 - [x] 2.3 Create serialized, cancellable single-Movie tracked tasks with generic target identity and queued/running/success/skipped/partial/failed/cancelled snapshots.
-- [ ] 2.4 Add regression checks for Bilibili and non-Bilibili identifier routing, invalid candidate preparation, duplicate skip, forced refresh, cancellation, and Series/Season task compatibility.
+- [x] 2.4 Add regression checks for Bilibili and non-Bilibili identifier routing, invalid candidate preparation, duplicate skip, forced refresh, cancellation, and Series/Season task compatibility.
 
 ## 3. Frontend Menu Integration
 
@@ -18,7 +18,7 @@
 - [x] 3.2 Fetch the authoritative item and inject one correctly labelled action only for Series, Season, Episode, or Movie, including Series library cards, Season cards within Series details, and Episode card/detail menus.
 - [x] 3.3 Add Movie-specific dialog text, preview/candidate search, automatic/manual confirmation, tracked progress, cancellation, and completion rendering without routing Movie data through Season fields.
 - [x] 3.4 Add a shared manual-search default helper that uses the Movie title for Movie and the owning Series title for Series, Season, and Episode while preserving user edits in the active view.
-- [ ] 3.5 Bump the frontend installation flag and add deterministic DOM-level checks for repeated observer runs, two rapidly opened card menus, unresolved identity, unsupported item types, search defaults, and one workflow per click.
+- [x] 3.5 Bump the frontend installation flag and add deterministic DOM-level checks for repeated observer runs, two rapidly opened card menus, unresolved identity, unsupported item types, search defaults, and one workflow per click.
 
 ## 4. Episode Match and Single-Episode Download
 
@@ -26,7 +26,7 @@
 - [x] 4.2 Resolve candidate media Episodes and deterministically suggest the best source Episode number without changing the containing Season's binding.
 - [x] 4.3 Reuse the Season candidate-picker layout for Episode, show local and candidate source numbers, and render an editable source-number input only beside the selected candidate.
 - [x] 4.4 Validate the submitted source Episode as a positive integer that exists in freshly resolved candidate media, then run a cancellable tracked download for only the target local Episode.
-- [ ] 4.5 Add regressions for automatic suggestion, manual override, invalid/missing source Episodes, specials or numbering gaps, sibling isolation, cancellation, and existing Season binding preservation.
+- [x] 4.5 Add regressions for automatic suggestion, manual override, invalid/missing source Episodes, specials or numbering gaps, sibling isolation, cancellation, and existing Season binding preservation.
 
 ## 5. Build, Documentation, and Live Verification
 
@@ -43,7 +43,7 @@
 - [x] 6.2 Add a 180-second Movie/Episode task deadline, cancellation race, immutable terminal result, and target-aware retry support for both Movie and Episode.
 - [x] 6.3 Replace the summary-only Movie/Episode progress view with the Season-style one-item detail view, including concrete status, diagnostic text, and retry.
 - [x] 6.4 Make force-stop immediately enable the dialog close control and apply one stable action-sheet insertion anchor order to Series, Season, Episode, and Movie.
-- [ ] 6.5 Add deterministic backend and frontend regressions for timeout, cancellation, late completion, Movie retry, Episode retry, close-after-stop, one-row rendering, and consistent menu ordering.
+- [x] 6.5 Add deterministic backend and frontend regressions for timeout, cancellation, late completion, Movie retry, Episode retry, close-after-stop, one-row rendering, and consistent menu ordering.
 - [ ] 6.6 Run strict OpenSpec validation, regression tests, and Release build; deploy a backed-up pair to Emby and live-verify iQIYI/Tencent failure handling, timeout/stop closing, retry, and existing Series/Season behavior.
 
 ## 7. Android Long-Press Integration

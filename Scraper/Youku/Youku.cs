@@ -150,7 +150,14 @@ namespace Emby.Plugin.Danmu.Scraper.Youku
                         continue;
                     }
 
-                    media.Episodes.Add(new ScraperEpisode() { Id = $"{ep.ID}", CommentId = $"{ep.ID}", Title = ep.Title });
+                    media.Episodes.Add(new ScraperEpisode()
+                    {
+                        Id = $"{ep.ID}",
+                        CommentId = $"{ep.ID}",
+                        Title = ep.Title,
+                        EpisodeNumber = EpisodeContentClassifier.TryGetPositiveNumber(ep.Seq) ??
+                            EpisodeContentClassifier.TryGetEpisodeNumber(ep.Title),
+                    });
                 }
             }
 
@@ -264,7 +271,14 @@ namespace Emby.Plugin.Danmu.Scraper.Youku
             {
                 foreach (var ep in video.Videos)
                 {
-                    list.Add(new ScraperEpisode() { Id = $"{ep.ID}", CommentId = $"{ep.ID}", Title = ep.Title });
+                    list.Add(new ScraperEpisode()
+                    {
+                        Id = $"{ep.ID}",
+                        CommentId = $"{ep.ID}",
+                        Title = ep.Title,
+                        EpisodeNumber = EpisodeContentClassifier.TryGetPositiveNumber(ep.Seq) ??
+                            EpisodeContentClassifier.TryGetEpisodeNumber(ep.Title),
+                    });
                 }
             }
 

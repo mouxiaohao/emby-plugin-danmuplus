@@ -3,14 +3,22 @@
         <TargetFramework>netstandard2.0</TargetFramework>
         <Description>弹幕插件</Description>
         <AssemblyVersion>2.0.1.0</AssemblyVersion>
-        <FileVersion>2.0.1.4</FileVersion>
-        <InformationalVersion>2.0.1-r4</InformationalVersion>
+        <FileVersion>2.0.1.5</FileVersion>
+        <InformationalVersion>2.0.1-r5</InformationalVersion>
+        <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
         <PackageTags>emby;plugin;pms;media;server;</PackageTags>
         <LangVersion>8.0</LangVersion>
+        <DanmuConfigCacheToken>$([System.Text.RegularExpressions.Regex]::Replace('$(InformationalVersion)', '[^A-Za-z0-9_-]+', '-'))</DanmuConfigCacheToken>
+        <DanmuConfigCacheToken>$([System.Text.RegularExpressions.Regex]::Replace('$(DanmuConfigCacheToken)', '(^-+|-+$)', ''))</DanmuConfigCacheToken>
+        <DanmuConfigCacheToken Condition="'$(DanmuConfigCacheToken)' == ''">build</DanmuConfigCacheToken>
+        <GeneratedDanmuConfigurationDirectory>$(MSBuildProjectDirectory)\obj\Generated\Configuration</GeneratedDanmuConfigurationDirectory>
+        <GeneratedDanmuConfigurationPage>$(GeneratedDanmuConfigurationDirectory)\configPage.html</GeneratedDanmuConfigurationPage>
+        <GeneratedDanmuConfigurationConstants>$(GeneratedDanmuConfigurationDirectory)\GeneratedConfigurationPageResources.cs</GeneratedDanmuConfigurationConstants>
     </PropertyGroup>
     <ItemGroup>
         <None Remove="Configuration\logo.png" />
         <Compile Remove="RegressionTests\**\*.cs" />
+        <Compile Remove="Generated\**\*.cs" />
         <!-- <None Remove="Scraper\Bilibili\**" /> -->
     </ItemGroup>
     <ItemGroup>
@@ -53,10 +61,26 @@
         <None Remove="Configuration/config.js" />
     </ItemGroup>
     <ItemGroup>
-        <EmbeddedResource Include="Configuration/configPage.html" />
+        <EmbeddedResource Include="$(GeneratedDanmuConfigurationPage)" LogicalName="$(RootNamespace).Configuration.configPage.html" />
         <EmbeddedResource Include="Configuration/config.js" />
+        <Compile Include="$(GeneratedDanmuConfigurationConstants)" />
     </ItemGroup>
     <ItemGroup>
       <Folder Include="Doc\image\" />
     </ItemGroup>
+
+    <Target Name="GenerateDanmuConfigurationPageResources" BeforeTargets="PrepareResources;CoreCompile">
+        <MakeDir Directories="$(GeneratedDanmuConfigurationDirectory)" />
+        <ReadLinesFromFile File="Configuration\configPage.html">
+            <Output TaskParameter="Lines" ItemName="DanmuConfigurationTemplateLine" />
+        </ReadLinesFromFile>
+        <WriteLinesToFile
+            File="$(GeneratedDanmuConfigurationPage)"
+            Lines="@(DanmuConfigurationTemplateLine->Replace('__DANMU_CONFIG_CACHE_TOKEN__', '$(DanmuConfigCacheToken)'))"
+            Overwrite="true" />
+        <WriteLinesToFile
+            File="$(GeneratedDanmuConfigurationConstants)"
+            Lines="namespace Emby.Plugin.Danmu.Configuration { internal static class GeneratedConfigurationPageResources { internal const string CacheToken = &quot;$(DanmuConfigCacheToken)&quot;%3B internal const string PageName = &quot;danmu-$(DanmuConfigCacheToken)&quot;%3B internal const string ControllerName = &quot;danmuJs-$(DanmuConfigCacheToken)&quot;%3B } }"
+            Overwrite="true" />
+    </Target>
 </Project>

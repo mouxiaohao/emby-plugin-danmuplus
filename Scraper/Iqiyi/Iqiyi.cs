@@ -310,7 +310,15 @@ namespace Emby.Plugin.Danmu.Scraper.Iqiyi
                     if (episodeTvId <= 0) {
                         log.Warn($"[IQIYI] GetMedia: 剧集 '{ep.Name}' (LinkId: {ep.LinkId}) 的 TvId 无效 ({episodeTvId})，ScraperEpisode.CommentId 将为空。");
                     }
-                    media.Episodes.Add(new ScraperEpisode() { Id = $"{ep.LinkId}", CommentId = episodeCommentId, Title = ep.Name });
+                    media.Episodes.Add(new ScraperEpisode()
+                    {
+                        Id = $"{ep.LinkId}",
+                        CommentId = episodeCommentId,
+                        Title = ep.Name,
+                        EpisodeNumber = ep.Order > 0
+                            ? ep.Order
+                            : EpisodeContentClassifier.TryGetEpisodeNumber(ep.Name),
+                    });
                 }
             }
 
@@ -337,7 +345,13 @@ namespace Emby.Plugin.Danmu.Scraper.Iqiyi
                 log.Warn($"[IQIYI] GetMediaEpisode: 对于 LinkId '{id}', 从 GetVideoBaseAsync 获取的 TvId 无效: {tvId}. 返回的 ScraperEpisode 的 CommentId 将为空。");
             }
             var commentIdForEpisode = (tvId > 0) ? $"{tvId}" : string.Empty;
-            return new ScraperEpisode() { Id = id, CommentId = commentIdForEpisode, Title = video.VideoName };
+            return new ScraperEpisode()
+            {
+                Id = id,
+                CommentId = commentIdForEpisode,
+                Title = video.VideoName,
+                EpisodeNumber = EpisodeContentClassifier.TryGetEpisodeNumber(video.VideoName),
+            };
         }
 
         public override async Task<ScraperDanmaku?> GetDanmuContent(BaseItem item, string commentId)
@@ -417,7 +431,15 @@ namespace Emby.Plugin.Danmu.Scraper.Iqiyi
             {
                 foreach (var ep in video.Epsodelist)
                 {
-                    list.Add(new ScraperEpisode() { Id = $"{ep.LinkId}", CommentId = $"{ep.TvId}", Title = ep.Name });
+                    list.Add(new ScraperEpisode()
+                    {
+                        Id = $"{ep.LinkId}",
+                        CommentId = $"{ep.TvId}",
+                        Title = ep.Name,
+                        EpisodeNumber = ep.Order > 0
+                            ? ep.Order
+                            : EpisodeContentClassifier.TryGetEpisodeNumber(ep.Name),
+                    });
                 }
             }
 

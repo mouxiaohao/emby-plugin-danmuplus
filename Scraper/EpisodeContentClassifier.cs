@@ -28,5 +28,12 @@ namespace Emby.Plugin.Danmu.Scraper
 
             return null;
         }
+
+        public static int? TryGetPositiveNumber(string value)
+        {
+            return int.TryParse(value, out var number) && number > 0
+                ? number
+                : (int?)null;
+        }
     }
 }
