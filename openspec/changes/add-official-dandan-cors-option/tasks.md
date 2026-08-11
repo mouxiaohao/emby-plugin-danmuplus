@@ -59,5 +59,5 @@ remains unchecked because its full automatic/manual and cross-route matrix was
 not repeated in this pass.
 
 - [x] 8.1 验证部署 DLL/前端资源 SHA-256 与候选产物一致，并在任何关键检查失败时恢复已记录的 DLL、配置与前端备份，重启 Emby 后用原始 SHA-256 确认回滚。（DLL 命中最终候选；CustomCssJS 目标内容精确匹配且插件本体未改；失败的首次配置保存已从快照恢复并复核原始 SHA-256。）
-- [ ] 8.2 在全部联合 r5 验证通过且获得用户确认后，编写中文 release 说明，说明官方/自定义 CORS 选择、迁移规则、UI 隐藏边界、三路回归结果及其他 r5 变更，不公开任何凭据。
-- [ ] 8.3 按既定发布流程提交完整 r5 变更、推送 GitHub、合并到 `main` 并更新 `2.0.1-r5` Release；复核源码包、DLL、校验和与中文说明相互一致。
+- [x] 8.2 在全部联合 r5 验证通过且获得用户确认后，编写中文 release 说明，说明官方/自定义 CORS 选择、迁移规则、UI 隐藏边界、三路回归结果及其他 r5 变更，不公开任何凭据。（`releases/v2.0.1-r5/RELEASE.md` 已按实际证据记录三路结果与尚未完成的严格验证边界。）
+- [x] 8.3 按既定发布流程提交完整 r5 变更、推送 GitHub、合并到 `main` 并更新 `2.0.1-r5` Release；复核源码包、DLL、校验和与中文说明相互一致。（PR #6 已合并到 `main`；tag `v2.0.1-r5` 与 Latest Release 已发布，三个公开下载资产均重新下载并通过记录的 SHA-256 校验。）

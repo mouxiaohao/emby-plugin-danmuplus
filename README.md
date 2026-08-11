@@ -50,12 +50,15 @@ Emby 弹幕插件增强版，参考 [fengymi/emby-plugin-danmu](https://github.c
 
 ## 弹弹 Play API 配置
 
-管理页面提供互斥的代理 API 与自定义 API 模式：
+Emby 管理后台的“弹幕配置”提供以下调用方式：
 
-- **代理 API**：可使用插件内置的官方 CORS 路由，或填写自己部署且兼容 `cf_worker.js` 的 CORS 前缀。代理负责完成官方 API 签名，Emby 不需要保存本地 API ID/Secret。
-- **自定义 API**：插件直连弹弹 Play 官方 API，并使用管理员配置的 API ID 与 API Secret 在本地签名。
+- **代理 API + 插件官方 CORS**：勾选“使用插件官方 CORS 地址”，由插件后端选择维护的代理并由代理完成应用签名；配置页和配置数据不会展示或保存该地址。
+- **代理 API + 自定义 CORS**：取消勾选官方 CORS 后，填写你自己部署或信任的、兼容 `cf_worker.js` 的代理 CORS 前缀，例如 `https://worker.example/cors/`。代理完成应用签名，此模式不需要在 Emby 中填写 API ID 或 API Secret。
+- **官方直连**：关闭代理 API，插件直连弹弹 Play 官方 API，并使用本地配置的 API ID 与 API Secret 生成签名。插件不会自动申请、生成或附带第三方凭据，请先从弹弹 Play 开放平台取得属于自己的凭据，并同时填写两项。
 
-两种模式均继续使用标题、年份、季度和集数进行搜索与评分，不计算视频 Hash，也不调用弹弹 Play `/match` 接口。自定义模式的 ID 与 Secret 必须成对填写；Secret 会以明文保存在 Emby 插件配置 XML 中，请依靠服务器文件权限保护配置文件。
+切换模式只改变请求的传输和签名位置，不会清空另一种模式已保存的值。三种路由均继续通过标题、年份、季度和集数进行服务端搜索与评分，使用相同的弹幕下载流程；不会计算视频 Hash，也不会调用弹弹 Play `/match` 接口。
+
+自定义直连模式的 ID 与 Secret 必须成对填写；Secret 会以明文保存在 Emby 插件配置 XML 中，请依靠服务器文件权限保护配置文件。
 
 ## 安装智能匹配前端
 
