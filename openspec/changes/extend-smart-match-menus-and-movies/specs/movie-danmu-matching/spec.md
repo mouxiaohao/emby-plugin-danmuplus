@@ -19,58 +19,66 @@ The system SHALL accept a Movie item for smart-match preview, search every enabl
 - **WHEN** one enabled provider fails during Movie search
 - **THEN** candidates from successful providers SHALL still be returned and the failed provider SHALL be exposed in search diagnostics
 
-### Requirement: Movie automatic selection is confidence-gated
-The system SHALL automatically select only a sufficiently strong and unambiguous Movie candidate and SHALL otherwise return the ranked candidates for manual choice.
+### Requirement: Movie matching uses one provider-identifier-first backend policy
+The system SHALL use the same backend decision policy for interactive Movie matching and library-import Movie matching. It MUST first resolve identifiers belonging to enabled providers in configured provider order, then consider a compatible saved binding, and only then search and score every enabled Movie-capable provider.
 
-#### Scenario: One strong movie candidate is distinct
-- **WHEN** the highest-ranked Movie candidate satisfies the configured confidence and separation rules
-- **THEN** the preview SHALL mark it as automatically selected
+#### Scenario: Enabled local Movie identifier resolves
+- **WHEN** a Movie has one or more identifiers for enabled providers and the earliest configured provider's identifier resolves
+- **THEN** that provider object SHALL be selected immediately with match origin `provider-id` and no scored search SHALL run
 
-#### Scenario: Close high-confidence movie candidates span providers
-- **WHEN** multiple Movie candidates score at least `0.9500` and are no more than `0.0300` below the highest score
-- **THEN** the preview SHALL automatically select the sole candidate from the earliest configured site in that close-score pool, even when it is not the highest-scoring candidate
+#### Scenario: Disabled provider identifier exists
+- **WHEN** a Movie identifier belongs to a provider that is not enabled
+- **THEN** the identifier MUST be ignored
 
-#### Scenario: Movie candidates from one site have different scores
-- **WHEN** all competing Movie candidates come from one site and one has a unique highest score
-- **THEN** the Movie preview SHALL automatically select that site's highest-scoring candidate without applying the cross-site close-pool floor
+#### Scenario: Movie identifiers cannot be resolved
+- **WHEN** every applicable local Movie identifier fails to resolve
+- **THEN** diagnostics SHALL record `provider-id-unresolved` and matching SHALL continue through saved binding and backend scored search
 
-#### Scenario: Movie candidates from one site share the highest score
-- **WHEN** one site has multiple Movie candidates sharing its highest score
-- **THEN** the Movie preview SHALL remain ambiguous for manual selection
+#### Scenario: Saved Movie binding is available after identifier resolution
+- **WHEN** no enabled provider identifier resolves and a compatible saved Movie binding exists
+- **THEN** the saved binding SHALL be selected before scored search
 
-#### Scenario: Movie candidates from different sites share the highest score
-- **WHEN** Movie candidates from different sites share the highest score
-- **THEN** the preview SHALL resolve the tie by configured site priority even when the shared score is below `0.9500`
+#### Scenario: User requests Movie rematch
+- **WHEN** a user requests `rematch` with an optional keyword
+- **THEN** the system SHALL bypass all local provider identifiers and saved bindings, search and score every enabled Movie-capable provider, and preserve existing metadata until a new download succeeds
 
-#### Scenario: Movie candidates are ambiguous
-- **WHEN** no Movie candidate is both sufficiently strong and unambiguous
-- **THEN** the system SHALL avoid persisting an arbitrary binding and the frontend SHALL allow the user to select a candidate manually or search with another keyword
+### Requirement: Movie automatic selection uses r6 confident-site priority
+The system SHALL treat every Movie candidate with score `>= 0.90` as confident. When confident candidates span providers, it MUST choose the earliest configured provider without comparing score differences across providers, then choose that provider's unique highest-scoring candidate.
 
-### Requirement: Saved movie manual binding has precedence
-The system MUST preserve and use an existing explicit manual Movie binding unless the user requests a forced search.
+#### Scenario: Earlier provider has a lower confident score
+- **WHEN** an earlier configured provider has a `0.90` candidate and a later provider has a higher-scoring confident candidate
+- **THEN** the earlier provider's candidate SHALL be automatically selected
 
-#### Scenario: Movie has a saved manual binding
-- **WHEN** a Movie preview is requested without a forced search and the Movie has a saved manual provider binding
-- **THEN** the saved provider and media identifier SHALL be selected without replacing it through automatic search
+#### Scenario: Selected provider has multiple confident candidates
+- **WHEN** the earliest provider represented in the confident pool has multiple candidates with different scores
+- **THEN** its unique highest-scoring candidate SHALL be selected
 
-#### Scenario: User forces a new movie search
-- **WHEN** a user submits a forced Movie search with an optional keyword
-- **THEN** the system SHALL return newly searched ranked candidates without deleting the saved binding until a new candidate is confirmed
+#### Scenario: Selected provider has an internal top-score tie
+- **WHEN** the selected provider has multiple candidates sharing its highest confident score
+- **THEN** preview SHALL remain ambiguous for manual selection
 
-### Requirement: Selected movie can be bound and downloaded
-The system SHALL validate the selected provider candidate against the target Movie, persist the confirmed provider identifier, and start a tracked danmu download for that Movie using the provider-specific movie retrieval path.
+#### Scenario: No Movie candidate is confident
+- **WHEN** every Movie candidate scores below `0.90`
+- **THEN** the backend SHALL apply only the explicitly defined r6 low-confidence result state and MUST NOT invoke a legacy Danmu matching algorithm
 
-#### Scenario: Automatically selected movie is confirmed
-- **WHEN** the user confirms a high-confidence Movie candidate
-- **THEN** the selected provider identifier SHALL be saved and a tracked single-Movie download SHALL start
+### Requirement: Selected Movie identifier is persisted only after successful download
+The system SHALL validate the selected Movie candidate, execute the provider-specific tracked download, and overwrite only that provider's Movie identifier after a valid danmu file is persisted successfully.
 
-#### Scenario: Manually selected movie is confirmed
-- **WHEN** the user confirms a Movie candidate from the ranked list
-- **THEN** the selection SHALL be saved as a manual binding and a tracked single-Movie download SHALL start
+#### Scenario: Scored or manually selected Movie download succeeds
+- **WHEN** a scored, bound, or manually selected Movie candidate produces a successfully persisted danmu file
+- **THEN** its provider identifier SHALL overwrite that provider's existing Movie identifier without removing other providers' identifiers
 
-#### Scenario: Candidate no longer resolves
-- **WHEN** the chosen provider can no longer resolve the Movie candidate before download starts
-- **THEN** the system MUST report a failed preparation result and MUST NOT report a successful download
+#### Scenario: Movie matched from existing identifier succeeds
+- **WHEN** the successful Movie download originated from the same existing provider identifier
+- **THEN** the redundant metadata write MAY be skipped
+
+#### Scenario: Movie download does not succeed
+- **WHEN** preparation fails, the download fails, is cancelled, is skipped, or does not persist a valid danmu file
+- **THEN** no provider identifier SHALL be changed
+
+#### Scenario: Movie metadata write fails after download
+- **WHEN** the danmu file is persisted but updating the Movie identifier fails
+- **THEN** the download SHALL remain successful and the result SHALL expose the metadata-update error
 
 ### Requirement: Movie download status is observable and compatible
 The frontend SHALL display queued, running, successful, skipped, partial, failed, or cancelled Movie download outcomes, while existing Series and Season preview and tracked-download response behavior remains compatible.

@@ -58,13 +58,6 @@ namespace Emby.Plugin.Danmu.Scraper.Youku
                     continue;
                 }
 
-                // 检测标题是否相似（越大越相似）
-                var score = searchName.Distance(title);
-                if (score < 0.7)
-                {
-                    continue;
-                }
-
                 list.Add(new ScraperSearchInfo()
                 {
                     Id = $"{videoId}",

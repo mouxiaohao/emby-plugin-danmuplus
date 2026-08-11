@@ -135,3 +135,32 @@ The frontend SHALL inject the same supported smart-match action when Android Cus
 #### Scenario: Action sheet appears without a captured gesture target
 - **WHEN** an Android action sheet appears without a preceding recognized click, contextmenu, pointer, or touch target but exposes an authoritative media item id itself
 - **THEN** the frontend SHALL initialize injection from the action-sheet identity and MUST NOT reuse a stale target
+
+### Requirement: Provider-identifier matches are displayed as successful matches
+The frontend SHALL render the backend match decision without independently scoring, sorting, or selecting candidates. When the backend resolves an enabled local provider identifier, the dialog SHALL show a successful match, the selected site and object, the source label `本地外部标识符`, and a right-side `重新智能匹配` action.
+
+#### Scenario: Local provider identifier resolves
+- **WHEN** the backend returns a selected match with origin `provider-id`
+- **THEN** the dialog SHALL display it as matched successfully and SHALL offer `重新智能匹配` without presenting the result as a scored search
+
+#### Scenario: Frontend receives ranked scored candidates
+- **WHEN** the backend returns scored candidates and an explicit selected candidate or ambiguous state
+- **THEN** the frontend SHALL preserve the backend order and decision and MUST NOT recalculate scores or choose another candidate
+
+### Requirement: Rematch explicitly bypasses persistent match hints
+The `重新智能匹配` action SHALL request the backend `rematch` intent, which bypasses existing provider identifiers and plugin bindings and searches every enabled site. The frontend MUST NOT delete or update provider identifiers before a new download succeeds.
+
+#### Scenario: User chooses rematch after identifier success
+- **WHEN** the user clicks `重新智能匹配` on a provider-identifier result
+- **THEN** the frontend SHALL request `rematch`, display the backend's newly searched candidates and decision reasons, and leave existing metadata unchanged during preview
+
+#### Scenario: Rematch does not produce a successful download
+- **WHEN** rematch is cancelled, remains ambiguous, has no result, or its download fails
+- **THEN** the existing provider identifiers and bindings SHALL remain available to a later default match
+
+### Requirement: Match origin and backend decision are observable
+Preview responses and the dialog SHALL distinguish at least `provider-id`, `binding`, `scored`, and `manual` origins and SHALL expose the backend decision reason needed to explain automatic selection.
+
+#### Scenario: Match was selected by configured site priority
+- **WHEN** a `score >= 0.90` candidate from an earlier site is selected over a higher-scoring candidate from a later site
+- **THEN** the dialog SHALL identify the selected site and backend priority decision without moving score calculation into the frontend

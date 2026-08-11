@@ -204,73 +204,28 @@ namespace Emby.Plugin.Danmu.Scraper
             IList<DanmuMatchCandidate> candidates,
             bool allowProviderPriorityTie = true)
         {
-            if (candidates == null || candidates.Count == 0 || candidates[0].Score < 0.78)
+            // r6 deliberately has one confidence rule.  Provider order decides the
+            // winning site, then score decides only within that one site.  The
+            // compatibility parameter is retained for callers compiled against r5;
+            // partial search must no longer make an automatic decision at all.
+            var confident = (candidates ?? new List<DanmuMatchCandidate>())
+                .Where(x => x != null && x.Score >= 0.90)
+                .ToList();
+            if (confident.Count == 0)
             {
                 return null;
             }
 
-            if (candidates.Count == 1 || candidates[1].Score < 0.65)
-            {
-                return candidates[0];
-            }
-
-            var competingCandidates = candidates
-                .Where(x => x.Score >= 0.65)
+            var sourceOrder = confident.Min(x => x.SourceOrder);
+            var preferredSite = confident
+                .Where(x => x.SourceOrder == sourceOrder)
                 .ToList();
-            if (competingCandidates.All(x => IsSameSite(x, competingCandidates[0])))
-            {
-                return SelectUniqueHighest(competingCandidates);
-            }
-
-            var topScoreValue = candidates[0].Score;
-            var topScoreCandidates = competingCandidates
-                .Where(x => x.Score == topScoreValue)
-                .ToList();
-            if (topScoreCandidates.Count > 1 &&
-                topScoreCandidates.Any(x => !IsSameSite(x, topScoreCandidates[0])))
-            {
-                if (!allowProviderPriorityTie)
-                {
-                    return null;
-                }
-
-                var topPriority = topScoreCandidates.Min(x => x.SourceOrder);
-                return SelectUniqueHighest(topScoreCandidates
-                    .Where(x => x.SourceOrder == topPriority)
-                    .ToList());
-            }
-
-            var topScore = (decimal)topScoreValue;
-            var closeCandidates = candidates
-                .Where(x => (decimal)x.Score >= 0.9500m &&
-                            topScore - (decimal)x.Score <= 0.0300m)
-                .ToList();
-            if (closeCandidates.Count == 1)
-            {
-                return closeCandidates[0];
-            }
-
-            if (closeCandidates.Count == 0 || !allowProviderPriorityTie)
-            {
-                return null;
-            }
-
-            var highestPriority = closeCandidates.Min(x => x.SourceOrder);
-            var preferredCandidates = closeCandidates
-                .Where(x => x.SourceOrder == highestPriority)
-                .ToList();
-            return SelectUniqueHighest(preferredCandidates);
+            return SelectUniqueHighest(preferredSite);
         }
 
         public static bool CanAutoSelect(IList<DanmuMatchCandidate> candidates, bool allowProviderPriorityTie = true)
         {
             return SelectAutoCandidate(candidates, allowProviderPriorityTie) != null;
-        }
-
-        private static bool IsSameSite(DanmuMatchCandidate left, DanmuMatchCandidate right)
-        {
-            return left.SourceOrder == right.SourceOrder &&
-                   string.Equals(left.Site, right.Site, StringComparison.OrdinalIgnoreCase);
         }
 
         private static DanmuMatchCandidate SelectUniqueHighest(IList<DanmuMatchCandidate> candidates)

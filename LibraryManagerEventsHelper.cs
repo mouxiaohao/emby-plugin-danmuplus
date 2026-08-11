@@ -44,6 +44,15 @@ namespace Emby.Plugin.Danmu
         private readonly IFileSystem _fileSystem;
         private Timer _queueTimer;
         private readonly ScraperManager _scraperManager;
+
+        // Provider writes can be completed out of order by concurrent downloads.
+        // Generations are allocated when an operation starts; commits for one
+        // item/provider are serialized so an older completion cannot win later.
+        private long _providerWriteGeneration;
+        private readonly ProviderWriteGenerationTracker _providerWriteTracker =
+            new ProviderWriteGenerationTracker();
+        private readonly ConcurrentDictionary<string, SemaphoreSlim> _providerWriteLocks =
+            new ConcurrentDictionary<string, SemaphoreSlim>(StringComparer.Ordinal);
         
         // 为强制下载任务设计的专用队列和信号量
         private readonly ConcurrentQueue<LibraryEvent> _forceEventQueue = new ConcurrentQueue<LibraryEvent>();
@@ -367,21 +376,55 @@ namespace Emby.Plugin.Danmu
             if (eventType == EventType.Add)
             {
                 // var queueUpdateMeta = new List<BaseItem>();
+                var enabledScrapers = _scraperManager.All().ToList();
                 foreach (var item in movies)
                 {
-                    foreach (var scraper in _scraperManager.All())
+                    DanmuMatchCandidate selectedMovieCandidate = null;
+                    var movieMatchSearched = false;
+                    foreach (var scraper in enabledScrapers)
                     {
                         try
                         {
                             // 读取最新数据，要不然取不到年份信息
-                            var currentItem = _libraryManager.GetItemById(item.InternalId) ?? item;
-                            var mediaId = await scraper.SearchMediaId(currentItem);
-                            if (string.IsNullOrEmpty(mediaId))
+                            if (!movieMatchSearched)
                             {
-                                _logger.LogInformation("[{0}]匹配失败：{1} ({2})", scraper.Name, item.Name,
-                                    item.ProductionYear);
+                                var currentItem = _libraryManager.GetItemById(item.InternalId) as Movie ?? item;
+                                var providerDecision = await DanmuProviderIdResolver.ResolveAsync(
+                                    enabledScrapers, new BaseItem[] { currentItem }, _logger).ConfigureAwait(false);
+                                selectedMovieCandidate = providerDecision.Candidate;
+                                if (selectedMovieCandidate == null &&
+                                    DanmuMatchBindingHelper.TryGetSavedManualBinding(
+                                        false,
+                                        enabledScrapers,
+                                        currentItem.ProviderIds,
+                                        out var boundScraper,
+                                        out var boundId))
+                                {
+                                    selectedMovieCandidate = new DanmuMatchCandidate
+                                    {
+                                        Id = boundId,
+                                        Site = boundScraper.ProviderId,
+                                        SiteName = boundScraper.ProviderName,
+                                        Name = currentItem.Name,
+                                        MatchOrigin = "binding",
+                                        DecisionReason = "saved-binding",
+                                    };
+                                }
+                                if (selectedMovieCandidate == null)
+                                {
+                                    var movieSearch = await DanmuMatchSearchEngine.SearchMovieAsync(
+                                        enabledScrapers, currentItem, null, _logger).ConfigureAwait(false);
+                                    selectedMovieCandidate = DanmuMatchScorer.SelectAutoCandidate(movieSearch.Candidates);
+                                }
+                                movieMatchSearched = true;
+                            }
+                            if (selectedMovieCandidate == null ||
+                                !string.Equals(scraper.ProviderId, selectedMovieCandidate.Site, StringComparison.OrdinalIgnoreCase))
+                            {
                                 continue;
                             }
+
+                            var mediaId = selectedMovieCandidate.Id;
 
                             var media = await scraper.GetMedia(item, mediaId);
                             if (media != null)
@@ -414,16 +457,21 @@ namespace Emby.Plugin.Danmu
 
                                 // 更新epid元数据
                                 // 对于电影，ProviderId 存储的是搜索时用的ID (mediaId, 如B站的season_id, 爱奇艺的LinkId, 腾讯的cid, 优酷的show_id)
-                                item.SetProviderId(scraper.ProviderId, mediaId); 
+                                // The binding is persisted only after a valid XML file is written.
                                 // 可以考虑额外存储一个特定于播放的 ep_id，如果 Emby 支持多个 ProviderId 或自定义字段
                                 // 例如: item.SetProviderId($"{scraper.ProviderId}_Playable", idToUseForDanmakuProcessing);
-                                item.UpdateToRepository(ItemUpdateType.MetadataEdit);
-                                
+
                                 // 下载弹幕
                                 if (!string.IsNullOrEmpty(idToUseForDanmakuProcessing)) {
                                     // 对于B站, DownloadDanmu 会调用 GetMediaEpisode 并传入此 ep_id 来获取 aid,cid
                                     // 对于爱奇艺, DownloadDanmu 会直接使用此 TvId
-                                    await this.DownloadMovieForProgress(item, media, scraper, false).ConfigureAwait(false);
+                                    var outcome = await this.DownloadMovieForProgress(item, media, scraper, false).ConfigureAwait(false);
+                                    if (outcome.FilePersisted &&
+                                        (string.Equals(outcome.Status, "success", StringComparison.OrdinalIgnoreCase) ||
+                                         string.Equals(outcome.Status, "partial", StringComparison.OrdinalIgnoreCase)))
+                                    {
+                                        await PersistDownloadProviderIdAsync(item, outcome, mediaId).ConfigureAwait(false);
+                                    }
                                 } else {
                                     _logger.Warn($"[{scraper.Name}]为电影 '{item.Name}' (SearchMediaId: {mediaId}) 未能从GetMedia结果中确定有效的ID (media.CommentId 或首个 episode 的 CommentId) 用于下载弹幕. media.Id='{media.Id}', media.CommentId='{media.CommentId}'");
                                 }
@@ -553,8 +601,6 @@ namespace Emby.Plugin.Danmu
                     var media = await scraper.GetMedia(item, mediaId);
                     if (media != null)
                     {
-                        await this.ForceSaveProviderId(item, scraper.ProviderId, media.Id);
-
                         // 确定用于获取剧集详情的ID。
                         // 对于B站电影，需要使用ep_id，它存储在media.CommentId中。
                         // 对于其他提供商，通常使用主要的媒体ID，它存储在media.Id中。
@@ -573,7 +619,13 @@ namespace Emby.Plugin.Danmu
                         if (episode != null)
                         {
                             // 下载弹幕xml文件
-                            await this.DownloadMovieForProgress((Movie)item, media, scraper, true).ConfigureAwait(false);
+                            var outcome = await this.DownloadMovieForProgress((Movie)item, media, scraper, true).ConfigureAwait(false);
+                            if (outcome.FilePersisted &&
+                                (string.Equals(outcome.Status, "success", StringComparison.OrdinalIgnoreCase) ||
+                                 string.Equals(outcome.Status, "partial", StringComparison.OrdinalIgnoreCase)))
+                            {
+                                await PersistDownloadProviderIdAsync(item, outcome, mediaId).ConfigureAwait(false);
+                            }
                         }
                         else
                         {
@@ -699,11 +751,24 @@ namespace Emby.Plugin.Danmu
                     string selectedMediaId = null;
                     DanmuMatchCandidate selectedCandidate = null;
 
-                    // A saved manual binding always wins over automatic scoring.
+                    var providerDecision = await DanmuProviderIdResolver.ResolveAsync(
+                        scrapers,
+                        new BaseItem[] { season, series },
+                        _logger).ConfigureAwait(false);
+                    if (providerDecision.Candidate != null)
+                    {
+                        selectedScraper = providerDecision.Scraper;
+                        selectedMediaId = providerDecision.Candidate.Id;
+                        selectedCandidate = providerDecision.Candidate;
+                    }
+
+                    // A saved manual binding always wins over automatic scoring when
+                    // no configured provider identifier can be resolved.
                     var bindingProviderIds = currentItem?.ProviderIds ?? season.ProviderIds;
                     foreach (var scraper in scrapers)
                     {
-                        if (bindingProviderIds != null &&
+                        if (selectedScraper == null &&
+                            bindingProviderIds != null &&
                             bindingProviderIds.TryGetValue(scraper.ProviderId + "Manual", out var manualId) &&
                             !string.IsNullOrWhiteSpace(manualId))
                         {
@@ -773,14 +838,34 @@ namespace Emby.Plugin.Danmu
                             continue;
                         }
 
-                        // Keep exactly one automatic provider binding.  Otherwise a
-                        // stale provider earlier in the configured order could still be
-                        // chosen by the subsequent download phase.
-                        await SaveAutomaticSeasonProviderId(
-                            season,
-                            selectedScraper.ProviderId,
-                            selectedMediaId,
-                            scrapers).ConfigureAwait(false);
+                        // A Series-level identifier can resolve the Season download,
+                        // but it must never be copied onto the Season itself.
+                        var persistSeasonProviderId = providerDecision.Candidate == null ||
+                            !string.Equals(providerDecision.ResolvedScopeType, "Series", StringComparison.OrdinalIgnoreCase);
+                        var seasonProviderGeneration = persistSeasonProviderId
+                            ? BeginProviderWrite(season, selectedScraper.ProviderId)
+                            : 0;
+                        if (!await DownloadAutomaticSeasonForImport(
+                                season,
+                                media,
+                                selectedScraper).ConfigureAwait(false))
+                        {
+                            _logger.LogInformation(
+                                "[{0}] 匹配到季度但没有成功写入有效弹幕文件，不保存 ProviderId: {1}",
+                                selectedScraper.Name,
+                                originalSeasonName);
+                            continue;
+                        }
+
+                        if (persistSeasonProviderId)
+                        {
+                            await SaveAutomaticSeasonProviderId(
+                                season,
+                                selectedScraper.ProviderId,
+                                selectedMediaId,
+                                scrapers,
+                                seasonProviderGeneration).ConfigureAwait(false);
+                        }
                         _logger.LogInformation(
                             "[{0}]全站智能匹配成功：series={1}, season={2}, ProviderId={3}, title={4}, score={5}",
                             selectedScraper.Name,
@@ -898,14 +983,6 @@ namespace Emby.Plugin.Danmu
                                     _logger.LogInformation("[{0}]成功匹配. {1}.{2} -> epId: {3} cid: {4}", scraper.Name,
                                         indexNumber, episode.Name, epId, commentId);
 
-                                    // 更新eposide元数据
-                                    var episodeProviderVal = episode.GetProviderId(scraper.ProviderId);
-                                    if (!string.IsNullOrEmpty(epId) && episodeProviderVal != epId)
-                                    {
-                                        episode.SetProviderId(scraper.ProviderId, epId);
-                                        queueUpdateMeta.Add(episode);
-                                    }
-
                                     var danmuXmlPath = Path.Combine(episode.ContainingFolderPath, episode.GetDanmuXmlPath(scraper.ProviderId));
                                     var lastWriteTime = this._fileSystem.GetLastWriteTime(danmuXmlPath);
                                     var diff = DateTime.Now - lastWriteTime;
@@ -919,7 +996,11 @@ namespace Emby.Plugin.Danmu
                                     try
                                     {
                                         // 下载弹幕
-                                        await this.DownloadDanmu(scraper, episode, commentId).ConfigureAwait(false);
+                                        var outcome = await DownloadDanmuForPersistence(scraper, episode, commentId).ConfigureAwait(false);
+                                        if (outcome.FilePersisted && !string.IsNullOrWhiteSpace(epId))
+                                        {
+                                            await PersistDownloadProviderIdAsync(episode, outcome, epId).ConfigureAwait(false);
+                                        }
                                     }
                                     catch (DanmuDownloadErrorException ex)
                                     {
@@ -966,20 +1047,51 @@ namespace Emby.Plugin.Danmu
             Season season,
             string providerId,
             string providerValue,
-            IEnumerable<AbstractScraper> scrapers)
+            IEnumerable<AbstractScraper> scrapers,
+            long providerWriteGeneration)
         {
             var updateItem = _libraryManager.GetItemById(season.Id) as Season ?? season;
-            foreach (var scraper in scrapers)
+            await SaveProviderIdForGeneration(
+                updateItem, providerId, providerValue, false, providerWriteGeneration).ConfigureAwait(false);
+        }
+
+        private async Task<bool> DownloadAutomaticSeasonForImport(
+            Season season,
+            ScraperMedia media,
+            AbstractScraper scraper)
+        {
+            var episodes = (season.GetEpisodes()?.Items ?? Array.Empty<BaseItem>())
+                .OfType<Episode>()
+                .Where(x => x.ParentIndexNumber.HasValue && x.ParentIndexNumber.Value > 0)
+                .OrderBy(x => x.IndexNumber ?? int.MaxValue)
+                .ToList();
+            var anyFilePersisted = false;
+
+            foreach (var episode in episodes)
             {
-                // Keep *Manual bindings intact; they remain the explicit user choice.
-                updateItem.ProviderIds.Remove(scraper.ProviderId);
-                season.ProviderIds.Remove(scraper.ProviderId);
+                try
+                {
+                    var outcome = await DownloadEpisodeForProgress(
+                        episode, media, scraper, false).ConfigureAwait(false);
+                    if (outcome.FilePersisted &&
+                        (string.Equals(outcome.Status, "success", StringComparison.OrdinalIgnoreCase) ||
+                         string.Equals(outcome.Status, "partial", StringComparison.OrdinalIgnoreCase)))
+                    {
+                        await PersistDownloadProviderIdAsync(episode, outcome).ConfigureAwait(false);
+                        anyFilePersisted = true;
+                    }
+                }
+                catch (DanmuDownloadErrorException ex)
+                {
+                    _logger.LogInformation("[{0}] 自动入库季度下载失败：{1}", scraper.Name, ex.Message);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "[{0}] 自动入库季度下载异常：{1}", scraper.Name, episode.Name);
+                }
             }
 
-            updateItem.ProviderIds[providerId] = providerValue;
-            season.ProviderIds[providerId] = providerValue;
-            await updateItem.UpdateToRepositoryAsync(ItemUpdateType.MetadataEdit, CancellationToken.None)
-                .ConfigureAwait(false);
+            return anyFilePersisted;
         }
 
         /// <summary>
@@ -1024,7 +1136,11 @@ namespace Emby.Plugin.Danmu
                             if (episode != null)
                             {
                                 // 下载弹幕xml文件
-                                await this.DownloadDanmu(scraper, item, episode.CommentId).ConfigureAwait(false);
+                                var outcome = await DownloadDanmuForPersistence(scraper, item, episode.CommentId).ConfigureAwait(false);
+                                if (outcome.FilePersisted && !string.IsNullOrWhiteSpace(episode.Id))
+                                {
+                                    await PersistDownloadProviderIdAsync(item, outcome, episode.Id).ConfigureAwait(false);
+                                }
                             }
                         }
                         catch (DanmuDownloadErrorException ex)
@@ -1076,11 +1192,14 @@ namespace Emby.Plugin.Danmu
                     // _logger.LogInformation("查询弹幕信息 media= " + media.ToJson());
                     if (media != null)
                     {
-                        // 更新季元数据
-                        await ForceSaveProviderId(season, scraper.ProviderId, media.Id);
-
                         // 下载一集弹幕
-                        await downloadOneEpisode((Episode)item, media, scraper);
+                        var seasonProviderGeneration = BeginProviderWrite(season, scraper.ProviderId);
+                        var filePersisted = await downloadOneEpisode((Episode)item, media, scraper).ConfigureAwait(false);
+                        if (filePersisted && !string.IsNullOrWhiteSpace(media.Id))
+                        {
+                            await SaveProviderIdForGeneration(
+                                season, scraper.ProviderId, media.Id, false, seasonProviderGeneration).ConfigureAwait(false);
+                        }
                         // // 更新所有剧集元数据，GetEpisodes一定要取所有fields，要不然更新会导致重建虚拟season季信息
                         // var episodeItemResult = season.GetEpisodes();
                         // var episodeList = episodeItemResult.Items;
@@ -1119,30 +1238,34 @@ namespace Emby.Plugin.Danmu
             }
         }
 
-        private async Task downloadOneEpisode(Episode episode, ScraperMedia media, AbstractScraper scraper)
+        private async Task<bool> downloadOneEpisode(Episode episode, ScraperMedia media, AbstractScraper scraper)
         {
             var fileName = Path.GetFileName(episode.Path);
             var indexNumber = episode.IndexNumber ?? 0;
             if (indexNumber < 1 || indexNumber > media.Episodes.Count)
             {
                 _logger.LogInformation("[{0}]缺少集号或集号超过弹幕数，忽略处理. [{1}]{2}, indexNumber={3}, mediaCount={4}", scraper.Name, episode.Name, fileName, indexNumber, media.Episodes.Count);
-                return;
+                return false;
             }
             // 特典或extras影片不处理（动画经常会放在季文件夹下）
             if (episode.ParentIndexNumber == null || episode.ParentIndexNumber == 0)
             {
                 _logger.LogInformation("[{0}]缺少季号，可能是特典或extras影片，忽略处理. [{1}]{2}", scraper.Name, episode.Name, fileName);
-                return;
+                return false;
             }
 
             var epId = media.Episodes[indexNumber - 1].Id;
             var commentId = media.Episodes[indexNumber - 1].CommentId;
 
             // 下载弹幕xml文件
-            await this.DownloadDanmu(scraper, episode, commentId, true).ConfigureAwait(false);
+            var outcome = await DownloadDanmuForPersistence(scraper, episode, commentId, true).ConfigureAwait(false);
 
             // 更新剧集元数据
-            await ForceSaveProviderId(episode, scraper.ProviderId, epId);
+            if (outcome.FilePersisted && !string.IsNullOrWhiteSpace(epId))
+            {
+                await PersistDownloadProviderIdAsync(episode, outcome, epId).ConfigureAwait(false);
+            }
+            return outcome.FilePersisted;
         }
 
         /// <summary>
@@ -1237,7 +1360,7 @@ namespace Emby.Plugin.Danmu
                 mediaEpisode,
                 scraper,
                 forceRefresh,
-                false).ConfigureAwait(false);
+                true).ConfigureAwait(false);
         }
 
         private async Task<DanmuEpisodeDownloadOutcome> DownloadItemForProgress(
@@ -1247,6 +1370,13 @@ namespace Emby.Plugin.Danmu
             bool forceRefresh,
             bool saveItemProviderId = true)
         {
+            if (item == null || string.IsNullOrWhiteSpace(item.FileNameWithoutExtension) ||
+                string.IsNullOrWhiteSpace(item.ContainingFolderPath))
+            {
+                throw new DanmuDownloadErrorException("媒体项缺少可写入的文件路径");
+            }
+
+            var providerWriteGeneration = BeginProviderWrite(item, scraper.ProviderId);
             var danmuPath = Path.Combine(
                 item.ContainingFolderPath,
                 item.GetDanmuXmlPath(scraper.ProviderId));
@@ -1265,6 +1395,8 @@ namespace Emby.Plugin.Danmu
                     {
                         Status = "skipped",
                         Message = "重复已跳过",
+                        ProviderId = saveItemProviderId ? scraper.ProviderId : string.Empty,
+                        ProviderWriteGeneration = providerWriteGeneration,
                     };
             }
 
@@ -1285,10 +1417,6 @@ namespace Emby.Plugin.Danmu
             var bytes = DanmuDownloadContent.Serialize(danmaku);
 
             await SaveDanmu(scraper, item, bytes).ConfigureAwait(false);
-            if (saveItemProviderId && !string.IsNullOrWhiteSpace(mediaEpisode.Id))
-            {
-                await ForceSaveProviderId(item, scraper.ProviderId, mediaEpisode.Id).ConfigureAwait(false);
-            }
             if (isPartial)
             {
                 return new DanmuEpisodeDownloadOutcome
@@ -1297,6 +1425,10 @@ namespace Emby.Plugin.Danmu
                     Message = $"部分弹幕缺失（{danmaku.SegmentFailed}/{danmaku.SegmentTotal} 个分段）",
                     SegmentTotal = danmaku.SegmentTotal,
                     SegmentFailed = danmaku.SegmentFailed,
+                    ProviderId = saveItemProviderId ? scraper.ProviderId : string.Empty,
+                    ProviderValue = saveItemProviderId ? mediaEpisode.Id ?? string.Empty : string.Empty,
+                    FilePersisted = true,
+                    ProviderWriteGeneration = providerWriteGeneration,
                 };
             }
 
@@ -1305,6 +1437,10 @@ namespace Emby.Plugin.Danmu
                 Status = "success",
                 Message = "下载成功",
                 SegmentTotal = danmaku.SegmentTotal,
+                ProviderId = saveItemProviderId ? scraper.ProviderId : string.Empty,
+                ProviderValue = saveItemProviderId ? mediaEpisode.Id ?? string.Empty : string.Empty,
+                FilePersisted = true,
+                ProviderWriteGeneration = providerWriteGeneration,
             };
         }
 
@@ -1354,6 +1490,13 @@ namespace Emby.Plugin.Danmu
         public async Task DownloadDanmu(AbstractScraper scraper, BaseItem item, string commentId,
             bool ignoreCheck = false)
         {
+            await DownloadDanmuForPersistence(scraper, item, commentId, ignoreCheck).ConfigureAwait(false);
+        }
+
+        private async Task<DanmuEpisodeDownloadOutcome> DownloadDanmuForPersistence(AbstractScraper scraper, BaseItem item, string commentId,
+            bool ignoreCheck = false)
+        {
+            var providerWriteGeneration = BeginProviderWrite(item, scraper?.ProviderId);
             // 下载弹幕xml文件
             var checkDownloadedKey = $"{item.Id}_{commentId}";
             try
@@ -1363,7 +1506,12 @@ namespace Emby.Plugin.Danmu
                 {
                     _logger.LogInformation("[{0}]最近7天已更新过弹幕xml，忽略处理：{1}.{2}", scraper.Name, item.IndexNumber,
                         item.Name);
-                    return;
+                    return new DanmuEpisodeDownloadOutcome
+                    {
+                        Status = "skipped",
+                        ProviderId = scraper.ProviderId,
+                        ProviderWriteGeneration = providerWriteGeneration,
+                    };
                 }
 
                 _memoryCache.Set(checkDownloadedKey, true, _danmuUpdatedExpiredOption);
@@ -1375,6 +1523,13 @@ namespace Emby.Plugin.Danmu
                     await this.SaveDanmu(scraper, item, bytes);
                     this._logger.LogInformation("[{0}]弹幕下载成功：name={1}.{2} commentId={3}", scraper.Name,
                         item.IndexNumber ?? 1, item.Name, commentId);
+                    return new DanmuEpisodeDownloadOutcome
+                    {
+                        Status = "success",
+                        ProviderId = scraper.ProviderId,
+                        FilePersisted = true,
+                        ProviderWriteGeneration = providerWriteGeneration,
+                    };
                 }
                 else
                 {
@@ -1391,6 +1546,12 @@ namespace Emby.Plugin.Danmu
                 
                 _memoryCache.Remove(checkDownloadedKey);
                 _logger.LogError(ex, "[{0}]Exception handled download danmu file. name={1}", scraper.Name, item.Name);
+                return new DanmuEpisodeDownloadOutcome
+                {
+                    Status = "failed",
+                    ProviderId = scraper?.ProviderId ?? string.Empty,
+                    ProviderWriteGeneration = providerWriteGeneration,
+                };
             }
         }
 
@@ -1413,8 +1574,16 @@ namespace Emby.Plugin.Danmu
 
         private async Task SaveDanmu(AbstractScraper scraper, BaseItem item, byte[] bytes)
         {
-            // 单元测试时为null
-            if (item.FileNameWithoutExtension == null) return;
+            if (item == null || string.IsNullOrWhiteSpace(item.FileNameWithoutExtension) ||
+                string.IsNullOrWhiteSpace(item.ContainingFolderPath))
+            {
+                throw new DanmuDownloadErrorException("媒体项缺少可写入的文件路径");
+            }
+
+            if (bytes == null || bytes.Length == 0)
+            {
+                throw new DanmuDownloadErrorException("弹幕来源没有可持久化的有效内容");
+            }
 
             // 下载弹幕xml文件
             var danmuPath = Path.Combine(item.ContainingFolderPath, item.GetDanmuXmlPath(scraper.ProviderId));
@@ -1464,30 +1633,106 @@ namespace Emby.Plugin.Danmu
 
         public async Task SaveProviderId(BaseItem item, string providerId, string providerVal, bool manual)
         {
+            var generation = BeginProviderWrite(item, providerId);
+            await SaveProviderIdForGeneration(item, providerId, providerVal, manual, generation).ConfigureAwait(false);
+        }
+
+        private async Task SaveProviderIdForGeneration(
+            BaseItem item,
+            string providerId,
+            string providerVal,
+            bool manual,
+            long generation)
+        {
             _logger.Info("SaveProviderId item={0}, providerId={1}, providerVal={2}, manual={3}",
                 item?.GetParent(), providerId, providerVal, manual);
+            if (item == null || string.IsNullOrWhiteSpace(providerId) || string.IsNullOrWhiteSpace(providerVal))
+            {
+                return;
+            }
+
             var updateItem = item;
             // Season 不存在需要更新到 Series上
-            if (Guid.Empty.Equals(updateItem.Id) && updateItem is Season)
+            if (Guid.Empty.Equals(updateItem.Id))
             {
-                updateItem = item.GetParent();
+                _logger.Warn("Skip ProviderId persistence for an item without its own id: {0}", item.Name);
+                return;
             }
 
             // 先清空旧弹幕的所有元数据
-            foreach (var s in _scraperManager.All())
-            {
-                updateItem.ProviderIds.Remove(s.ProviderId);
-                updateItem.ProviderIds.Remove(s.ProviderId + "Manual");
-            }
-
             // 保存指定弹幕元数据
-            updateItem.ProviderIds[providerId] = providerVal;
+            var writeKey = GetProviderWriteKey(item, providerId);
+            var writeLock = _providerWriteLocks.GetOrAdd(writeKey, _ => new SemaphoreSlim(1, 1));
+            await writeLock.WaitAsync().ConfigureAwait(false);
+            try
+            {
+                if (_providerWriteTracker.IsStale(writeKey, generation, out var latestGeneration))
+                {
+                    _logger.Info("Skip stale ProviderId write: item={0}, providerId={1}, generation={2}, committed={3}",
+                        item.Name, providerId, generation, latestGeneration);
+                    return;
+                }
+
+                var manualKey = providerId + "Manual";
+                if (string.Equals(item.GetProviderId(providerId), providerVal, StringComparison.Ordinal) &&
+                    (!manual || string.Equals(item.GetProviderId(manualKey), providerVal, StringComparison.Ordinal)))
+                {
+                    _providerWriteTracker.MarkCommitted(writeKey, generation);
+                    return;
+                }
+
+                updateItem.ProviderIds[providerId] = providerVal;
             if (manual)
             {
-                updateItem.ProviderIds[providerId + "Manual"] = providerVal;
+                updateItem.ProviderIds[manualKey] = providerVal;
             }
-            await updateItem.UpdateToRepositoryAsync(ItemUpdateType.MetadataEdit, CancellationToken.None)
-                .ConfigureAwait(false);
+                await updateItem.UpdateToRepositoryAsync(ItemUpdateType.MetadataEdit, CancellationToken.None)
+                    .ConfigureAwait(false);
+                _providerWriteTracker.MarkCommitted(writeKey, generation);
+            }
+            finally
+            {
+                writeLock.Release();
+            }
+        }
+
+        public Task PersistDownloadProviderIdAsync(BaseItem item, DanmuEpisodeDownloadOutcome outcome)
+        {
+            return PersistDownloadProviderIdAsync(item, outcome, null);
+        }
+
+        public Task PersistDownloadProviderIdAsync(
+            BaseItem item,
+            DanmuEpisodeDownloadOutcome outcome,
+            string providerValueOverride)
+        {
+            if (!DanmuDownloadPersistencePolicy.ShouldPersist(outcome, providerValueOverride))
+            {
+                return Task.CompletedTask;
+            }
+
+            var providerValue = string.IsNullOrWhiteSpace(providerValueOverride)
+                ? outcome.ProviderValue
+                : providerValueOverride;
+            var generation = outcome.ProviderWriteGeneration > 0
+                ? outcome.ProviderWriteGeneration
+                : BeginProviderWrite(item, outcome.ProviderId);
+            return SaveProviderIdForGeneration(item, outcome.ProviderId, providerValue, false, generation);
+        }
+
+        private long BeginProviderWrite(BaseItem item, string providerId)
+        {
+            if (item == null || string.IsNullOrWhiteSpace(providerId))
+            {
+                return 0;
+            }
+
+            return Interlocked.Increment(ref _providerWriteGeneration);
+        }
+
+        private static string GetProviderWriteKey(BaseItem item, string providerId)
+        {
+            return item.Id.ToString("N") + "\u001f" + providerId;
         }
 
         private Task ForceSaveProviderId(BaseItem item, string providerId, string providerVal)
@@ -1573,8 +1818,6 @@ namespace Emby.Plugin.Danmu
             }
             
             var epId = media.Episodes[episodeIndexNumber - 1].Id;
-            // 更新剧集元数据
-            await ForceSaveProviderId(episode, scraper.ProviderId, epId);
             return epId;
         }
     }

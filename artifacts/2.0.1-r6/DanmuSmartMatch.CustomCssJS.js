@@ -1,14 +1,14 @@
 ﻿/*
  * Emby.CustomCssJS: 电视剧/季/集/电影智能匹配并一键下载弹幕
- * 适用于 Emby 4.9.x + 本方案配套的 Emby.Plugin.Danmu 2.0.2r1 DLL
+ * 适用于 Emby 4.9.x + 本方案配套的 Emby.Plugin.Danmu 2.0.1-r6 DLL
  */
 (function () {
     "use strict";
 
-    // V12 keeps the r6 wire contract while refreshing the presentation layer.
-    var INSTALL_FLAG = "__embyDanmuSmartMenuV12";
+    // r6 changes the match-preview contract.  Use a new marker so an updated
+    // CustomCssJS entry can be installed alongside a stale browser page safely.
+    var INSTALL_FLAG = "__embyDanmuSmartMenuV10";
     var BUTTON_ID = "danmu-bulk-download";
-    var activeDialogs = [];
 
     if (window[INSTALL_FLAG]) {
         return;
@@ -241,7 +241,6 @@
         card.append(header, body, footer);
         overlay.appendChild(card);
         document.body.appendChild(overlay);
-        var disposed = false;
         var dialog = {
             overlay: overlay,
             title: heading,
@@ -250,36 +249,16 @@
             closable: true,
             forceRefresh: false,
             close: function () {
-                return dialog.closable ? dispose() : false;
+                if (dialog.closable) overlay.remove();
             },
-            forceClose: function () { return dispose(); }
+            forceClose: function () { overlay.remove(); }
         };
-        function isTopmost() {
-            for (var index = activeDialogs.length - 1; index >= 0; index--) {
-                if (activeDialogs[index].overlay.isConnected) {
-                    return activeDialogs[index] === dialog;
-                }
+        close.addEventListener("click", dialog.close);
+        overlay.addEventListener("click", function (event) {
+            if (event.target === overlay) {
+                dialog.close();
             }
-            return false;
-        }
-        function escapeListener(event) {
-            if (event.key === "Escape" && isTopmost() && dialog.close()) {
-                event.preventDefault();
-                event.stopPropagation();
-            }
-        }
-        function dispose() {
-            if (disposed) return false;
-            disposed = true;
-            document.removeEventListener("keydown", escapeListener);
-            var index = activeDialogs.indexOf(dialog);
-            if (index >= 0) activeDialogs.splice(index, 1);
-            overlay.remove();
-            return true;
-        }
-        activeDialogs.push(dialog);
-        close.addEventListener("click", function () { dialog.close(); });
-        document.addEventListener("keydown", escapeListener);
+        });
         return dialog;
     }
 
@@ -357,84 +336,21 @@
         return String(value(target, "DecisionReason", "decisionReason", "") || "").trim();
     }
 
-    function normalizeDecisionCode(code) {
-        return String(code || "").trim().toLowerCase()
-            .replace(/[\s_]+/g, "-")
-            .replace(/-+/g, "-");
-    }
-
-    function codePresentation(raw, labels, fallback) {
-        var normalized = normalizeDecisionCode(raw);
-        if (!normalized) return { label: "", diagnostic: "" };
-        return {
-            label: labels[normalized] || fallback,
-            diagnostic: labels[normalized] ? "" : String(raw).trim()
-        };
-    }
-
-    function matchOriginPresentation(target) {
-        return codePresentation(matchOrigin(target), {
-            "provider-id": "本地外部标识符",
-            "providerid": "本地外部标识符",
-            "external-id": "本地外部标识符",
-            "externalid": "本地外部标识符",
-            "local-external-id": "本地外部标识符",
-            "binding": "已保存绑定",
-            "saved-binding": "已保存绑定",
-            "scored": "智能评分匹配",
-            "score": "智能评分匹配",
-            "manual": "手动选择",
-            "manual-selection": "手动选择"
-        }, "未知匹配来源");
-    }
-
-    function decisionReasonPresentation(target) {
-        return codePresentation(decisionReason(target), {
-            "provider-id": "使用本地外部标识符",
-            "providerid": "使用本地外部标识符",
-            "external-id": "使用本地外部标识符",
-            "externalid": "使用本地外部标识符",
-            "binding": "使用已保存绑定",
-            "saved-binding": "使用已保存绑定",
-            "confident-site-priority": "按站点优先级自动选择",
-            "site-priority": "按站点优先级自动选择",
-            "provider-id-unresolved": "本地标识符无法解析",
-            "unresolved-provider": "本地标识符无法解析",
-            "no-candidates": "未找到候选",
-            "no-candidate": "未找到候选",
-            "low-confidence": "置信度不足，需手动选择",
-            "manual": "手动选择",
-            "manual-selection": "手动选择"
-        }, "未知决策");
-    }
-
     function isProviderIdMatch(target) {
-        var normalized = normalizeDecisionCode(matchOrigin(target));
-        return ["provider-id", "providerid", "external-id", "externalid", "local-external-id"].indexOf(normalized) >= 0;
+        return /^(provider[-_ ]?id|providerid|external[-_ ]?id|externalid)$/i.test(matchOrigin(target));
     }
 
     function matchOriginLabel(target) {
-        return matchOriginPresentation(target).label;
-    }
-
-    function decisionReasonLabel(target) {
-        return decisionReasonPresentation(target).label;
-    }
-
-    function decisionFragment(prefix, presentation) {
-        if (!presentation.label) return "";
-        return prefix + "：" + presentation.label +
-            (presentation.diagnostic ? "（诊断代码：" + presentation.diagnostic + "）" : "");
+        var origin = matchOrigin(target);
+        return isProviderIdMatch(target) ? "本地外部标识符" : origin;
     }
 
     function backendDecisionLine(target) {
         var parts = [];
-        var origin = matchOriginPresentation(target);
-        var reason = decisionReasonPresentation(target);
-        var originFragment = decisionFragment("来源", origin);
-        var reasonFragment = decisionFragment("决策", reason);
-        if (originFragment) parts.push(originFragment);
-        if (reasonFragment) parts.push(reasonFragment);
+        var origin = matchOriginLabel(target);
+        var reason = decisionReason(target);
+        if (origin) parts.push("来源：" + origin);
+        if (reason) parts.push("决策：" + reason);
         return parts.join("　");
     }
 
@@ -546,7 +462,12 @@
         stop.className = "danmuSmartButton danger";
         stop.textContent = "强制停止全部下载";
         stop.disabled = true;
-        dialog.footer.append(background, stop);
+        var close = document.createElement("button");
+        close.className = "danmuSmartButton primary";
+        close.textContent = "关闭";
+        close.style.display = "none";
+        close.addEventListener("click", dialog.close);
+        dialog.footer.append(background, stop, close);
 
         var detached = false;
         var stopRequested = false;
@@ -648,6 +569,7 @@
                 // Some legacy provider calls cannot be physically cancelled. Let the
                 // user close immediately after the server accepted the stop request.
                 dialog.closable = true;
+                close.style.display = "";
                 background.style.display = "none";
                 stop.style.display = "none";
             } catch (error) {
@@ -704,6 +626,7 @@
             stop.style.display = "";
             stop.disabled = false;
             stop.textContent = "强制停止全部下载";
+            close.style.display = "none";
             dialog.closable = false;
 
             while (!detached && taskEntries.some(function (entry) {
@@ -781,6 +704,7 @@
             });
             background.style.display = "none";
             stop.style.display = "none";
+            close.style.display = "";
             dialog.closable = true;
         }
 
@@ -853,6 +777,10 @@
 
         appendForceRefreshOption(dialog);
 
+        var cancel = document.createElement("button");
+        cancel.className = "danmuSmartButton";
+        cancel.textContent = "取消";
+        cancel.addEventListener("click", dialog.close);
         var ok = document.createElement("button");
         ok.className = "danmuSmartButton primary";
         var matchedSeasons = seasons.filter(function (season) {
@@ -864,7 +792,7 @@
         ok.addEventListener("click", function () {
             submitSeriesSelections(dialog, matchedSeasons, selections);
         });
-        dialog.footer.appendChild(ok);
+        dialog.footer.append(cancel, ok);
     }
 
     function renderSeriesSeasonPicker(dialog, item, seasons, seasonIndex, selections, keywords) {
@@ -1057,11 +985,15 @@
 
         appendForceRefreshOption(dialog);
 
+        var cancel = document.createElement("button");
+        cancel.className = "danmuSmartButton";
+        cancel.textContent = "取消";
+        cancel.addEventListener("click", dialog.close);
         var bind = document.createElement("button");
         bind.className = "danmuSmartButton primary";
         bind.textContent = "绑定并下载";
         bind.disabled = !candidates.length;
-        dialog.footer.appendChild(bind);
+        dialog.footer.append(cancel, bind);
 
         searchButton.addEventListener("click", async function () {
             var newKeyword = input.value.trim();
@@ -1231,6 +1163,10 @@
             }
         });
 
+        var cancel = document.createElement("button");
+        cancel.className = "danmuSmartButton";
+        cancel.textContent = "取消";
+        cancel.addEventListener("click", dialog.close);
         var start = document.createElement("button");
         start.className = "danmuSmartButton primary";
         start.textContent = isEpisode ? "下载本集弹幕" : "绑定并下载电影弹幕";
@@ -1262,7 +1198,7 @@
                 value(selected, "Site", "site", "") !== value(candidate, "Site", "site", "");
             renderSingleTargetProgress(dialog, item, target, candidate, sourceEpisodeNumber, manual);
         });
-        dialog.footer.appendChild(start);
+        dialog.footer.append(cancel, start);
     }
 
     async function renderSingleTargetProgress(dialog, item, target, candidate, sourceEpisodeNumber, manual) {
@@ -1309,7 +1245,12 @@
         var stop = document.createElement("button");
         stop.className = "danmuSmartButton danger";
         stop.textContent = "强制停止全部下载";
-        dialog.footer.append(background, stop);
+        var close = document.createElement("button");
+        close.className = "danmuSmartButton primary";
+        close.textContent = "关闭";
+        close.style.display = "none";
+        close.addEventListener("click", dialog.close);
+        dialog.footer.append(background, stop, close);
 
         function terminal(status) {
             return status === "completed" || status === "completed_with_warnings" ||
@@ -1386,10 +1327,12 @@
             if (terminal(status)) {
                 background.style.display = "none";
                 stop.style.display = "none";
+                close.style.display = "";
                 dialog.closable = true;
             } else {
                 background.style.display = "";
                 stop.style.display = "";
+                close.style.display = "none";
                 dialog.closable = false;
             }
         }
@@ -1417,6 +1360,7 @@
                 notify(value(result, "Message", "message", "已提交停止请求"), false);
                 // The provider may ignore cancellation. Closing must never wait for it.
                 dialog.closable = true;
+                close.style.display = "";
                 background.style.display = "none";
                 stop.style.display = "none";
             } catch (error) {
@@ -1604,13 +1548,9 @@
         setPendingContext: setPendingContext,
         resolveMenuContextId: resolveMenuContextId,
         rematchParameters: rematchParameters,
-        normalizeDecisionCode: normalizeDecisionCode,
         matchOriginLabel: matchOriginLabel,
-        decisionReasonLabel: decisionReasonLabel,
         backendDecisionLine: backendDecisionLine,
         hasBackendMatch: hasBackendMatch,
-        openDialog: openDialog,
-        activeDialogCount: function () { return activeDialogs.length; },
         injectButton: injectButton,
         renderSingleTargetProgress: renderSingleTargetProgress,
         setButtonWorkflow: function (workflow) {

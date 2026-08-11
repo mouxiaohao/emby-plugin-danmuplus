@@ -68,24 +68,10 @@ namespace Emby.Plugin.Danmu.Scraper
                     }
                 }
 
-                // Only stop after the current keyword has been searched on every
-                // provider.  This keeps the decision global while avoiding several
-                // extra full-site rounds when the parent-title round has already
-                // produced an unambiguous winner.
-                var currentCandidates = ScoreCandidates(
-                    sources,
-                    scrapers,
-                    seriesName,
-                    seasonName,
-                    expectedYear,
-                    expectedEpisodes);
-                // Close candidates may be resolved by site priority only after all
-                // fallback keywords have had a chance to add stronger season evidence.
-                if (DanmuMatchScorer.SelectAutoCandidate(currentCandidates, false) != null)
-                {
-                    result.Candidates = currentCandidates;
-                    return result;
-                }
+                // Do not finalize after an individual keyword round.  r6 requires
+                // all enabled sites and all fallback evidence before site-priority
+                // selection, otherwise an early response can hide a better local
+                // candidate or incorrectly decide a cross-site result.
             }
 
             result.Candidates = ScoreCandidates(
@@ -192,7 +178,7 @@ namespace Emby.Plugin.Danmu.Scraper
 
         public static List<DanmuMatchCandidate> OrderCandidates(IEnumerable<DanmuMatchCandidate> candidates)
         {
-            return (candidates ?? Enumerable.Empty<DanmuMatchCandidate>())
+            var ordered = (candidates ?? Enumerable.Empty<DanmuMatchCandidate>())
                 .OrderByDescending(x => x.Score)
                 .ThenBy(x => x.SourceOrder)
                 .ThenByDescending(x => x.TitleScore)
@@ -200,6 +186,24 @@ namespace Emby.Plugin.Danmu.Scraper
                 .ThenByDescending(x => x.KeywordScore)
                 .ThenByDescending(x => x.EpisodeScore)
                 .ThenByDescending(x => x.YearScore)
+                .ThenBy(x => x.SiteName, StringComparer.OrdinalIgnoreCase)
+                .ThenBy(x => x.Name, StringComparer.OrdinalIgnoreCase)
+                .ThenBy(x => x.Id, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            var selected = DanmuMatchScorer.SelectAutoCandidate(ordered);
+            if (selected == null)
+            {
+                return ordered.Take(60).ToList();
+            }
+
+            // The explicit selected fields remain authoritative, but placing the
+            // chosen site's rows first makes the configured decision visible to
+            // older clients that only render candidates.
+            return ordered
+                .OrderByDescending(x => x.SourceOrder == selected.SourceOrder)
+                .ThenByDescending(x => x.SourceOrder == selected.SourceOrder ? x.Score : 0)
+                .ThenByDescending(x => x.Score)
+                .ThenBy(x => x.SourceOrder)
                 .ThenBy(x => x.SiteName, StringComparer.OrdinalIgnoreCase)
                 .ThenBy(x => x.Name, StringComparer.OrdinalIgnoreCase)
                 .ThenBy(x => x.Id, StringComparer.OrdinalIgnoreCase)

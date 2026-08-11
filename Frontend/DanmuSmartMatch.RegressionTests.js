@@ -107,7 +107,26 @@ const documentStub = {
     body: new FakeElement("body"),
     head: new FakeElement("head"),
     openedMenus: [],
-    addEventListener: function () {},
+    listeners: {},
+    addEventListener: function (type, listener) {
+        (this.listeners[type] || (this.listeners[type] = [])).push(listener);
+    },
+    removeEventListener: function (type, listener) {
+        const listeners = this.listeners[type] || [];
+        const index = listeners.indexOf(listener);
+        if (index >= 0) listeners.splice(index, 1);
+    },
+    dispatchKey: function (key) {
+        const event = {
+            key: key,
+            defaultPrevented: false,
+            propagationStopped: false,
+            preventDefault: function () { this.defaultPrevented = true; },
+            stopPropagation: function () { this.propagationStopped = true; }
+        };
+        (this.listeners.keydown || []).slice().forEach(listener => listener(event));
+        return event;
+    },
     createElement: tag => new FakeElement(tag),
     getElementById: function (id) {
         const all = this.body.querySelectorAll("." + id);
@@ -137,7 +156,7 @@ const context = {
         getUrl: function (url, query) { return { url: url, query: query }; },
         ajax: async function (request) {
             const option = request.url.query.option;
-            apiCalls.push({ option: option, itemId: request.url.url.split("/").pop() });
+            apiCalls.push({ option: option, itemId: request.url.url.split("/").pop(), parameters: request.url.query });
             const response = apiResponses[option];
             return typeof response === "function" ? response(request) : response;
         }
@@ -152,8 +171,95 @@ vm.runInContext(source, context, { filename: scriptPath });
 const hooks = context.window.__embyDanmuSmartMatchTest;
 
 async function main() {
-    assert((source.match(/__embyDanmuSmartMenuV9/g) || []).length === 1,
+    assert((source.match(/__embyDanmuSmartMenuV12/g) || []).length === 1,
         "the frontend installation flag should be bumped exactly once");
+    assert(!/\bScore\b|综合评分|评分：/.test(source),
+        "the frontend must not calculate or display candidate scores");
+    assert(!/textContent\s*=\s*["'](?:取消|关闭)["']/.test(source),
+        "smart-match footers must expose only the top-right close button and Escape for ordinary dismissal");
+    const rematch = hooks.rematchParameters({ keyword: "example" });
+    assert(rematch.mode === "rematch" && rematch.rematch === "true" && rematch.force === "true" && rematch.keyword === "example",
+        "a deliberate rematch should send explicit r6 mode/rematch and legacy force semantics");
+    const origins = {
+        " provider-id ": "本地外部标识符",
+        "EXTERNAL_ID": "本地外部标识符",
+        "binding": "已保存绑定",
+        "saved-binding": "已保存绑定",
+        "SCORED": "智能评分匹配",
+        "manual": "手动选择",
+        "manual_selection": "手动选择"
+    };
+    Object.keys(origins).forEach(code => {
+        assert(hooks.matchOriginLabel({ MatchOrigin: code }) === origins[code],
+            "known origin " + code + " should use its Chinese label");
+    });
+    const reasons = {
+        " provider-id ": "使用本地外部标识符",
+        "binding": "使用已保存绑定",
+        "SAVED_BINDING": "使用已保存绑定",
+        "confident-site-priority": "按站点优先级自动选择",
+        "unresolved_provider": "本地标识符无法解析",
+        "provider-id-unresolved": "本地标识符无法解析",
+        "no-candidate": "未找到候选",
+        "no-candidates": "未找到候选",
+        "LOW_CONFIDENCE": "置信度不足，需手动选择",
+        "manual": "手动选择",
+        "manual-selection": "手动选择"
+    };
+    Object.keys(reasons).forEach(code => {
+        assert(hooks.decisionReasonLabel({ DecisionReason: code }) === reasons[code],
+            "known decision reason " + code + " should use its Chinese label");
+    });
+    const providerIdMatch = { MatchOrigin: "provider-id", DecisionReason: "provider-id" };
+    assert(hooks.hasBackendMatch(providerIdMatch) && hooks.matchOriginLabel(providerIdMatch) === "本地外部标识符" &&
+        hooks.backendDecisionLine(providerIdMatch) === "来源：本地外部标识符　决策：使用本地外部标识符",
+        "provider-id results should retain r6 recognition while displaying Chinese labels");
+    assert(hooks.backendDecisionLine({}) === "", "empty explanations should be omitted");
+    const unknownLine = hooks.backendDecisionLine({ MatchOrigin: " Future-Origin ", DecisionReason: "future_reason" });
+    assert(unknownLine.includes("未知匹配来源") && unknownLine.includes("未知决策") &&
+        unknownLine.includes("诊断代码：Future-Origin") && unknownLine.includes("诊断代码：future_reason"),
+        "unknown values should use Chinese primary fallbacks and retain raw codes only as diagnostics");
+    assert(hooks.normalizeDecisionCode(" Provider_ID ") === "provider-id",
+        "normalization should trim, case-normalize, and normalize separators");
+    assert(!hooks.hasBackendMatch({ MatchOrigin: "provider-id", Status: "ambiguous" }),
+        "an unresolved source-episode choice must not be displayed as a successful match");
+
+    const closableDialog = hooks.openDialog("closable");
+    await closableDialog.overlay.dispatch("click");
+    assert(closableDialog.overlay.isConnected && hooks.activeDialogCount() === 1,
+        "a backdrop click must not dismiss a closable dialog");
+    let unrelatedClicks = 0;
+    documentStub.body.addEventListener("click", function () { unrelatedClicks++; });
+    await documentStub.body.dispatch("click");
+    assert(unrelatedClicks === 1 && closableDialog.overlay.isConnected,
+        "dialog handling must not intercept unrelated Emby page clicks");
+    const closableClose = closableDialog.overlay.children[0].children[0].children[1];
+    await closableClose.dispatch("click");
+    assert(!closableDialog.overlay.isConnected && hooks.activeDialogCount() === 0 &&
+        (documentStub.listeners.keydown || []).length === 0,
+        "the close action should dispose a closable dialog and its Escape listener");
+
+    const protectedDialog = hooks.openDialog("protected");
+    protectedDialog.closable = false;
+    const protectedClose = protectedDialog.overlay.children[0].children[0].children[1];
+    await protectedClose.dispatch("click");
+    await protectedDialog.overlay.dispatch("click");
+    const protectedEscape = documentStub.dispatchKey("Escape");
+    assert(protectedDialog.overlay.isConnected && !protectedEscape.defaultPrevented,
+        "close and Escape must preserve protected dialog state");
+    assert(protectedDialog.forceClose() && !protectedDialog.forceClose() &&
+        !protectedDialog.overlay.isConnected && (documentStub.listeners.keydown || []).length === 0,
+        "force close must bypass protection and shared disposal must be idempotent");
+
+    const lowerDialog = hooks.openDialog("lower");
+    const upperDialog = hooks.openDialog("upper");
+    const stackedEscape = documentStub.dispatchKey("Escape");
+    assert(!upperDialog.overlay.isConnected && lowerDialog.overlay.isConnected && stackedEscape.defaultPrevented,
+        "one Escape should close only the topmost closable dialog");
+    documentStub.dispatchKey("Escape");
+    assert(!lowerDialog.overlay.isConnected && hooks.activeDialogCount() === 0 &&
+        (documentStub.listeners.keydown || []).length === 0,
+        "repeated dialog cleanup should leave no active Escape listeners");
     assert(hooks.isSupportedItemType("Series") && hooks.isSupportedItemType("Season") &&
         hooks.isSupportedItemType("Episode") && hooks.isSupportedItemType("Movie"),
     "all smart-match item types should be supported");
@@ -280,9 +386,8 @@ async function main() {
         { Site: "Fake", Id: "candidate", Name: "Candidate" }, null, false);
     const stop = stopDialog.footer.children.find(button => button.textContent === "强制停止全部下载");
     await stop.dispatch("click");
-    const close = stopDialog.footer.children.find(button => button.textContent === "关闭");
-    assert(stopDialog.closable && close.style.display === "",
-        "force-stop should make the single-target dialog immediately closable");
+    assert(stopDialog.closable && !stopDialog.footer.children.some(button => button.textContent === "关闭"),
+        "force-stop should make the single-target dialog immediately closable through only × or Escape");
 
     console.log("Danmu smart-match frontend regression checks passed.");
 }

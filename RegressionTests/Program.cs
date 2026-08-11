@@ -20,6 +20,7 @@ using Emby.Plugin.Danmu.Scraper.Entity;
 using Emby.Plugin.Danmu.Scraper.Iqiyi;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.Movies;
+using MediaBrowser.Controller.Entities.TV;
 using MediaBrowser.Model.Logging;
 using System.Threading;
 using System.Threading.Tasks;
@@ -40,10 +41,12 @@ namespace Emby.Plugin.Danmu.RegressionTests
             SelectsCloseHighConfidenceCandidatesBySitePriority();
             ScoresMoviesAndFiltersTelevisionCandidates();
             IsolatesMovieProviderFailures();
+            ResolvesProviderIdsBySiteThenHierarchy();
             ResolvesMovieProviderLookupIdentifiers();
             PreservesSavedManualBindingsUntilForcedSearch();
             AppliesDuplicateAndForceRefreshPolicy();
             PreservesSingleEpisodeIsolationAndLegacyTaskShape();
+            PreservesProviderWriteGenerationOrdering();
             MapsEpisodeSourceNumbersSafely();
             DeserializesAndNormalizesBilibiliEpisodes();
             ClassifiesOnlyExplicitNonMainTitles();
@@ -66,6 +69,48 @@ namespace Emby.Plugin.Danmu.RegressionTests
             SanitizesFinalXmlForEveryProviderAndAcceptsSmallValidOutput();
             Console.WriteLine("Danmu plugin regression checks passed.");
             return 0;
+        }
+
+        private static void PreservesProviderWriteGenerationOrdering()
+        {
+            var tracker = new ProviderWriteGenerationTracker();
+            const string firstSite = "item\u001fBilibiliID";
+            const string secondSite = "item\u001fDandanID";
+
+            tracker.MarkCommitted(firstSite, 2);
+            Assert(tracker.IsStale(firstSite, 1, out var committed) && committed == 2,
+                "a late older write must not replace a newer successful provider binding");
+            Assert(!tracker.IsStale(firstSite, 2, out _),
+                "the current generation must remain writable");
+            Assert(!tracker.IsStale(secondSite, 1, out _),
+                "a provider generation must not suppress another provider's binding");
+
+            tracker.MarkCommitted(firstSite, 1);
+            Assert(tracker.IsStale(firstSite, 1, out committed) && committed == 2,
+                "an older completion must not lower the committed generation");
+
+            var successful = new DanmuEpisodeDownloadOutcome
+            {
+                Status = "success",
+                FilePersisted = true,
+                ProviderId = "BilibiliID",
+                ProviderValue = "new-id",
+            };
+            Assert(DanmuDownloadPersistencePolicy.ShouldPersist(successful),
+                "a completed successful download should persist only its selected provider");
+            successful.Status = "partial";
+            Assert(DanmuDownloadPersistencePolicy.ShouldPersist(successful),
+                "a partial result with a persisted valid XML should update its successful target");
+            successful.Status = "failed";
+            Assert(!DanmuDownloadPersistencePolicy.ShouldPersist(successful),
+                "a failed download must preserve existing metadata");
+            successful.Status = "skipped";
+            Assert(!DanmuDownloadPersistencePolicy.ShouldPersist(successful),
+                "a skipped download must preserve existing metadata");
+            successful.Status = "success";
+            successful.FilePersisted = false;
+            Assert(!DanmuDownloadPersistencePolicy.ShouldPersist(successful),
+                "a successful status without an actual file must not persist metadata");
         }
 
         private static void MapsAnimeSeason()
@@ -127,16 +172,24 @@ namespace Emby.Plugin.Danmu.RegressionTests
                 Candidate("middle", "MiddleSite", 1, 0.82)
             });
 
-            Assert(candidates[0].Id == "priority", "configured provider priority should order exact-score ties");
+            Assert(candidates[0].Id == "priority", "r6 should surface the selected configured provider first");
             Assert(DanmuMatchScorer.CanAutoSelect(candidates), "a unique candidate on the highest-priority tied provider should auto-bind");
-            Assert(!DanmuMatchScorer.CanAutoSelect(candidates, false), "a priority tie should not stop parent-title search before fallback rounds");
+            Assert(DanmuMatchScorer.CanAutoSelect(candidates, false), "r6 selection must not depend on legacy intermediate-search behavior");
 
             var unequal = DanmuMatchSearchEngine.OrderCandidates(new List<DanmuMatchCandidate>
             {
                 Candidate("higher-score", "LaterSite", 5, 0.91),
                 Candidate("higher-priority", "PrioritySite", 0, 0.90)
             });
-            Assert(unequal[0].Id == "higher-score", "provider priority must not outrank a higher score");
+            Assert(unequal[0].Id == "higher-priority", "an earlier 0.90 site must outrank a later 0.91 site");
+
+            var crowded = Enumerable.Range(0, 61)
+                .Select(index => Candidate("later-" + index, "LaterSite", 5, 1.0))
+                .Append(Candidate("priority-after-cutoff", "PrioritySite", 0, 0.90))
+                .ToList();
+            var crowdedOrdered = DanmuMatchSearchEngine.OrderCandidates(crowded);
+            Assert(crowdedOrdered.Count == 60 && crowdedOrdered[0].Id == "priority-after-cutoff",
+                "the confident site-priority decision must run before the 60-candidate display limit");
         }
 
         private static void PreservesSameSiteHighestScoreTieAmbiguity()
@@ -168,33 +221,33 @@ namespace Emby.Plugin.Danmu.RegressionTests
                 Candidate("full", "LaterSite", 2, 1.0),
                 Candidate("preferred", "PrioritySite", 0, 0.98)
             });
-            Assert(preferredRunnerUp[0].Id == "full" &&
+            Assert(preferredRunnerUp[0].Id == "preferred" &&
                    DanmuMatchScorer.SelectAutoCandidate(preferredRunnerUp)?.Id == "preferred",
-                "display order must stay score-descending while the earlier site's 0.98 candidate is selected");
+                "r6 should select and display the earlier confident site");
 
             var outsideGap = DanmuMatchSearchEngine.OrderCandidates(new List<DanmuMatchCandidate>
             {
                 Candidate("full", "FullSite", 1, 1.0),
                 Candidate("outside", "PrioritySite", 0, 0.969)
             });
-            Assert(DanmuMatchScorer.SelectAutoCandidate(outsideGap)?.Id == "full",
-                "a candidate more than 0.03 below the top score must stay outside the close pool");
+            Assert(DanmuMatchScorer.SelectAutoCandidate(outsideGap)?.Id == "outside",
+                "r6 ignores cross-site score gaps inside the confident pool");
 
             var belowPoolFloor = DanmuMatchSearchEngine.OrderCandidates(new List<DanmuMatchCandidate>
             {
                 Candidate("higher", "LaterSite", 1, 0.949),
                 Candidate("lower", "PrioritySite", 0, 0.94)
             });
-            Assert(DanmuMatchScorer.SelectAutoCandidate(belowPoolFloor) == null,
-                "candidates below 0.95 must remain ambiguous even when their scores are close");
+            Assert(DanmuMatchScorer.SelectAutoCandidate(belowPoolFloor)?.Id == "lower",
+                "the r6 0.90 boundary includes an earlier 0.94 candidate");
 
             var floorBoundary = DanmuMatchSearchEngine.OrderCandidates(new List<DanmuMatchCandidate>
             {
                 Candidate("floor", "LaterSite", 1, 0.95),
                 Candidate("below-floor", "PrioritySite", 0, 0.92)
             });
-            Assert(DanmuMatchScorer.SelectAutoCandidate(floorBoundary)?.Id == "floor",
-                "the 0.95 pool floor must exclude a 0.92 candidate even at the 0.03 gap boundary");
+            Assert(DanmuMatchScorer.SelectAutoCandidate(floorBoundary)?.Id == "below-floor",
+                "the 0.90 boundary includes an earlier 0.92 candidate");
 
             var samePreferredSite = DanmuMatchSearchEngine.OrderCandidates(new List<DanmuMatchCandidate>
             {
@@ -211,14 +264,13 @@ namespace Emby.Plugin.Danmu.RegressionTests
                 Candidate("second", "MiddleSite", 2, 0.99),
                 Candidate("preferred", "PrioritySite", 0, 0.98)
             });
-            Assert(preferredThirdScore.Select(x => x.Id).SequenceEqual(new[] { "full", "second", "preferred" }) &&
+            Assert(preferredThirdScore.Select(x => x.Id).SequenceEqual(new[] { "preferred", "full", "second" }) &&
                    DanmuMatchScorer.SelectAutoCandidate(preferredThirdScore)?.Id == "preferred",
-                "the sole pooled candidate from the earliest site may win without changing score order");
+                "the earliest confident site wins over all later scores");
 
-            Assert(DanmuMatchScorer.SelectAutoCandidate(preferredRunnerUp, false) == null,
-                "intermediate search must not resolve a multi-candidate close pool by site priority");
-            Assert(DanmuMatchScorer.SelectAutoCandidate(outsideGap, false)?.Id == "full",
-                "intermediate search may stop when only one candidate is in the close pool");
+            Assert(DanmuMatchScorer.SelectAutoCandidate(preferredRunnerUp, false)?.Id == "preferred" &&
+                   DanmuMatchScorer.SelectAutoCandidate(outsideGap, false)?.Id == "outside",
+                "legacy selector flags must not reintroduce r5 behavior");
 
             var exactTie = DanmuMatchSearchEngine.OrderCandidates(new List<DanmuMatchCandidate>
             {
@@ -226,20 +278,20 @@ namespace Emby.Plugin.Danmu.RegressionTests
                 Candidate("priority-tie", "PrioritySite", 0, 0.98)
             });
             Assert(DanmuMatchScorer.SelectAutoCandidate(exactTie)?.Id == "priority-tie" &&
-                   DanmuMatchScorer.SelectAutoCandidate(exactTie, false) == null,
-                "exact ties must use the same final-only site-priority rule");
+                   DanmuMatchScorer.SelectAutoCandidate(exactTie, false)?.Id == "priority-tie",
+                "cross-site ties resolve to the earliest configured site");
 
             Assert(DanmuMatchScorer.SelectAutoCandidate(new List<DanmuMatchCandidate>
                 {
                     Candidate("below-floor", "Site", 0, 0.77)
                 }) == null,
-                "the existing top-score floor must remain unchanged");
+                "scores below the r6 0.90 boundary must remain unselected");
             Assert(DanmuMatchScorer.SelectAutoCandidate(new List<DanmuMatchCandidate>
                 {
                     Candidate("strong", "SiteA", 0, 0.78),
                     Candidate("weak-runner-up", "SiteB", 1, 0.64)
-                })?.Id == "strong",
-                "the existing runner-up floor must remain unchanged");
+                }) == null,
+                "scores below the r6 0.90 boundary must remain unselected");
         }
 
         private static void ScoresMoviesAndFiltersTelevisionCandidates()
@@ -281,6 +333,130 @@ namespace Emby.Plugin.Danmu.RegressionTests
             Assert(search.Candidates.Count == 1, "successful movie providers should still contribute candidates");
             Assert(search.SearchErrors.Count == 1 && search.SearchErrors[0].Contains("DandanID"),
                 "a failed Dandan proxy provider should be isolated in diagnostics");
+        }
+
+        private static void ResolvesProviderIdsBySiteThenHierarchy()
+        {
+            var early = new FakeScraper("EarlyID", null, false, new Dictionary<string, ScraperMedia>
+            {
+                ["season-id"] = new ScraperMedia { Id = "season-id" },
+                ["current-id"] = new ScraperMedia { Id = "current-id" },
+            });
+            var late = new FakeScraper("LateID", null, false, new Dictionary<string, ScraperMedia>
+            {
+                ["episode-id"] = new ScraperMedia { Id = "episode-id" },
+            });
+            var current = new Movie { Name = "current" };
+            var season = new Movie { Name = "season" };
+            current.ProviderIds["LateID"] = "episode-id";
+            season.ProviderIds["EarlyID"] = "season-id";
+
+            var crossSite = DanmuProviderIdResolver.ResolveAsync(
+                    new AbstractScraper[] { early, late },
+                    new BaseItem[] { current, season },
+                    null)
+                .GetAwaiter().GetResult();
+            Assert(crossSite.Candidate?.Id == "season-id" && crossSite.MatchOrigin == "provider-id",
+                "the earlier enabled site must beat a later current-item ProviderId");
+
+            current.ProviderIds["EarlyID"] = "current-id";
+            var sameSite = DanmuProviderIdResolver.ResolveAsync(
+                    new AbstractScraper[] { early, late },
+                    new BaseItem[] { current, season },
+                    null)
+                .GetAwaiter().GetResult();
+            Assert(sameSite.Candidate?.Id == "current-id",
+                "within an enabled site, current-item ProviderId must beat the parent value");
+
+            var episodeScraper = new FakeScraper(
+                "EpisodeID",
+                null,
+                false,
+                null,
+                new Dictionary<string, ScraperEpisode>
+                {
+                    ["episode-provider-id"] = new ScraperEpisode
+                    {
+                        Id = "episode-provider-id",
+                        CommentId = "episode-comment-id",
+                        EpisodeNumber = 3,
+                    },
+                    ["episode-without-number"] = new ScraperEpisode
+                    {
+                        Id = "episode-without-number",
+                        CommentId = "episode-comment-without-number",
+                    },
+                    ["episode-without-comment"] = new ScraperEpisode
+                    {
+                        Id = "episode-without-comment",
+                    },
+                });
+            var episodeItem = new Episode { Name = "episode", IndexNumber = 3 };
+            episodeItem.ProviderIds["EpisodeID"] = "episode-provider-id";
+            var episodeDecision = DanmuProviderIdResolver.ResolveAsync(
+                    new AbstractScraper[] { episodeScraper },
+                    new BaseItem[] { episodeItem },
+                    null)
+                .GetAwaiter().GetResult();
+            Assert(episodeDecision.Candidate?.Id == "episode-provider-id" &&
+                   episodeDecision.Media?.Episodes.Single().CommentId == "episode-comment-id",
+                "Episode ProviderIds must resolve through GetMediaEpisode rather than the season-media API");
+            var directMedia = DanmuProviderIdResolver.ResolveDirectEpisodeMediaAsync(
+                    episodeScraper, episodeItem, "episode-provider-id", 3)
+                .GetAwaiter().GetResult();
+            Assert(directMedia?.Episodes.Single().CommentId == "episode-comment-id" &&
+                   directMedia.Episodes.Single().EpisodeNumber == 3 &&
+                   episodeScraper.MediaCalls == 0 && episodeScraper.MediaEpisodeCalls >= 2,
+                "direct Episode ProviderIds must retain the exact GetMediaEpisode result for download without calling GetMedia");
+
+            var noNumberEpisode = new Episode { Name = "episode without local number" };
+            noNumberEpisode.ProviderIds["EpisodeID"] = "episode-without-number";
+            var noNumberDecision = DanmuProviderIdResolver.ResolveAsync(
+                    new AbstractScraper[] { episodeScraper },
+                    new BaseItem[] { noNumberEpisode },
+                    null)
+                .GetAwaiter().GetResult();
+            Assert(noNumberDecision.Candidate?.Id == "episode-without-number" &&
+                   noNumberDecision.Media?.Episodes.Single().EpisodeNumber == 1 &&
+                   noNumberDecision.ResolvedScopeType == "Episode",
+                "an exact Episode ProviderId must remain usable without a local IndexNumber");
+
+            var noCommentEpisode = new Episode { Name = "episode without comment", IndexNumber = 1 };
+            noCommentEpisode.ProviderIds["EpisodeID"] = "episode-without-comment";
+            var noCommentDecision = DanmuProviderIdResolver.ResolveAsync(
+                    new AbstractScraper[] { episodeScraper },
+                    new BaseItem[] { noCommentEpisode },
+                    null)
+                .GetAwaiter().GetResult();
+            Assert(noCommentDecision.Candidate == null &&
+                   noCommentDecision.Diagnostics.Any(x => x.StartsWith("provider-id-unresolved")),
+                "an Episode ProviderId without a downloadable comment id must fall through as stale");
+
+            var parentSeries = new Series { Name = "parent series" };
+            parentSeries.ProviderIds["EarlyID"] = "season-id";
+            var seriesScopeDecision = DanmuProviderIdResolver.ResolveAsync(
+                    new AbstractScraper[] { early },
+                    new BaseItem[] { new Season { Name = "child season" }, parentSeries },
+                    null)
+                .GetAwaiter().GetResult();
+            Assert(seriesScopeDecision.Candidate?.Id == "season-id" &&
+                   seriesScopeDecision.ResolvedScopeType == "Series",
+                "the resolver must expose a parent-Series hit so import cannot copy it onto Season metadata");
+
+            current.ProviderIds["EarlyID"] = "stale-current";
+            season.ProviderIds["EarlyID"] = "stale-season";
+            var stale = DanmuProviderIdResolver.ResolveAsync(
+                    new AbstractScraper[] { early },
+                    new BaseItem[] { current, season },
+                    null)
+                .GetAwaiter().GetResult();
+            var bindings = new Dictionary<string, string> { ["EarlyIDManual"] = "manual-id" };
+            Assert(stale.Candidate == null && stale.Diagnostics.Any(x => x.StartsWith("provider-id-unresolved")) &&
+                   DanmuMatchBindingHelper.TryGetSavedManualBinding(
+                       false, new[] { early }, bindings, out _, out var manualId) && manualId == "manual-id" &&
+                   !DanmuMatchBindingHelper.TryGetSavedManualBinding(
+                       true, new[] { early }, bindings, out _, out _),
+                "stale identifiers must continue to binding while rematch bypasses it without deleting it");
         }
 
         private static void ResolvesMovieProviderLookupIdentifiers()
@@ -739,6 +915,12 @@ namespace Emby.Plugin.Danmu.RegressionTests
 
         private static void VerifiesSingleTargetSmartMatchReliabilityContracts()
         {
+            var controllerSource = File.ReadAllText(Path.GetFullPath(Path.Combine(
+                AppContext.BaseDirectory, "..", "..", "..", "..", "Core", "Controllers", "DanmuController.cs")));
+            Assert(controllerSource.Contains("task.MatchOrigin, \"provider-id\"") &&
+                   controllerSource.Contains("ResolveDirectEpisodeMediaAsync("),
+                "direct Episode ProviderId retries must stay on GetMediaEpisode instead of treating the id as a Season id");
+
             Assert(DanmuEpisodeMatchHelper.SuggestSourceEpisodeNumber(null, 12) == null &&
                    DanmuEpisodeMatchHelper.SuggestSourceEpisodeNumber(1, 0) == null &&
                    !DanmuEpisodeMatchHelper.IsValidSourceEpisodeNumber(-1, 12),
@@ -978,13 +1160,24 @@ namespace Emby.Plugin.Danmu.RegressionTests
             private readonly string _providerId;
             private readonly List<ScraperSearchInfo> _results;
             private readonly bool _throws;
+            private readonly Dictionary<string, ScraperMedia> _mediaById;
+            private readonly Dictionary<string, ScraperEpisode> _episodesById;
+            public int MediaCalls { get; private set; }
+            public int MediaEpisodeCalls { get; private set; }
 
-            public FakeScraper(string providerId, List<ScraperSearchInfo> results, bool throws = false)
+            public FakeScraper(
+                string providerId,
+                List<ScraperSearchInfo> results,
+                bool throws = false,
+                Dictionary<string, ScraperMedia> mediaById = null,
+                Dictionary<string, ScraperEpisode> episodesById = null)
                 : base(null)
             {
                 _providerId = providerId;
                 _results = results;
                 _throws = throws;
+                _mediaById = mediaById ?? new Dictionary<string, ScraperMedia>(StringComparer.OrdinalIgnoreCase);
+                _episodesById = episodesById ?? new Dictionary<string, ScraperEpisode>(StringComparer.OrdinalIgnoreCase);
             }
 
             public override string Name => _providerId;
@@ -998,8 +1191,18 @@ namespace Emby.Plugin.Danmu.RegressionTests
             }
 
             public override Task<string> SearchMediaId(BaseItem item) => Task.FromResult(string.Empty);
-            public override Task<ScraperMedia> GetMedia(BaseItem item, string id) => Task.FromResult<ScraperMedia>(null);
-            public override Task<ScraperEpisode> GetMediaEpisode(BaseItem item, string id) => Task.FromResult<ScraperEpisode>(null);
+            public override Task<ScraperMedia> GetMedia(BaseItem item, string id)
+            {
+                MediaCalls++;
+                _mediaById.TryGetValue(id ?? string.Empty, out var media);
+                return Task.FromResult(media);
+            }
+            public override Task<ScraperEpisode> GetMediaEpisode(BaseItem item, string id)
+            {
+                MediaEpisodeCalls++;
+                _episodesById.TryGetValue(id ?? string.Empty, out var episode);
+                return Task.FromResult(episode);
+            }
             public override Task<ScraperDanmaku> GetDanmuContent(BaseItem item, string commentId) => Task.FromResult<ScraperDanmaku>(null);
         }
 

@@ -105,14 +105,7 @@ namespace Emby.Plugin.Danmu.Scraper.Bilibili
                         continue;
                     }
 
-                    var score = searchName.Distance(title);
-                    if (score < 0.7)
-                    {
-                        log.Info($"Bilibili.Search - 因标题相似度低 ({score}，阈值: 0.7，对比: '{searchName}') 而跳过B站项目 '{title}'. Emby 名称: '{item.Name}'");
-                        continue;
-                    }
-
-                    log.Info($"Bilibili.Search - Found potential match for '{item.Name}'. Bili Title: '{title}', ID to use: '{id}', Bili Year: {pubYear}, Bili Type: '{mediaItem.SeasonTypeName ?? mediaItem.ApiType}', Score: {score}");
+                    log.Info($"Bilibili.Search - Found candidate for backend scoring: '{item.Name}'. Bili Title: '{title}', ID to use: '{id}', Bili Year: {pubYear}, Bili Type: '{mediaItem.SeasonTypeName ?? mediaItem.ApiType}'");
                     list.Add(new ScraperSearchInfo()
                     {
                         Id = id, // Use the determined ID (season_id or media_id)

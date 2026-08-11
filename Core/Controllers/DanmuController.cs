@@ -61,6 +61,12 @@ namespace Emby.Plugin.Danmu.Core.Controllers
         [DataMember(Name="force")]
         public bool Force { get; set; }
 
+        [DataMember(Name="mode")]
+        public string Mode { get; set; } = DanmuMatchIntent.Default;
+
+        [DataMember(Name="rematch")]
+        public bool Rematch { get; set; }
+
         [DataMember(Name="forceRefresh")]
         public bool ForceRefresh { get; set; }
 
@@ -427,16 +433,20 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 ItemType = item is Series ? "Series" : item is Season ? "Season" :
                     item is Episode ? "Episode" : item is Movie ? "Movie" : item.GetType().Name,
             };
+            var rematch = IsRematch(request);
+            result.MatchIntent = rematch ? DanmuMatchIntent.Rematch : DanmuMatchIntent.Default;
+            result.EnabledProviderIdKeys = DanmuProviderIdResolver.GetEnabledProviderIdKeys(_scraperManager.All());
 
             if (item is Movie movie)
             {
                 result.Target = await GetMovieMatchPreview(
                     movie,
                     request.Keyword,
-                    request.Force || !string.IsNullOrWhiteSpace(request.Keyword)).ConfigureAwait(false);
+                    rematch).ConfigureAwait(false);
                 result.CanStart = result.Target.AutoSelected;
                 result.Status = result.Target.Status;
                 result.Message = result.Target.Message;
+                CopyDecision(result, result.Target);
                 return result;
             }
 
@@ -445,10 +455,11 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 result.Target = await GetEpisodeMatchPreview(
                     episode,
                     request.Keyword,
-                    request.Force || !string.IsNullOrWhiteSpace(request.Keyword)).ConfigureAwait(false);
+                    rematch).ConfigureAwait(false);
                 result.CanStart = result.Target.AutoSelected;
                 result.Status = result.Target.Status;
                 result.Message = result.Target.Message;
+                CopyDecision(result, result.Target);
                 return result;
             }
 
@@ -487,7 +498,12 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 result.Seasons.Add(await GetSeasonMatchPreview(
                     currentSeason,
                     request.Keyword,
-                    request.Force || !string.IsNullOrWhiteSpace(request.Keyword)).ConfigureAwait(false));
+                    rematch).ConfigureAwait(false));
+            }
+
+            if (item is Season && result.Seasons.Count == 1)
+            {
+                CopyDecision(result, result.Seasons[0]);
             }
 
             result.CanStart = result.Seasons.Count > 0 && result.Seasons.All(x => x.AutoSelected);
@@ -532,6 +548,19 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 Keyword = string.IsNullOrWhiteSpace(keywordOverride) ? latest.Name ?? string.Empty : keywordOverride,
             };
             var scrapers = _scraperManager.All();
+            InitializeDecision(result, scrapers, forceSearch);
+            if (!forceSearch)
+            {
+                var providerDecision = await DanmuProviderIdResolver.ResolveAsync(
+                    scrapers, new BaseItem[] { latest }, _logger).ConfigureAwait(false);
+                result.SearchErrors.AddRange(providerDecision.Diagnostics);
+                if (providerDecision.Candidate != null)
+                {
+                    ApplyProviderDecision(result, providerDecision);
+                    return result;
+                }
+            }
+
             if (DanmuMatchBindingHelper.TryGetSavedManualBinding(
                     forceSearch, scrapers, latest.ProviderIds, out var savedScraper, out var manualId))
             {
@@ -541,15 +570,19 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                     result.SelectedId = manualId;
                     result.SelectedSite = savedScraper.ProviderId;
                     result.SelectedSiteName = savedScraper.ProviderName;
+                    result.MatchOrigin = "binding";
+                    result.DecisionReason = "binding";
                     result.Candidates.Add(new DanmuMatchCandidate
                     {
                         Id = manualId,
                         Site = savedScraper.ProviderId,
                         SiteName = savedScraper.ProviderName,
-                        SourceOrder = savedScraper.DefaultOrder,
+                        SourceOrder = GetSourceOrder(scrapers, savedScraper),
                         Name = "已手动绑定的电影",
                         Score = 1,
                         ManualBound = true,
+                        MatchOrigin = "binding",
+                        DecisionReason = "binding",
                         Reason = "使用已保存的手动绑定",
                     });
                     return result;
@@ -561,7 +594,7 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 keywordOverride,
                 _logger).ConfigureAwait(false);
             result.Candidates = search.Candidates;
-            result.SearchErrors = search.SearchErrors;
+            result.SearchErrors.AddRange(search.SearchErrors);
             var selected = DanmuMatchScorer.SelectAutoCandidate(result.Candidates);
             if (selected != null)
             {
@@ -571,10 +604,14 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 result.SelectedId = selected.Id;
                 result.SelectedSite = selected.Site;
                 result.SelectedSiteName = selected.SiteName;
+                result.MatchOrigin = "scored";
+                result.DecisionReason = "confident-site-priority";
             }
             else if (result.Candidates.Count == 0)
             {
                 result.Status = "no_match";
+                result.DecisionReason = result.SearchErrors.Any(x => x.StartsWith("provider-id-unresolved", StringComparison.OrdinalIgnoreCase))
+                    ? "provider-id-unresolved" : "no-candidates";
                 result.Message = result.SearchErrors.Count > 0
                     ? "没有搜索到电影候选，且部分网站搜索失败"
                     : "没有搜索到电影候选，可更换关键词重试";
@@ -582,6 +619,7 @@ namespace Emby.Plugin.Danmu.Core.Controllers
             else
             {
                 result.Status = result.Candidates[0].Score >= 0.60 ? "ambiguous" : "no_match";
+                result.DecisionReason = "low-confidence";
                 result.Message = result.Status == "ambiguous"
                     ? "存在多个接近的电影结果，需要手动选择"
                     : "电影自动评分不足，需要手动选择或更换关键词";
@@ -618,9 +656,44 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 return result;
             }
 
+            var episodeScrapers = _scraperManager.All();
+            InitializeDecision(result, episodeScrapers, forceSearch);
+            if (!forceSearch)
+            {
+                var providerDecision = await DanmuProviderIdResolver.ResolveAsync(
+                    episodeScrapers,
+                    new BaseItem[] { latest, season, series },
+                    _logger).ConfigureAwait(false);
+                result.SearchErrors.AddRange(providerDecision.Diagnostics);
+                if (providerDecision.Candidate != null)
+                {
+                    providerDecision.Candidate.SuggestedEpisodeNumber =
+                        DanmuEpisodeMatchHelper.SuggestSourceEpisodeNumber(latest.IndexNumber, providerDecision.Media?.Episodes);
+                    if (!providerDecision.Candidate.SuggestedEpisodeNumber.HasValue &&
+                        string.Equals(providerDecision.ResolvedScopeType, "Episode", StringComparison.OrdinalIgnoreCase))
+                    {
+                        // A direct Episode ProviderId is already an exact selection;
+                        // use the resolved one-item source number when local metadata
+                        // has no reliable IndexNumber.
+                        providerDecision.Candidate.SuggestedEpisodeNumber = providerDecision.Media?.Episodes?
+                            .FirstOrDefault()?.EpisodeNumber;
+                    }
+                    ApplyProviderDecision(result, providerDecision);
+                    if (!providerDecision.Candidate.SuggestedEpisodeNumber.HasValue)
+                    {
+                        result.Status = "ambiguous";
+                        result.AutoSelected = false;
+                        result.DecisionReason = "provider-id";
+                        result.Message = "ProviderId 已解析，但需要选择来源集数";
+                    }
+                    return result;
+                }
+            }
+
             var seasonMatch = await GetSeasonMatchPreview(season, keywordOverride, forceSearch).ConfigureAwait(false);
             result.Candidates = seasonMatch.Candidates;
-            result.SearchErrors = seasonMatch.SearchErrors;
+            result.SearchErrors.AddRange(seasonMatch.SearchErrors);
+            CopyDecision(result, seasonMatch);
             foreach (var candidate in result.Candidates)
             {
                 var scraper = _scraperManager.All().FirstOrDefault(x =>
@@ -705,6 +778,19 @@ namespace Emby.Plugin.Danmu.Core.Controllers
             };
 
             var scrapers = _scraperManager.All();
+            InitializeDecision(result, scrapers, forceSearch);
+            if (!forceSearch)
+            {
+                var providerDecision = await DanmuProviderIdResolver.ResolveAsync(
+                    scrapers, new BaseItem[] { latest, parent }, _logger).ConfigureAwait(false);
+                result.SearchErrors.AddRange(providerDecision.Diagnostics);
+                if (providerDecision.Candidate != null)
+                {
+                    ApplyProviderDecision(result, providerDecision);
+                    return result;
+                }
+            }
+
             if (DanmuMatchBindingHelper.TryGetSavedManualBinding(
                     forceSearch, scrapers, latest.ProviderIds, out var savedScraper, out var manualId))
             {
@@ -714,15 +800,19 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                     result.SelectedId = manualId;
                     result.SelectedSite = savedScraper.ProviderId;
                     result.SelectedSiteName = savedScraper.ProviderName;
+                    result.MatchOrigin = "binding";
+                    result.DecisionReason = "binding";
                     result.Candidates.Add(new DanmuMatchCandidate
                     {
                         Id = manualId,
                         Site = savedScraper.ProviderId,
                         SiteName = savedScraper.ProviderName,
-                        SourceOrder = savedScraper.DefaultOrder,
+                        SourceOrder = GetSourceOrder(scrapers, savedScraper),
                         Name = "已手动绑定的项目",
                         Score = 1,
                         ManualBound = true,
+                        MatchOrigin = "binding",
+                        DecisionReason = "binding",
                         Reason = "使用已保存的手动绑定",
                     });
                     return result;
@@ -737,7 +827,7 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 keywordOverride,
                 _logger).ConfigureAwait(false);
             result.Candidates = search.Candidates;
-            result.SearchErrors = search.SearchErrors;
+            result.SearchErrors.AddRange(search.SearchErrors);
             var selected = DanmuMatchScorer.SelectAutoCandidate(result.Candidates);
 
             if (selected != null)
@@ -748,12 +838,16 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 result.SelectedId = selected.Id;
                 result.SelectedSite = selected.Site;
                 result.SelectedSiteName = selected.SiteName;
+                result.MatchOrigin = "scored";
+                result.DecisionReason = "confident-site-priority";
                 return result;
             }
 
             if (result.Candidates.Count == 0)
             {
                 result.Status = "no_match";
+                result.DecisionReason = result.SearchErrors.Any(x => x.StartsWith("provider-id-unresolved", StringComparison.OrdinalIgnoreCase))
+                    ? "provider-id-unresolved" : "no-candidates";
                 result.Message = result.SearchErrors.Count > 0
                     ? "没有搜索到候选项目，且部分网站搜索失败"
                     : "没有搜索到候选项目，可输入其他关键词重试";
@@ -761,10 +855,96 @@ namespace Emby.Plugin.Danmu.Core.Controllers
             }
 
             result.Status = result.Candidates[0].Score >= 0.60 ? "ambiguous" : "no_match";
+            result.DecisionReason = "low-confidence";
             result.Message = result.Status == "ambiguous"
                 ? "存在多个接近的结果，需要手动选择"
                 : "自动评分不足，需要手动选择或换关键词搜索";
             return result;
+        }
+
+        private static bool IsRematch(DanmuParams request)
+        {
+            return request != null &&
+                   (request.Rematch || request.Force ||
+                    string.Equals(request.Mode, DanmuMatchIntent.Rematch, StringComparison.OrdinalIgnoreCase));
+        }
+
+        private static int GetSourceOrder(IEnumerable<AbstractScraper> scrapers, AbstractScraper scraper)
+        {
+            var index = (scrapers ?? Enumerable.Empty<AbstractScraper>())
+                .ToList()
+                .FindIndex(x => ReferenceEquals(x, scraper));
+            return index < 0 ? scraper?.DefaultOrder ?? int.MaxValue : index;
+        }
+
+        private static void InitializeDecision(
+            DanmuItemMatchResult result, IEnumerable<AbstractScraper> scrapers, bool rematch)
+        {
+            result.MatchIntent = rematch ? DanmuMatchIntent.Rematch : DanmuMatchIntent.Default;
+            result.EnabledProviderIdKeys = DanmuProviderIdResolver.GetEnabledProviderIdKeys(scrapers);
+        }
+
+        private static void InitializeDecision(
+            DanmuSeasonMatchResult result, IEnumerable<AbstractScraper> scrapers, bool rematch)
+        {
+            result.MatchIntent = rematch ? DanmuMatchIntent.Rematch : DanmuMatchIntent.Default;
+            result.EnabledProviderIdKeys = DanmuProviderIdResolver.GetEnabledProviderIdKeys(scrapers);
+        }
+
+        private static void ApplyProviderDecision(DanmuItemMatchResult result, DanmuMatchDecision decision)
+        {
+            result.Status = "matched";
+            result.Message = "已使用本地 ProviderId 解析匹配";
+            result.AutoSelected = true;
+            result.SelectedId = decision.Candidate.Id;
+            result.SelectedSite = decision.Candidate.Site;
+            result.SelectedSiteName = decision.Candidate.SiteName;
+            result.MatchOrigin = decision.MatchOrigin;
+            result.DecisionReason = decision.DecisionReason;
+            result.ResolvedProviderId = decision.ResolvedProviderId;
+            result.ResolvedProviderIdKey = decision.ResolvedProviderIdKey;
+            result.Candidates.Add(decision.Candidate);
+        }
+
+        private static void ApplyProviderDecision(DanmuSeasonMatchResult result, DanmuMatchDecision decision)
+        {
+            result.Status = "matched";
+            result.Message = "已使用本地 ProviderId 解析匹配";
+            result.AutoSelected = true;
+            result.SelectedId = decision.Candidate.Id;
+            result.SelectedSite = decision.Candidate.Site;
+            result.SelectedSiteName = decision.Candidate.SiteName;
+            result.MatchOrigin = decision.MatchOrigin;
+            result.DecisionReason = decision.DecisionReason;
+            result.ResolvedProviderId = decision.ResolvedProviderId;
+            result.ResolvedProviderIdKey = decision.ResolvedProviderIdKey;
+            result.Candidates.Add(decision.Candidate);
+        }
+
+        private static void CopyDecision(DanmuMatchPreviewResult target, DanmuItemMatchResult source)
+        {
+            target.MatchOrigin = source.MatchOrigin;
+            target.DecisionReason = source.DecisionReason;
+            target.ResolvedProviderId = source.ResolvedProviderId;
+            target.ResolvedProviderIdKey = source.ResolvedProviderIdKey;
+        }
+
+        private static void CopyDecision(DanmuMatchPreviewResult target, DanmuSeasonMatchResult source)
+        {
+            target.MatchOrigin = source.MatchOrigin;
+            target.DecisionReason = source.DecisionReason;
+            target.ResolvedProviderId = source.ResolvedProviderId;
+            target.ResolvedProviderIdKey = source.ResolvedProviderIdKey;
+        }
+
+        private static void CopyDecision(DanmuItemMatchResult target, DanmuSeasonMatchResult source)
+        {
+            target.MatchIntent = source.MatchIntent;
+            target.MatchOrigin = source.MatchOrigin;
+            target.DecisionReason = source.DecisionReason;
+            target.ResolvedProviderId = source.ResolvedProviderId;
+            target.ResolvedProviderIdKey = source.ResolvedProviderIdKey;
+            target.EnabledProviderIdKeys = source.EnabledProviderIdKeys;
         }
 
         /// <summary>
@@ -953,11 +1133,10 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 }
 
                 var providerValue = string.IsNullOrWhiteSpace(media.Id) ? request.CandidateId : media.Id;
-                await _libraryManagerEventsHelper.SaveProviderId(
-                    season,
-                    scraper.ProviderId,
-                    providerValue,
-                    request.Manual).ConfigureAwait(false);
+                if (request.Manual)
+                {
+                    await SaveManualBindingAsync(season, scraper.ProviderId, providerValue).ConfigureAwait(false);
+                }
                 _libraryManagerEventsHelper.QueueItem(season, EventType.Update);
                 _libraryManagerEventsHelper.QueueItem(season, EventType.Update);
 
@@ -1005,8 +1184,10 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 }
 
                 var providerValue = string.IsNullOrWhiteSpace(media.Id) ? request.CandidateId : media.Id;
-                await _libraryManagerEventsHelper.SaveProviderId(
-                    movie, scraper.ProviderId, providerValue, request.Manual).ConfigureAwait(false);
+                if (request.Manual)
+                {
+                    await SaveManualBindingAsync(movie, scraper.ProviderId, providerValue).ConfigureAwait(false);
+                }
                 result.Success = true;
                 result.CandidateId = providerValue;
                 result.Message = "电影匹配已保存";
@@ -1068,12 +1249,6 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                     return failed;
                 }
 
-                var providerValue = string.IsNullOrWhiteSpace(media.Id) ? request.CandidateId : media.Id;
-                await _libraryManagerEventsHelper.SaveProviderId(
-                    season,
-                    scraper.ProviderId,
-                    providerValue,
-                    request.Manual).ConfigureAwait(false);
             }
             catch (Exception ex)
             {
@@ -1162,6 +1337,8 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                                 media,
                                 scraper,
                                 request.ForceRefresh).ConfigureAwait(false);
+                            cancellation.Token.ThrowIfCancellationRequested();
+                            await PersistProviderIdAfterAcceptedOutcome(episode, outcome).ConfigureAwait(false);
                             lock (task)
                             {
                                 episodeResult.Status = outcome.Status;
@@ -1267,9 +1444,6 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                     return failed;
                 }
 
-                var providerValue = string.IsNullOrWhiteSpace(media.Id) ? request.CandidateId : media.Id;
-                await _libraryManagerEventsHelper.SaveProviderId(
-                    movie, scraper.ProviderId, providerValue, request.Manual).ConfigureAwait(false);
             }
             catch (Exception ex)
             {
@@ -1283,6 +1457,7 @@ namespace Emby.Plugin.Danmu.Core.Controllers
             task.CandidateId = string.IsNullOrWhiteSpace(media.Id) ? request.CandidateId : media.Id;
             return QueueSingleTargetDownload(
                 task,
+                movie,
                 () => _libraryManagerEventsHelper.DownloadMovieForProgress(
                     movie, media, scraper, request.ForceRefresh),
                 request.ForceRefresh ? "正在强制刷新电影弹幕" : "正在下载电影弹幕");
@@ -1316,9 +1491,17 @@ namespace Emby.Plugin.Danmu.Core.Controllers
             }
 
             ScraperMedia media;
+            var directEpisodeProviderId = episode.GetProviderId(scraper.ProviderId);
+            var isDirectEpisodeProviderId = string.Equals(
+                directEpisodeProviderId,
+                request.CandidateId,
+                StringComparison.OrdinalIgnoreCase);
             try
             {
-                media = await scraper.GetMedia(season, request.CandidateId).ConfigureAwait(false);
+                media = isDirectEpisodeProviderId
+                    ? await DanmuProviderIdResolver.ResolveDirectEpisodeMediaAsync(
+                        scraper, episode, request.CandidateId, sourceEpisodeNumber).ConfigureAwait(false)
+                    : await scraper.GetMedia(season, request.CandidateId).ConfigureAwait(false);
                 if (media == null || !DanmuEpisodeMatchHelper.TryGetSourceEpisode(
                         media.Episodes, sourceEpisodeNumber, out var sourceEpisode) ||
                     string.IsNullOrWhiteSpace(sourceEpisode.CommentId))
@@ -1343,8 +1526,10 @@ namespace Emby.Plugin.Danmu.Core.Controllers
             task.SeasonYear = season.ProductionYear;
             task.SeriesId = season.GetParent()?.Id.ToString() ?? string.Empty;
             task.CandidateId = string.IsNullOrWhiteSpace(media.Id) ? request.CandidateId : media.Id;
+            task.MatchOrigin = isDirectEpisodeProviderId ? "provider-id" : string.Empty;
             return QueueSingleTargetDownload(
                 task,
+                episode,
                 () => _libraryManagerEventsHelper.DownloadEpisodeForProgress(
                     episode, media, scraper, request.ForceRefresh, sourceEpisodeNumber),
                 request.ForceRefresh
@@ -1403,6 +1588,7 @@ namespace Emby.Plugin.Danmu.Core.Controllers
 
         private DanmuDownloadTaskResult QueueSingleTargetDownload(
             DanmuDownloadTaskResult task,
+            BaseItem targetItem,
             Func<Task<DanmuEpisodeDownloadOutcome>> download,
             string runningMessage)
         {
@@ -1428,6 +1614,8 @@ namespace Emby.Plugin.Danmu.Core.Controllers
 
                     var outcome = await AwaitSingleTargetDownload(
                         download(), cancellation.Token, task).ConfigureAwait(false);
+                    NormalizeAcceptedProviderOutcome(task, outcome);
+                    await PersistProviderIdAfterAcceptedOutcome(targetItem, outcome).ConfigureAwait(false);
                     lock (task)
                     {
                         itemResult.Status = outcome.Status;
@@ -1499,6 +1687,68 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                         task.TargetItemName);
                 }).ConfigureAwait(false);
             return outcome;
+        }
+
+        private async Task PersistProviderIdAfterAcceptedOutcome(
+            BaseItem item,
+            DanmuEpisodeDownloadOutcome outcome)
+        {
+            try
+            {
+                await _libraryManagerEventsHelper.PersistDownloadProviderIdAsync(item, outcome).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "ProviderId 写回失败，但弹幕文件已保留: item={0}", item?.Name);
+                if (outcome != null)
+                {
+                    outcome.Message = (outcome.Message ?? string.Empty) + "；ProviderId 写回失败：" + ex.Message;
+                }
+            }
+        }
+
+        private static void NormalizeAcceptedProviderOutcome(
+            DanmuDownloadTaskResult task,
+            DanmuEpisodeDownloadOutcome outcome)
+        {
+            if (task == null || outcome == null || !outcome.FilePersisted ||
+                (string.Equals(task.MatchOrigin, "provider-id", StringComparison.OrdinalIgnoreCase) &&
+                 !string.IsNullOrWhiteSpace(task.CandidateId)))
+            {
+                if (task != null && outcome != null && outcome.FilePersisted &&
+                    string.Equals(task.MatchOrigin, "provider-id", StringComparison.OrdinalIgnoreCase) &&
+                    !string.IsNullOrWhiteSpace(task.CandidateId))
+                {
+                    // Provider-id-origin work is already backed by this exact value;
+                    // preserve it so the writer's idempotent check skips writeback.
+                    outcome.ProviderId = task.Site;
+                    outcome.ProviderValue = task.CandidateId;
+                }
+                return;
+            }
+
+            if (!string.Equals(task.TargetItemType, "Movie", StringComparison.OrdinalIgnoreCase) ||
+                string.IsNullOrWhiteSpace(task.CandidateId))
+            {
+                return;
+            }
+
+            // Movie downloaders may resolve a playable episode identifier internally.
+            // Persist the validated Movie candidate instead, because it is the value
+            // that can be passed back to GetMedia on the next preview/import.
+            outcome.ProviderId = task.Site;
+            outcome.ProviderValue = task.CandidateId;
+        }
+
+        private static async Task SaveManualBindingAsync(BaseItem item, string providerId, string providerValue)
+        {
+            if (item == null || string.IsNullOrWhiteSpace(providerId) || string.IsNullOrWhiteSpace(providerValue))
+            {
+                return;
+            }
+
+            item.ProviderIds[providerId + "Manual"] = providerValue;
+            await item.UpdateToRepositoryAsync(ItemUpdateType.MetadataEdit, CancellationToken.None).ConfigureAwait(false);
         }
 
         private async Task<DanmuDownloadTaskResult> RetryTrackedEpisode(DanmuParams request)
@@ -1576,7 +1826,13 @@ namespace Emby.Plugin.Danmu.Core.Controllers
             ScraperMedia media;
             try
             {
-                media = await scraper.GetMedia(season, candidateId).ConfigureAwait(false);
+                media = string.Equals(task.MatchOrigin, "provider-id", StringComparison.OrdinalIgnoreCase)
+                    ? await DanmuProviderIdResolver.ResolveDirectEpisodeMediaAsync(
+                        scraper,
+                        episode,
+                        candidateId,
+                        task.SourceEpisodeNumber ?? episode.IndexNumber ?? 1).ConfigureAwait(false)
+                    : await scraper.GetMedia(season, candidateId).ConfigureAwait(false);
                 if (media == null)
                 {
                     throw new DanmuDownloadErrorException("弹幕来源无法读取该季度信息");
@@ -1638,6 +1894,7 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                             task.SourceEpisodeNumber),
                         cancellation.Token,
                         task).ConfigureAwait(false);
+                    await PersistProviderIdAfterAcceptedOutcome(episode, outcome).ConfigureAwait(false);
                     lock (task)
                     {
                         episodeResult.Status = outcome.Status;
@@ -1742,6 +1999,7 @@ namespace Emby.Plugin.Danmu.Core.Controllers
 
             return QueueSingleTargetDownload(
                 task,
+                movie,
                 () => _libraryManagerEventsHelper.DownloadMovieForProgress(movie, media, scraper, true),
                 "正在强制重新下载电影弹幕");
         }
@@ -1842,6 +2100,7 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                     Site = task.Site,
                     SiteName = task.SiteName,
                     CandidateId = task.CandidateId,
+                    MatchOrigin = task.MatchOrigin,
                     Status = task.Status,
                     Message = task.Message,
                     Total = task.Total,
