@@ -127,6 +127,16 @@ const documentStub = {
         (this.listeners.keydown || []).slice().forEach(listener => listener(event));
         return event;
     },
+    dispatchEvent: function (type) {
+        const event = {
+            defaultPrevented: false,
+            propagationStopped: false,
+            preventDefault: function () { this.defaultPrevented = true; },
+            stopPropagation: function () { this.propagationStopped = true; }
+        };
+        (this.listeners[type] || []).slice().forEach(listener => listener(event));
+        return event;
+    },
     createElement: tag => new FakeElement(tag),
     getElementById: function (id) {
         const all = this.body.querySelectorAll("." + id);
@@ -139,9 +149,33 @@ const documentStub = {
 
 const apiCalls = [];
 const apiResponses = {};
+const windowListeners = {};
+const historyEntries = [{ state: null, url: "http://emby.test/web/index.html#!/item?id=series" }];
+const historyStub = {
+    state: null,
+    pushState: function (state, _title, url) {
+        historyEntries.push({ state: state, url: url });
+        this.state = state;
+    },
+    back: function () {
+        if (historyEntries.length > 1) historyEntries.pop();
+        const current = historyEntries[historyEntries.length - 1];
+        this.state = current.state;
+        (windowListeners.popstate || []).slice().forEach(listener => listener({ state: current.state }));
+    }
+};
 const context = {
     window: {
-        location: { hash: "" },
+        location: { hash: "", href: "http://emby.test/web/index.html#!/item?id=series" },
+        history: historyStub,
+        addEventListener: function (type, listener) {
+            (windowListeners[type] || (windowListeners[type] = [])).push(listener);
+        },
+        removeEventListener: function (type, listener) {
+            const listeners = windowListeners[type] || [];
+            const index = listeners.indexOf(listener);
+            if (index >= 0) listeners.splice(index, 1);
+        },
         setTimeout: function () { return 1; },
         clearTimeout: function () {}
     },
@@ -171,15 +205,33 @@ vm.runInContext(source, context, { filename: scriptPath });
 const hooks = context.window.__embyDanmuSmartMatchTest;
 
 async function main() {
-    assert((source.match(/__embyDanmuSmartMenuV13/g) || []).length === 1,
+    assert((source.match(/__embyDanmuSmartMenuV15/g) || []).length === 1,
         "the frontend installation flag should be bumped exactly once");
     assert(!/\bScore\b|综合评分|评分：/.test(source),
         "the frontend must not calculate or display candidate scores");
     assert(!/textContent\s*=\s*["'](?:取消|关闭)["']/.test(source),
         "smart-match footers must expose only the top-right close button and Escape for ordinary dismissal");
+    assert(source.includes("env(safe-area-inset-top,0px)") &&
+        source.includes(".danmuSmartHeader{padding-top:calc(1.75rem"),
+        "the mobile header and close button must stay below the Android status-bar safe area");
     const rematch = hooks.rematchParameters({ keyword: "example" });
     assert(rematch.mode === "rematch" && rematch.rematch === "true" && rematch.force === "true" && rematch.keyword === "example",
         "a deliberate rematch should send explicit r6 mode/rematch and legacy force semantics");
+    const automaticInput = new FakeElement("input");
+    const automaticButton = new FakeElement("button");
+    automaticInput.value = "爱书的下克上";
+    hooks.initializeKeywordIntent(automaticInput, automaticButton, false);
+    const automaticRematch = hooks.keywordRematchParameters({ seasonNumber: 4 }, automaticInput);
+    assert(automaticButton.textContent === "重新智能匹配" &&
+        automaticRematch.mode === "rematch" && automaticRematch.seasonNumber === 4 &&
+        !Object.prototype.hasOwnProperty.call(automaticRematch, "keyword"),
+        "an untouched default title must omit keyword so the backend can run alias discovery");
+    automaticInput.value = "小书痴的下克上";
+    await automaticInput.dispatch("input");
+    const explicitRematch = hooks.keywordRematchParameters({}, automaticInput);
+    assert(automaticButton.textContent === "按关键词搜索" &&
+        explicitRematch.keyword === "小书痴的下克上",
+        "editing the input must switch to an explicit isolated custom-keyword search");
     const origins = {
         " provider-id ": "本地外部标识符",
         "EXTERNAL_ID": "本地外部标识符",
@@ -250,6 +302,89 @@ async function main() {
     assert(protectedDialog.forceClose() && !protectedDialog.forceClose() &&
         !protectedDialog.overlay.isConnected && (documentStub.listeners.keydown || []).length === 0,
         "force close must bypass protection and shared disposal must be idempotent");
+
+    const androidDialog = hooks.openDialog("android-navigation");
+    let returnedToParent = 0;
+    androidDialog.setBackHandler(function () {
+        returnedToParent++;
+        androidDialog.setBackHandler(null);
+    });
+    historyStub.back();
+    assert(returnedToParent === 1 && androidDialog.overlay.isConnected &&
+        historyStub.state && historyStub.state.__danmuSmartDialog,
+        "Android history back from a secondary view must return to its parent and restore the guard");
+    historyStub.back();
+    assert(!androidDialog.overlay.isConnected && hooks.activeDialogCount() === 0 &&
+        (windowListeners.popstate || []).length === 0 &&
+        (documentStub.listeners.backbutton || []).length === 0,
+        "Android history back from the top-level view must close and clean up the dialog");
+
+    const protectedAndroidDialog = hooks.openDialog("protected-android");
+    protectedAndroidDialog.closable = false;
+    historyStub.back();
+    assert(protectedAndroidDialog.overlay.isConnected &&
+        historyStub.state && historyStub.state.__danmuSmartDialog,
+        "Android history back must not dismiss a protected download view and must restore its guard");
+    protectedAndroidDialog.closable = true;
+    await documentStub.dispatchKey("Escape");
+    assert(!protectedAndroidDialog.overlay.isConnected,
+        "the existing Escape close path must remain available after protected Android back handling");
+
+    const nativeBackDialog = hooks.openDialog("native-backbutton");
+    let nativeParentReturns = 0;
+    nativeBackDialog.setBackHandler(function () {
+        nativeParentReturns++;
+        nativeBackDialog.setBackHandler(null);
+    });
+    const childBackButton = documentStub.dispatchEvent("backbutton");
+    assert(nativeParentReturns === 1 && nativeBackDialog.overlay.isConnected &&
+        childBackButton.defaultPrevented && childBackButton.propagationStopped,
+        "a native Android backbutton event must return from a secondary view without reaching Emby");
+    const topBackButton = documentStub.dispatchEvent("backbutton");
+    assert(!nativeBackDialog.overlay.isConnected && topBackButton.defaultPrevented,
+        "a native Android backbutton event at the top level must close the smart-match dialog");
+
+    const busyBackDialog = hooks.openDialog("busy-android-back");
+    hooks.setBusy(busyBackDialog, "searching");
+    historyStub.back();
+    const busyNativeBack = documentStub.dispatchEvent("backbutton");
+    assert(busyBackDialog.overlay.isConnected && busyBackDialog.androidBackLocked &&
+        historyStub.state && historyStub.state.__danmuSmartDialog &&
+        busyNativeBack.defaultPrevented && busyNativeBack.propagationStopped,
+        "history and native Android back must be consumed while a smart-match search is busy");
+    const busyClose = busyBackDialog.overlay.children[0].children[0].children[1];
+    await busyClose.dispatch("click");
+    assert(!busyBackDialog.overlay.isConnected,
+        "the top-right close button must remain effective while Android back is locked");
+
+    const completedSearchDialog = hooks.openDialog("completed-search");
+    hooks.setBusy(completedSearchDialog, "searching");
+    hooks.renderSeriesPicker(completedSearchDialog,
+        { Id: "series-id", Type: "Series", Name: "Series" }, [], {}, {});
+    assert(!completedSearchDialog.androidBackLocked,
+        "rendering a completed search result must release the Android-back lock");
+    historyStub.back();
+    assert(!completedSearchDialog.overlay.isConnected,
+        "normal Android back behavior must resume after search results are rendered");
+
+    const seriesBackDialog = hooks.openDialog("series-navigation");
+    const seriesItem = { Id: "series-id", Type: "Series", Name: "爱书的下克上" };
+    const seriesSeasons = [{
+        SeriesId: "series-id", SeasonId: "season-4", SeasonNumber: 4,
+        SeasonName: "第 4 季", SeriesName: "爱书的下克上", EpisodeCount: 12,
+        Candidates: []
+    }];
+    hooks.renderSeriesPicker(seriesBackDialog, seriesItem, seriesSeasons, {}, {});
+    hooks.renderSeriesSeasonPicker(seriesBackDialog, seriesItem, seriesSeasons, 0, {}, {});
+    assert(seriesBackDialog.title.textContent.includes("手动匹配"),
+        "opening a Series Season must enter the secondary candidate view");
+    historyStub.back();
+    assert(seriesBackDialog.overlay.isConnected &&
+        seriesBackDialog.title.textContent === "整部剧弹幕智能匹配",
+        "Android back from a real Series Season candidate view must restore the Series overview");
+    historyStub.back();
+    assert(!seriesBackDialog.overlay.isConnected,
+        "a second Android back at the restored Series top level must close the dialog");
 
     const lowerDialog = hooks.openDialog("lower");
     const upperDialog = hooks.openDialog("upper");
@@ -350,7 +485,7 @@ async function main() {
         const dialog = {
             body: new FakeElement("div"), footer: new FakeElement("div"),
             overlay: { isConnected: false }, closable: true, forceRefresh: false,
-            close: function () {}, forceClose: function () {}
+            close: function () {}, forceClose: function () {}, setBackHandler: function () {}
         };
         await hooks.renderSingleTargetProgress(
             dialog,
@@ -379,7 +514,7 @@ async function main() {
     const stopDialog = {
         body: new FakeElement("div"), footer: new FakeElement("div"),
         overlay: { isConnected: false }, closable: false, forceRefresh: false,
-        close: function () {}, forceClose: function () {}
+        close: function () {}, forceClose: function () {}, setBackHandler: function () {}
     };
     await hooks.renderSingleTargetProgress(stopDialog,
         { Id: "running-movie", Type: "Movie", Name: "Movie" }, {},

@@ -1,4 +1,6 @@
 using Emby.Plugin.Danmu.Scraper.Entity;
+using Emby.Plugin.Danmu.Scraper.Bilibili;
+using BilibiliScraper = Emby.Plugin.Danmu.Scraper.Bilibili.Bilibili;
 
 namespace Emby.Plugin.Danmu.Scraper
 {
@@ -11,10 +13,12 @@ namespace Emby.Plugin.Danmu.Scraper
                 return string.Empty;
             }
 
-            var value = string.Equals(providerId, "BilibiliID", System.StringComparison.OrdinalIgnoreCase)
-                ? media.CommentId
+            var isBilibili = string.Equals(
+                providerId, BilibiliScraper.ScraperProviderId, System.StringComparison.OrdinalIgnoreCase);
+            var value = isBilibili
+                ? BilibiliPgcIdPolicy.ResolveMovieEpisodeId(media)
                 : media.Id;
-            if (string.IsNullOrWhiteSpace(value) && media.Episodes.Count > 0)
+            if (!isBilibili && string.IsNullOrWhiteSpace(value) && media.Episodes.Count > 0)
             {
                 value = media.Episodes[0].CommentId;
             }

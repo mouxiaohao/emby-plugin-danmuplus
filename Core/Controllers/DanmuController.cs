@@ -509,7 +509,8 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                     currentSeason,
                     request.Keyword,
                     rematch,
-                    item is Series).ConfigureAwait(false));
+                    item is Series,
+                    item as Series).ConfigureAwait(false));
             }
 
             if (item is Season && result.Seasons.Count == 1)
@@ -563,7 +564,7 @@ namespace Emby.Plugin.Danmu.Core.Controllers
             if (!forceSearch)
             {
                 var providerDecision = await DanmuProviderIdResolver.ResolveAsync(
-                    scrapers, new BaseItem[] { latest }, _logger).ConfigureAwait(false);
+                    scrapers, DanmuProviderIdResolver.GetMovieScopes(latest), _logger).ConfigureAwait(false);
                 result.SearchErrors.AddRange(providerDecision.Diagnostics);
                 if (providerDecision.Candidate != null)
                 {
@@ -573,7 +574,11 @@ namespace Emby.Plugin.Danmu.Core.Controllers
             }
 
             if (DanmuMatchBindingHelper.TryGetSavedManualBinding(
-                    forceSearch, scrapers, latest.ProviderIds, out var savedScraper, out var manualId))
+                    forceSearch,
+                    scrapers,
+                    DanmuProviderIdResolver.GetItemLocalProviderIds(latest, scrapers),
+                    out var savedScraper,
+                    out var manualId))
             {
                     result.Status = "bound";
                     result.Message = "使用已经保存的电影手动匹配";
@@ -647,6 +652,9 @@ namespace Emby.Plugin.Danmu.Core.Controllers
             var latest = _libraryManager.GetItemById(episode.Id) as Episode ?? episode;
             var season = latest.GetParent() as Season;
             var series = season?.GetParent() as Series;
+            var authoritativeSeries = series == null
+                ? null
+                : _libraryManager.GetItemById(series.InternalId) as Series ?? series;
             var result = new DanmuItemMatchResult
             {
                 ItemId = latest.Id.ToString(),
@@ -673,8 +681,9 @@ namespace Emby.Plugin.Danmu.Core.Controllers
             {
                 var providerDecision = await DanmuProviderIdResolver.ResolveAsync(
                     episodeScrapers,
-                    new BaseItem[] { latest, season, series },
-                    _logger).ConfigureAwait(false);
+                    DanmuProviderIdResolver.GetEpisodeScopes(latest, season),
+                    _logger,
+                    authoritativeSeries).ConfigureAwait(false);
                 result.SearchErrors.AddRange(providerDecision.Diagnostics);
                 if (providerDecision.Candidate != null)
                 {
@@ -701,7 +710,8 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 }
             }
 
-            var seasonMatch = await GetSeasonMatchPreview(season, keywordOverride, forceSearch).ConfigureAwait(false);
+            var seasonMatch = await GetSeasonMatchPreview(
+                season, keywordOverride, forceSearch, false, authoritativeSeries).ConfigureAwait(false);
             result.Candidates = seasonMatch.Candidates;
             result.SearchErrors.AddRange(seasonMatch.SearchErrors);
             CopyDecision(result, seasonMatch);
@@ -759,7 +769,8 @@ namespace Emby.Plugin.Danmu.Core.Controllers
             Season season,
             string keywordOverride,
             bool forceSearch,
-            bool preserveProvidedSeason = false)
+            bool preserveProvidedSeason = false,
+            Series explicitParentSeries = null)
         {
             // Series preview supplies an authoritative non-projected Season
             // object. Do not replace it with the Guid lookup projection, which
@@ -769,6 +780,10 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 ? season
                 : _libraryManager.GetItemById(season.Id) as Season ?? season;
             var parent = latest.GetParent();
+            var parentSeries = explicitParentSeries ?? parent as Series;
+            var authoritativeParentSeries = explicitParentSeries ?? (parentSeries == null
+                ? null
+                : _libraryManager.GetItemById(parentSeries.InternalId) as Series ?? parentSeries);
             var seriesName = parent?.Name ?? string.Empty;
             var seasonName = latest.Name ?? seriesName;
             var episodeResult = latest.GetEpisodes();
@@ -800,7 +815,10 @@ namespace Emby.Plugin.Danmu.Core.Controllers
             if (!forceSearch)
             {
                 var providerDecision = await DanmuProviderIdResolver.ResolveAsync(
-                    scrapers, new BaseItem[] { latest, parent }, _logger).ConfigureAwait(false);
+                    scrapers,
+                    DanmuProviderIdResolver.GetSeasonScopes(latest),
+                    _logger,
+                    authoritativeParentSeries).ConfigureAwait(false);
                 result.SearchErrors.AddRange(providerDecision.Diagnostics);
                 if (providerDecision.Candidate != null)
                 {
@@ -810,7 +828,12 @@ namespace Emby.Plugin.Danmu.Core.Controllers
             }
 
             if (DanmuMatchBindingHelper.TryGetSavedManualBinding(
-                    forceSearch, scrapers, latest.ProviderIds, out var savedScraper, out var manualId))
+                    forceSearch,
+                    scrapers,
+                    DanmuProviderIdResolver.GetItemLocalProviderIds(
+                        latest, authoritativeParentSeries, scrapers),
+                    out var savedScraper,
+                    out var manualId))
             {
                     result.Status = "bound";
                     result.Message = "使用已经保存的手动匹配";
@@ -1144,9 +1167,11 @@ namespace Emby.Plugin.Danmu.Core.Controllers
             try
             {
                 var media = await scraper.GetMedia(season, request.CandidateId).ConfigureAwait(false);
-                if (media == null)
+                if (media == null || media.Episodes == null || !media.Episodes.Any(x =>
+                        x != null && !string.IsNullOrWhiteSpace(x.Id) &&
+                        !string.IsNullOrWhiteSpace(x.CommentId)))
                 {
-                    result.Message = "该候选项目已失效或无法读取剧集信息";
+                    result.Message = "该候选项目已失效或没有可用的正片剧集映射";
                     return result;
                 }
 
@@ -1155,9 +1180,6 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 {
                     await SaveManualBindingAsync(season, scraper.ProviderId, providerValue).ConfigureAwait(false);
                 }
-                _libraryManagerEventsHelper.QueueItem(season, EventType.Update);
-                _libraryManagerEventsHelper.QueueItem(season, EventType.Update);
-
                 result.Success = true;
                 result.CandidateId = providerValue;
                 result.Message = request.Manual
@@ -1255,6 +1277,11 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 return failed;
             }
 
+            // A newer selection supersedes older in-flight Season writes even if
+            // its validation or download later fails.
+            var seasonProviderGeneration =
+                _libraryManagerEventsHelper.BeginProviderWrite(season, scraper.ProviderId);
+
             ScraperMedia media;
             try
             {
@@ -1265,6 +1292,24 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                     failed.SiteName = scraper.ProviderName;
                     failed.Message = "候选项目已失效或无法读取剧集信息";
                     return failed;
+                }
+
+                if (media.Episodes == null || !media.Episodes.Any(x =>
+                        x != null && !string.IsNullOrWhiteSpace(x.Id) &&
+                        !string.IsNullOrWhiteSpace(x.CommentId)))
+                {
+                    failed.SeasonName = season.Name ?? string.Empty;
+                    failed.SiteName = scraper.ProviderName;
+                    failed.Message = "候选项目没有可用的正片剧集映射";
+                    return failed;
+                }
+
+                if (request.Manual)
+                {
+                    var manualValue = string.IsNullOrWhiteSpace(media.Id)
+                        ? request.CandidateId
+                        : media.Id;
+                    await SaveManualBindingAsync(season, scraper.ProviderId, manualValue).ConfigureAwait(false);
                 }
 
             }
@@ -1293,6 +1338,7 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 Site = scraper.ProviderId,
                 SiteName = scraper.ProviderName,
                 CandidateId = string.IsNullOrWhiteSpace(media.Id) ? request.CandidateId : media.Id,
+                SeasonProviderWriteGeneration = seasonProviderGeneration,
                 Status = "queued",
                 Message = "等待后台下载队列",
                 Total = episodes.Count,
@@ -1357,6 +1403,8 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                                 request.ForceRefresh).ConfigureAwait(false);
                             cancellation.Token.ThrowIfCancellationRequested();
                             await PersistProviderIdAfterAcceptedOutcome(episode, outcome).ConfigureAwait(false);
+                            await PersistSeasonProviderIdAfterAcceptedOutcome(
+                                season, task, outcome).ConfigureAwait(false);
                             lock (task)
                             {
                                 episodeResult.Status = outcome.Status;
@@ -1725,6 +1773,37 @@ namespace Emby.Plugin.Danmu.Core.Controllers
             }
         }
 
+        private async Task PersistSeasonProviderIdAfterAcceptedOutcome(
+            Season season,
+            DanmuDownloadTaskResult task,
+            DanmuEpisodeDownloadOutcome outcome)
+        {
+            if (season == null || task == null || outcome == null || task.SeasonProviderCommitted ||
+                task.SeasonProviderWriteGeneration <= 0 ||
+                !DanmuDownloadPersistencePolicy.ShouldPersist(outcome, task.CandidateId))
+            {
+                return;
+            }
+
+            try
+            {
+                await _libraryManagerEventsHelper.PersistDownloadProviderIdAsync(
+                    season,
+                    outcome,
+                    task.CandidateId,
+                    task.SeasonProviderWriteGeneration).ConfigureAwait(false);
+                lock (task)
+                {
+                    task.SeasonProviderCommitted = true;
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "季度 ProviderId 写回失败，但弹幕文件已保留: season={0}", season.Name);
+                outcome.Message = (outcome.Message ?? string.Empty) + "；季度 ProviderId 写回失败：" + ex.Message;
+            }
+        }
+
         private static void NormalizeAcceptedProviderOutcome(
             DanmuDownloadTaskResult task,
             DanmuEpisodeDownloadOutcome outcome)
@@ -1758,13 +1837,22 @@ namespace Emby.Plugin.Danmu.Core.Controllers
             outcome.ProviderValue = task.CandidateId;
         }
 
-        private static async Task SaveManualBindingAsync(BaseItem item, string providerId, string providerValue)
+        private async Task SaveManualBindingAsync(BaseItem item, string providerId, string providerValue)
         {
             if (item == null || string.IsNullOrWhiteSpace(providerId) || string.IsNullOrWhiteSpace(providerValue))
             {
                 return;
             }
 
+            if (item is Season)
+            {
+                var parentSeries = item.GetParent() as Series;
+                var authoritativeParentSeries = parentSeries == null
+                    ? null
+                    : _libraryManager.GetItemById(parentSeries.InternalId) as Series ?? parentSeries;
+                item.ProviderIds = DanmuProviderIdResolver.GetItemLocalProviderIds(
+                    item, authoritativeParentSeries, _scraperManager.All());
+            }
             item.ProviderIds[providerId + "Manual"] = providerValue;
             await item.UpdateToRepositoryAsync(ItemUpdateType.MetadataEdit, CancellationToken.None).ConfigureAwait(false);
         }
@@ -1913,6 +2001,7 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                         cancellation.Token,
                         task).ConfigureAwait(false);
                     await PersistProviderIdAfterAcceptedOutcome(episode, outcome).ConfigureAwait(false);
+                    await PersistSeasonProviderIdAfterAcceptedOutcome(season, task, outcome).ConfigureAwait(false);
                     lock (task)
                     {
                         episodeResult.Status = outcome.Status;
@@ -2119,6 +2208,8 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                     SiteName = task.SiteName,
                     CandidateId = task.CandidateId,
                     MatchOrigin = task.MatchOrigin,
+                    SeasonProviderWriteGeneration = task.SeasonProviderWriteGeneration,
+                    SeasonProviderCommitted = task.SeasonProviderCommitted,
                     Status = task.Status,
                     Message = task.Message,
                     Total = task.Total,

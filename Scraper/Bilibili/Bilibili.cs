@@ -47,6 +47,21 @@ namespace Emby.Plugin.Danmu.Scraper.Bilibili
             return episodePubTime > 0 ? UnixTimeStampToYear(episodePubTime.Value) : (int?)null;
         }
 
+        private async Task<string> ResolveMoviePgcEpisodeIdAsync(long seasonId)
+        {
+            if (seasonId <= 0)
+            {
+                return string.Empty;
+            }
+
+            var season = await _api.GetSeasonAsync(seasonId, CancellationToken.None).ConfigureAwait(false);
+            var episode = season?.Episodes?.FirstOrDefault(x =>
+                x != null && x.Id > 0 && x.CId > 0 &&
+                !EpisodeContentClassifier.IsExplicitNonMain(
+                    !string.IsNullOrWhiteSpace(x.LongTitle) ? x.LongTitle : x.Title));
+            return episode?.Id > 0 ? episode.Id.ToString() : string.Empty;
+        }
+
         public override int DefaultOrder => 1;
         public override bool DefaultEnable => true;
         public override string Name => ScraperProviderName;
@@ -120,10 +135,23 @@ namespace Emby.Plugin.Danmu.Scraper.Bilibili
                         continue;
                     }
 
+                    if (isMovieItemType)
+                    {
+                        var seasonId = mediaItem.SeasonId > 0
+                            ? mediaItem.SeasonId
+                            : mediaItem.PgcSeasonId;
+                        id = await ResolveMoviePgcEpisodeIdAsync(seasonId).ConfigureAwait(false);
+                        if (string.IsNullOrWhiteSpace(id))
+                        {
+                            log.Info("Bilibili.Search - 电影候选没有可验证的 PGC 正片 ep_id，跳过: {0}", title);
+                            continue;
+                        }
+                    }
+
                     log.Info($"Bilibili.Search - Found candidate for backend scoring: '{item.Name}'. Bili Title: '{title}', ID to use: '{id}', Bili Year: {pubYear}, Bili Type: '{mediaItem.SeasonTypeName ?? mediaItem.ApiType}'");
                     list.Add(new ScraperSearchInfo()
                     {
-                        Id = id, // Use the determined ID (season_id or media_id)
+                        Id = id, // Season uses season_id; Movie uses playable ep_id.
                         Name = title,
                         Category = mediaItem.SeasonTypeName ?? mediaItem.TypeName, // 如果 SeasonTypeName 可用，则优先使用
                         Year = pubYear,
@@ -280,8 +308,17 @@ namespace Emby.Plugin.Danmu.Scraper.Bilibili
                 return null;
             }
 
+            if (!BilibiliPgcIdPolicy.SupportsExactItem(item) ||
+                !BilibiliPgcIdPolicy.IsPositiveNumericId(id))
+            {
+                log.Warn("Bilibili.GetMedia - 仅接受 Movie/Season/Episode 的 PGC 数字标识符: item={0}, id={1}",
+                    item?.Name, id);
+                return null;
+            }
+
             ScraperMedia? scraperMedia = null;
             var isMovieItemType = item is MediaBrowser.Controller.Entities.Movies.Movie;
+            var isEpisodeItemType = item is MediaBrowser.Controller.Entities.TV.Episode;
 
             try
             {
@@ -367,6 +404,44 @@ namespace Emby.Plugin.Danmu.Scraper.Bilibili
                 // else if (id.StartsWith("av", StringComparison.OrdinalIgnoreCase)) { /* TODO: 如果需要，处理 AVID */ }
                 else if (long.TryParse(id, out var numericId)) // 可能是 season_id 或 ep_id
                 {
+                    if (isMovieItemType || isEpisodeItemType)
+                    {
+                        var exactEpisode = await _api.GetEpisodeAsync(numericId, CancellationToken.None)
+                            .ConfigureAwait(false);
+                        if (exactEpisode == null || exactEpisode.Id != numericId || exactEpisode.CId <= 0 ||
+                            !exactEpisode.AId.HasValue || exactEpisode.AId.Value <= 0)
+                        {
+                            log.Warn("Bilibili.GetMedia - Movie/Episode ep_id 未通过精确 PGC 验证: {0}", id);
+                            return null;
+                        }
+
+                        var exactTitle = !string.IsNullOrWhiteSpace(exactEpisode.LongTitle)
+                            ? exactEpisode.LongTitle
+                            : exactEpisode.Title ?? string.Empty;
+                        scraperMedia = new ScraperMedia
+                        {
+                            Id = id,
+                            ProviderId = ProviderId,
+                            Title = exactTitle,
+                            Year = exactEpisode.PubTime > 0
+                                ? UnixTimeStampToYear(exactEpisode.PubTime)
+                                : (int?)null,
+                            EpisodeCount = 1,
+                            CommentId = id,
+                            Episodes = new List<ScraperEpisode>
+                            {
+                                new ScraperEpisode
+                                {
+                                    Id = id,
+                                    CommentId = id,
+                                    Title = exactTitle,
+                                    EpisodeNumber = 1,
+                                },
+                            },
+                        };
+                        return scraperMedia;
+                    }
+
                     log.Info($"Bilibili.GetMedia (数字ID: {numericId}): 假定为 season_id。正在为 Emby 项目 '{item.Name}' 调用 _api.GetSeasonAsync。");
                     // 首先尝试作为季度获取 (用于剧集/番剧)
                     var seasonInfo = await _api.GetSeasonAsync(numericId, CancellationToken.None).ConfigureAwait(false);
@@ -461,6 +536,14 @@ namespace Emby.Plugin.Danmu.Scraper.Bilibili
             }
             if (string.IsNullOrEmpty(id)) {
                 log.Warn($"Bilibili.GetMediaEpisode - 传入的 ID 为 null 或空。Emby 项目: '{item?.Name ?? "未知项目"}'");
+                return null;
+            }
+            if ((!(item is MediaBrowser.Controller.Entities.Movies.Movie) &&
+                 !(item is MediaBrowser.Controller.Entities.TV.Episode)) ||
+                !BilibiliPgcIdPolicy.IsPositiveNumericId(id))
+            {
+                log.Warn("Bilibili.GetMediaEpisode - 仅接受 Movie/Episode 的 PGC ep_id: item={0}, id={1}",
+                    item?.Name, id);
                 return null;
             }
             // 此方法期望 'id' 是可以识别单个剧集弹幕的内容。

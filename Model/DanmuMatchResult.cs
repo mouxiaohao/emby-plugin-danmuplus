@@ -128,6 +128,8 @@ namespace Emby.Plugin.Danmu.Model
         public string SiteName { get; set; } = string.Empty;
         public string CandidateId { get; set; } = string.Empty;
         public string MatchOrigin { get; set; } = string.Empty;
+        public long SeasonProviderWriteGeneration { get; set; }
+        public bool SeasonProviderCommitted { get; set; }
         public string Status { get; set; } = "pending";
         public string Message { get; set; } = string.Empty;
         public int Total { get; set; }

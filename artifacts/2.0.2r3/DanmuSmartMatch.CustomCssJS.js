@@ -1,16 +1,14 @@
 ﻿/*
  * Emby.CustomCssJS: 电视剧/季/集/电影智能匹配并一键下载弹幕
- * 适用于 Emby 4.9.x + 本方案配套的 Emby.Plugin.Danmu 2.0.2r4 DLL
+ * 适用于 Emby 4.9.x + 本方案配套的 Emby.Plugin.Danmu 2.0.2r3 DLL
  */
 (function () {
     "use strict";
 
-    // V15 pairs the cross-media alias and provider-ID uniqueness release.
-    var INSTALL_FLAG = "__embyDanmuSmartMenuV15";
+    // V14 pairs the item-local identifier and season-persistence release.
+    var INSTALL_FLAG = "__embyDanmuSmartMenuV14";
     var BUTTON_ID = "danmu-bulk-download";
     var activeDialogs = [];
-    var dialogHistoryGeneration = 0;
-    var ignoredDialogHistoryPops = 0;
 
     if (window[INSTALL_FLAG]) {
         return;
@@ -214,7 +212,7 @@
             ".danmuEpisodeRetry{border:1px solid rgba(255,255,255,.28);border-radius:.3rem;background:#444;color:#fff;padding:.28rem .55rem;cursor:pointer;white-space:nowrap}.danmuEpisodeRetry:hover{background:#666}.danmuEpisodeRetry:disabled{opacity:.45;cursor:default}",
             ".danmuProgressSummary{position:sticky;top:-1rem;z-index:2;margin:-1rem -1.2rem .8rem;padding:.8rem 1.2rem;background:#202020;border-bottom:1px solid rgba(255,255,255,.14)}",
             ".danmuMuted{opacity:.72}.danmuBusy{text-align:center;padding:2.2rem 1rem;font-size:1.05rem}",
-            "@media(max-width:520px){.danmuSmartOverlay{padding:0}.danmuSmartCard{height:100%;max-height:none;border-radius:0}.danmuSmartHeader{padding-top:calc(1.75rem + env(safe-area-inset-top,0px))}.danmuSmartSearch{flex-wrap:wrap}.danmuSmartSearch input{flex-basis:100%}.danmuEpisodeProgress{grid-template-columns:auto 1fr auto}.danmuEpisodeProgress>span:nth-child(3){grid-column:1/3}}"
+            "@media(max-width:520px){.danmuSmartOverlay{padding:0}.danmuSmartCard{height:100%;max-height:none;border-radius:0}.danmuSmartSearch{flex-wrap:wrap}.danmuSmartSearch input{flex-basis:100%}.danmuEpisodeProgress{grid-template-columns:auto 1fr auto}.danmuEpisodeProgress>span:nth-child(3){grid-column:1/3}}"
         ].join("");
         document.head.appendChild(style);
     }
@@ -244,25 +242,17 @@
         overlay.appendChild(card);
         document.body.appendChild(overlay);
         var disposed = false;
-        var backHandler = null;
-        var historyGuardActive = false;
-        var historyToken = "danmu-smart-" + (++dialogHistoryGeneration);
         var dialog = {
             overlay: overlay,
             title: heading,
             body: body,
             footer: footer,
             closable: true,
-            androidBackLocked: false,
             forceRefresh: false,
             close: function () {
-                return dialog.closable ? dispose(false) : false;
+                return dialog.closable ? dispose() : false;
             },
-            forceClose: function () { return dispose(false); },
-            setBackHandler: function (handler) {
-                backHandler = typeof handler === "function" ? handler : null;
-            },
-            handleAndroidBack: function () { return handleBack(false); }
+            forceClose: function () { return dispose(); }
         };
         function isTopmost() {
             for (var index = activeDialogs.length - 1; index >= 0; index--) {
@@ -278,100 +268,22 @@
                 event.stopPropagation();
             }
         }
-        function hasOwnHistoryGuard() {
-            return Boolean(historyGuardActive && window.history && window.history.state &&
-                window.history.state.__danmuSmartDialog === historyToken);
-        }
-        function installHistoryGuard() {
-            if (disposed || historyGuardActive || !window.history ||
-                typeof window.history.pushState !== "function") {
-                return false;
-            }
-            try {
-                var state = Object.assign({}, window.history.state || {});
-                state.__danmuSmartDialog = historyToken;
-                window.history.pushState(state, "", window.location.href);
-                historyGuardActive = true;
-                return true;
-            } catch (_error) {
-                return false;
-            }
-        }
-        function handleBack(fromHistory) {
-            if (!isTopmost()) return false;
-            if (fromHistory) historyGuardActive = false;
-            if (dialog.androidBackLocked) {
-                if (fromHistory) installHistoryGuard();
-                return true;
-            }
-            if (!dialog.closable) {
-                if (fromHistory) installHistoryGuard();
-                return true;
-            }
-            if (backHandler) {
-                backHandler();
-                if (fromHistory) installHistoryGuard();
-                return true;
-            }
-            return dispose(Boolean(fromHistory));
-        }
-        function popStateListener() {
-            if (ignoredDialogHistoryPops > 0 && isTopmost()) {
-                return;
-            }
-            handleBack(true);
-        }
-        function ignoreNextPopState() {
-            ignoredDialogHistoryPops++;
-            var fallbackTimer = 0;
-            function consumeIgnoredPop() {
-                ignoredDialogHistoryPops = Math.max(0, ignoredDialogHistoryPops - 1);
-                if (window.removeEventListener) {
-                    window.removeEventListener("popstate", consumeIgnoredPop);
-                }
-                if (fallbackTimer && window.clearTimeout) window.clearTimeout(fallbackTimer);
-            }
-            if (window.addEventListener) {
-                window.addEventListener("popstate", consumeIgnoredPop);
-                if (window.setTimeout) fallbackTimer = window.setTimeout(consumeIgnoredPop, 1000);
-            } else {
-                ignoredDialogHistoryPops = Math.max(0, ignoredDialogHistoryPops - 1);
-            }
-        }
-        function backButtonListener(event) {
-            if (handleBack(false)) {
-                event.preventDefault();
-                event.stopPropagation();
-            }
-        }
-        function dispose(fromHistory) {
+        function dispose() {
             if (disposed) return false;
             disposed = true;
             document.removeEventListener("keydown", escapeListener);
-            document.removeEventListener("backbutton", backButtonListener);
-            if (window.removeEventListener) window.removeEventListener("popstate", popStateListener);
             var index = activeDialogs.indexOf(dialog);
             if (index >= 0) activeDialogs.splice(index, 1);
             overlay.remove();
-            if (!fromHistory && hasOwnHistoryGuard() &&
-                typeof window.history.back === "function") {
-                historyGuardActive = false;
-                ignoreNextPopState();
-                window.history.back();
-            }
             return true;
         }
         activeDialogs.push(dialog);
         close.addEventListener("click", function () { dialog.close(); });
         document.addEventListener("keydown", escapeListener);
-        document.addEventListener("backbutton", backButtonListener);
-        if (window.addEventListener) window.addEventListener("popstate", popStateListener);
-        installHistoryGuard();
         return dialog;
     }
 
     function setBusy(dialog, message) {
-        dialog.androidBackLocked = true;
         dialog.body.replaceChildren();
         dialog.footer.replaceChildren();
         var busy = document.createElement("div");
@@ -435,29 +347,6 @@
             rematch: "true",
             force: "true"
         }, parameters || {});
-    }
-
-    function initializeKeywordIntent(input, button, explicitKeyword) {
-        input.dataset.danmuExplicitKeyword = explicitKeyword ? "true" : "false";
-        function updateLabel() {
-            button.textContent = input.dataset.danmuExplicitKeyword === "true"
-                ? "按关键词搜索"
-                : "重新智能匹配";
-        }
-        input.addEventListener("input", function () {
-            input.dataset.danmuExplicitKeyword = "true";
-            updateLabel();
-        });
-        updateLabel();
-    }
-
-    function keywordRematchParameters(parameters, input) {
-        var keyword = String(input && input.value || "").trim();
-        var request = Object.assign({}, parameters || {});
-        if (input && input.dataset.danmuExplicitKeyword === "true") {
-            request.keyword = keyword;
-        }
-        return rematchParameters(request);
     }
 
     function matchOrigin(target) {
@@ -618,8 +507,6 @@
     }
 
     async function renderDownloadProgress(dialog, seasons, selections) {
-        dialog.setBackHandler(null);
-        dialog.androidBackLocked = false;
         dialog.closable = false;
         dialog.body.replaceChildren();
         dialog.footer.replaceChildren();
@@ -901,8 +788,6 @@
     }
 
     function renderSeriesPicker(dialog, item, seasons, selections, keywords) {
-        dialog.setBackHandler(null);
-        dialog.androidBackLocked = false;
         selections = selections || {};
         keywords = keywords || {};
         if (dialog.title) dialog.title.textContent = "整部剧弹幕智能匹配";
@@ -983,10 +868,6 @@
     }
 
     function renderSeriesSeasonPicker(dialog, item, seasons, seasonIndex, selections, keywords) {
-        dialog.androidBackLocked = false;
-        dialog.setBackHandler(function () {
-            renderSeriesPicker(dialog, item, seasons, selections, keywords);
-        });
         var season = seasons[seasonIndex];
         var selectionKey = seasonSelectionKey(season);
         var candidates = seasonCandidates(season);
@@ -1011,13 +892,12 @@
         var input = document.createElement("input");
         input.type = "search";
         input.placeholder = "输入本季关键词重新搜索";
-        var hasExplicitKeyword = Object.prototype.hasOwnProperty.call(keywords, selectionKey);
-        input.value = hasExplicitKeyword
+        input.value = Object.prototype.hasOwnProperty.call(keywords, selectionKey)
             ? keywords[selectionKey]
             : value(season, "SeriesName", "seriesName", item.SeriesName || item.Name || "");
         var searchButton = document.createElement("button");
         searchButton.className = "danmuSmartButton";
-        initializeKeywordIntent(input, searchButton, hasExplicitKeyword);
+        searchButton.textContent = isProviderIdMatch(season) ? "重新智能匹配" : "重新搜索";
         search.append(input, searchButton);
         dialog.body.appendChild(search);
 
@@ -1066,10 +946,9 @@
             setBusy(dialog, "正在使用新关键词搜索本季候选…");
             try {
                 var parameters = seasonRequestParameters(season);
+                parameters.keyword = keyword;
                 var searchItemId = parameters.seriesId || item.Id;
-                var requestParameters = keywordRematchParameters(parameters, input);
-                var explicitKeyword = input.dataset.danmuExplicitKeyword === "true";
-                var refreshed = await api(searchItemId, "MatchPreview", requestParameters);
+                var refreshed = await api(searchItemId, "MatchPreview", rematchParameters(parameters));
                 var refreshedSeason = (value(refreshed, "Seasons", "seasons", []) || [])[0];
                 if (!refreshedSeason) throw new Error("服务器没有返回本季候选");
                 var oldKey = selectionKey;
@@ -1079,8 +958,7 @@
                     selections[newKey] = selections[oldKey];
                     delete selections[oldKey];
                 }
-                if (explicitKeyword) keywords[newKey] = keyword;
-                else delete keywords[newKey];
+                keywords[newKey] = keyword;
                 renderSeriesSeasonPicker(dialog, item, seasons, seasonIndex, selections, keywords);
             } catch (error) {
                 renderSeriesSeasonPicker(dialog, item, seasons, seasonIndex, selections, keywords);
@@ -1118,8 +996,6 @@
     }
 
     function renderCandidatePicker(dialog, item, season, keyword) {
-        dialog.setBackHandler(null);
-        dialog.androidBackLocked = false;
         dialog.body.replaceChildren();
         dialog.footer.replaceChildren();
 
@@ -1137,7 +1013,7 @@
         input.value = keyword || value(season, "SeriesName", "seriesName", item.SeriesName || item.Name || "");
         var searchButton = document.createElement("button");
         searchButton.className = "danmuSmartButton";
-        initializeKeywordIntent(input, searchButton, Boolean(keyword));
+        searchButton.textContent = isProviderIdMatch(season) ? "重新智能匹配" : "重新搜索";
         search.append(input, searchButton);
         dialog.body.appendChild(search);
 
@@ -1195,13 +1071,11 @@
             }
             setBusy(dialog, "正在使用新关键词搜索所有已启用网站…");
             try {
-                var explicitKeyword = input.dataset.danmuExplicitKeyword === "true";
-                var refreshed = await api(item.Id, "MatchPreview", keywordRematchParameters({}, input));
+                var refreshed = await api(item.Id, "MatchPreview", rematchParameters({ keyword: newKeyword }));
                 var refreshedSeason = (value(refreshed, "Seasons", "seasons", []) || [])[0];
-                renderCandidatePicker(dialog, item, refreshedSeason || season, explicitKeyword ? newKeyword : "");
+                renderCandidatePicker(dialog, item, refreshedSeason || season, newKeyword);
             } catch (error) {
-                renderCandidatePicker(dialog, item, season,
-                    input.dataset.danmuExplicitKeyword === "true" ? newKeyword : "");
+                renderCandidatePicker(dialog, item, season, newKeyword);
                 notify("重新搜索失败：" + (error.message || error), true);
             }
         });
@@ -1238,8 +1112,6 @@
     }
 
     function renderItemCandidatePicker(dialog, item, target, keyword) {
-        dialog.setBackHandler(null);
-        dialog.androidBackLocked = false;
         dialog.body.replaceChildren();
         dialog.footer.replaceChildren();
         var isEpisode = item.Type === "Episode";
@@ -1268,7 +1140,7 @@
         input.value = keyword || manualSearchDefault(item, target);
         var searchButton = document.createElement("button");
         searchButton.className = "danmuSmartButton";
-        initializeKeywordIntent(input, searchButton, Boolean(keyword));
+        searchButton.textContent = isProviderIdMatch(target) ? "重新智能匹配" : "重新搜索";
         search.append(input, searchButton);
         dialog.body.appendChild(search);
 
@@ -1343,14 +1215,12 @@
             }
             setBusy(dialog, "正在使用新关键词搜索所有已启用网站…");
             try {
-                var explicitKeyword = input.dataset.danmuExplicitKeyword === "true";
-                var refreshed = await api(item.Id, "MatchPreview", keywordRematchParameters({}, input));
+                var refreshed = await api(item.Id, "MatchPreview", rematchParameters({ keyword: newKeyword }));
                 var refreshedTarget = value(refreshed, "Target", "target", null);
                 if (!refreshedTarget) throw new Error("服务器没有返回媒体候选");
-                renderItemCandidatePicker(dialog, item, refreshedTarget, explicitKeyword ? newKeyword : "");
+                renderItemCandidatePicker(dialog, item, refreshedTarget, newKeyword);
             } catch (error) {
-                renderItemCandidatePicker(dialog, item, target,
-                    input.dataset.danmuExplicitKeyword === "true" ? newKeyword : "");
+                renderItemCandidatePicker(dialog, item, target, newKeyword);
                 notify("重新搜索失败：" + (error.message || error), true);
             }
         });
@@ -1396,7 +1266,6 @@
     }
 
     async function renderSingleTargetProgress(dialog, item, target, candidate, sourceEpisodeNumber, manual) {
-        dialog.setBackHandler(null);
         dialog.closable = false;
         setBusy(dialog, "正在提交下载任务…");
         var parameters = {
@@ -1410,7 +1279,6 @@
         var taskId = value(task, "TaskId", "taskId", "");
         var monitoring = false;
 
-        dialog.androidBackLocked = false;
         dialog.body.replaceChildren();
         dialog.footer.replaceChildren();
         var summary = document.createElement("div");
@@ -1736,19 +1604,14 @@
         setPendingContext: setPendingContext,
         resolveMenuContextId: resolveMenuContextId,
         rematchParameters: rematchParameters,
-        initializeKeywordIntent: initializeKeywordIntent,
-        keywordRematchParameters: keywordRematchParameters,
         normalizeDecisionCode: normalizeDecisionCode,
         matchOriginLabel: matchOriginLabel,
         decisionReasonLabel: decisionReasonLabel,
         backendDecisionLine: backendDecisionLine,
         hasBackendMatch: hasBackendMatch,
         openDialog: openDialog,
-        setBusy: setBusy,
         activeDialogCount: function () { return activeDialogs.length; },
         injectButton: injectButton,
-        renderSeriesPicker: renderSeriesPicker,
-        renderSeriesSeasonPicker: renderSeriesSeasonPicker,
         renderSingleTargetProgress: renderSingleTargetProgress,
         setButtonWorkflow: function (workflow) {
             buttonWorkflow = workflow || runButtonWorkflow;

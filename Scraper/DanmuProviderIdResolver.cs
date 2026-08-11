@@ -6,18 +6,65 @@ using Emby.Plugin.Danmu.Core.Extensions;
 using Emby.Plugin.Danmu.Model;
 using Emby.Plugin.Danmu.Scraper.Entity;
 using MediaBrowser.Controller.Entities;
+using MediaBrowser.Controller.Entities.Movies;
 using MediaBrowser.Controller.Entities.TV;
+using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.Logging;
 
 namespace Emby.Plugin.Danmu.Scraper
 {
     /// <summary>
-    /// Resolves Emby external identifiers in configured provider order.  Provider
-    /// priority is intentionally outside the item hierarchy: a Series identifier
-    /// on an earlier enabled provider beats an Episode identifier on a later one.
+    /// Resolves Emby external identifiers in configured provider order within an
+    /// explicit item-local scope. Series identifiers are never inferred here.
     /// </summary>
     public static class DanmuProviderIdResolver
     {
+        public static BaseItem[] GetMovieScopes(Movie movie)
+        {
+            return movie == null ? Array.Empty<BaseItem>() : new BaseItem[] { movie };
+        }
+
+        public static BaseItem[] GetSeasonScopes(Season season)
+        {
+            return season == null ? Array.Empty<BaseItem>() : new BaseItem[] { season };
+        }
+
+        public static BaseItem[] GetEpisodeScopes(Episode episode, Season season)
+        {
+            return new BaseItem[] { episode, season }.Where(x => x != null).ToArray();
+        }
+
+        public static ProviderIdDictionary GetItemLocalProviderIds(
+            BaseItem item,
+            IEnumerable<AbstractScraper> scraperSource)
+        {
+            return GetItemLocalProviderIds(
+                item,
+                item is Season ? item.GetParent() as Series : null,
+                scraperSource);
+        }
+
+        public static ProviderIdDictionary GetItemLocalProviderIds(
+            BaseItem item,
+            Series parentSeries,
+            IEnumerable<AbstractScraper> scraperSource)
+        {
+            var result = new ProviderIdDictionary();
+            if (item?.ProviderIds != null)
+            {
+                foreach (var pair in item.ProviderIds)
+                {
+                    result[pair.Key] = pair.Value;
+                }
+            }
+
+            // Scope, not value equality, establishes ownership. A legitimate
+            // Season ID may equal a stale/ignored Series ID (for example when a
+            // Series identifier points to its latest Season), so comparing values
+            // would incorrectly discard the Season's own configured-priority ID.
+            return result;
+        }
+
         public static Dictionary<string, string> GetEnabledProviderIdKeys(
             IEnumerable<AbstractScraper> scraperSource)
         {
@@ -30,14 +77,15 @@ namespace Emby.Plugin.Danmu.Scraper
         public static async Task<DanmuMatchDecision> ResolveAsync(
             IEnumerable<AbstractScraper> scraperSource,
             IEnumerable<BaseItem> itemScopes,
-            ILogger logger)
+            ILogger logger,
+            Series parentSeries = null)
         {
             var decision = new DanmuMatchDecision();
             var scrapers = (scraperSource ?? Enumerable.Empty<AbstractScraper>())
                 .Where(x => x != null)
                 .ToList();
             var scopes = (itemScopes ?? Enumerable.Empty<BaseItem>())
-                .Where(x => x != null)
+                .Where(x => x != null && !(x is Series))
                 .ToList();
             var foundIdentifier = false;
 
@@ -47,8 +95,10 @@ namespace Emby.Plugin.Danmu.Scraper
                 var key = scraper.ProviderId;
                 foreach (var scope in scopes)
                 {
-                    if (scope.ProviderIds == null ||
-                        !scope.ProviderIds.TryGetValue(key, out var externalId) ||
+                    var localProviderIds = scope is Season && parentSeries != null
+                        ? GetItemLocalProviderIds(scope, parentSeries, scrapers)
+                        : GetItemLocalProviderIds(scope, scrapers);
+                    if (!localProviderIds.TryGetValue(key, out var externalId) ||
                         string.IsNullOrWhiteSpace(externalId))
                     {
                         continue;

@@ -1,157 +1,74 @@
 # emby-plugin-danmuplus
 
-Emby 弹幕插件增强版，参考 [fengymi/emby-plugin-danmu](https://github.com/fengymi/emby-plugin-danmu) 开发。项目从原移植版继续演进，当前版本为 **2.0.2r2**。
+Emby 弹幕插件增强版，参考 [fengymi/emby-plugin-danmu](https://github.com/fengymi/emby-plugin-danmu) 开发。当前版本为 **2.0.2r4**，已在 Synology 套件版 Emby **4.9.3.0** 上验证。
 
-已验证的服务器环境：Synology 套件版 Emby **4.9.3.0**。其他 Emby 版本可能需要调整配置页或前端菜单兼容代码。
+版本变化请查看 [完整更新日志（UPDATE.md）](UPDATE.md)。README 只汇总 DanmuPlus 相比旧版 Danmu 插件的重要使用功能变化。
 
-## 主要功能
+## 相比旧版 Danmu 插件的主要改动
 
-- 爱奇艺、腾讯、优酷、哔哩哔哩、芒果 TV、弹弹 Play 等来源的弹幕搜索与下载。
-- 后端统一完成候选评分、排序和最终决策；前端仅呈现其返回的候选与决策信息。
-- 过滤预告、PV、花絮等非正片候选，避免集数错乱和异常小 XML。
-- 腾讯分段重试、连接重置重试，以及已完成分段合并为部分弹幕 XML。
-- 七天 XML 重复跳过；支持强制刷新、后台队列、强制停止、单集重试和流式进度。
-- STRM、115 挂载等普通 Emby 媒体库场景兼容。
-- 配置页面版本显示为 `2.0.2r2`。
+### 统一智能匹配
 
-## 2.0.2r2 补丁
+- 电视剧、季度、单集和电影共用后端匹配、评分、排序与决策系统；前端只负责显示和交互，不在浏览器内重新评分或改动候选顺序。
+- 支持爱奇艺、腾讯、优酷、哔哩哔哩、芒果 TV、弹弹 Play 等来源，并按管理页面中已启用网站的顺序处理多个有效外部标识符。
+- 优先验证媒体自身的弹幕网站外部标识符。季度只使用季度标识符；单集先使用本集标识符，再回退所属季度；电影只使用电影标识符；Series 标识符不再替代子季度。
+- 没有可用标识符时，按标题、季度、年份和集数执行全站搜索。标准标题不足时可追加受限的动态标题片段和同站别名搜索，以兼容不同译名。
+- 90 分以上候选属于置信结果，并按已启用网站顺序选择；低置信、并列或无法解析的结果交给用户确认。
+- 过滤预告、PV、花絮、特别篇等非正片内容，减少集数错位和异常小 XML。
 
-- 本地外部标识符（provider-id）命中时，后端只使用该站点的同一精确 ID 详情结果展示候选；不会为了补全展示字段执行关键词搜索、评分或跨站候选竞争。
-- 标题、年份、分类和声明集数仅在网站详情明确返回时显示。详情未提供的字段会保持“未知”，不会用本地 Emby 元数据、标题猜测或类型规则伪造网站信息。
-- 芒果 TV、腾讯视频和优酷的当前精确详情路径可靠提供可用剧集列表时，集数采用实际可用列表数；其余详情字段仍按网站是否明确提供决定是否显示。
-- 搜索、评分和“重新智能匹配”仍使用原有的启用站点搜索工作流，与 provider-id 的精确详情展示严格区分。
-- CustomCssJS 安装标记升级为 `__embyDanmuSmartMenuV13`；升级后请覆盖旧条目并刷新 Emby 网页端。
+### 外部标识符与下载一致性
 
-## 2.0.2r1 补丁
+- 本地标识符命中时直接请求对应网站的精确详情，不经过关键词搜索和评分；网站没有明确返回的标题、年份、类型或集数保持“未知”。
+- 哔哩哔哩仅使用 PGC：季度保存 `season_id`，电影和单集保存 `ep_id`；下载时才由后端解析 `aid,cid`。
+- 整季第一条有效弹幕成功落盘后保存季度标识符；每个成功集保存自己的单集标识符，包括第一集。
+- 季度或单集成功写入选中网站标识符时，会清除同一媒体上其他已注册弹幕网站的普通标识符，包括停用网站；不会清除 Manual、TMDB、TVDB、IMDb 或其他 Emby 元数据。
+- 失败、跳过、取消、超时、过时代际和未落盘结果不会触发标识符写入或清理；元数据写入异常也不会反转已成功保存的 XML。
 
-- 智能匹配结果中的来源和决策代码会显示为中文说明；未知的新代码以“未知匹配来源”或“未知决策”提示，并仅在诊断文字中保留原始代码。
-- 点击弹窗背景不会关闭智能匹配窗口，可关闭界面也不再显示底部“取消”按钮。只有右上角“×”或 `Escape` 会关闭最上层、当前允许关闭的窗口；下载进行中的受保护窗口仍必须通过原有“后台下载”或停止流程处理。
-- 本版本严格保持 2.0.1-r6 的匹配、候选顺序、重新智能匹配请求、下载、重试、ProviderId 写回和自动入库行为；不包含后续季分段、集合或临时季度功能。
-- CustomCssJS 安装标记升级为 `__embyDanmuSmartMenuV12`；升级后请覆盖旧条目并刷新 Emby 网页端。
+### 下载可靠性
 
-## 2.0.1-r6 补丁
+- 腾讯等分段弹幕支持失败重试和连接重置重试；部分分段失败时，已成功内容仍可合并为明确标记的部分 XML。
+- 下载状态区分成功、部分成功、失败和重复跳过，并支持逐集重试。
+- 默认按 XML 文件判断七天内是否重复下载；可选择强制刷新。
+- 支持后台队列、强制停止、流式进度，以及普通目录、STRM 和 115 挂载媒体库。
+- 所有来源统一过滤 XML 1.0 非法字符，同时保留合法中文、换行、字符引用和 Unicode 补充字符。
 
-- 匹配预览由服务端返回 `matchOrigin`、`decisionReason` 与完整候选列表；网页端不再计算评分、重排候选或推断最终匹配。
-- 本地外部标识符（provider-id）命中会显示为“匹配成功”，来源为“本地外部标识符”；可在右侧点击“重新智能匹配”。
-- 重新智能匹配会明确发送 `mode=rematch`、`rematch=true` 和兼容旧服务器的 `force=true`，以绕过已保存的自动结果并请求新的服务端决策。
-- CustomCssJS 安装标记升级为 `__embyDanmuSmartMenuV10`；升级后请用 r6 脚本覆盖旧条目并刷新 Emby 网页端。
+### 智能匹配前端
 
-## 2.0.1-r4 补丁
-
-- 移除仓库、发行说明和源码包中的共享测试 Worker 地址，仅保留通用格式示例。
-- 明确代理地址必须由管理员自行部署或选择，并且插件不会预填或内置任何公共代理地址。
-- 增加配置页面回归检查，确保新安装默认使用自定义 API 模式且代理 CORS 地址为空。
-
-## 2.0.1-r3 补丁
-
-- 弹弹 Play 配置新增互斥的“使用代理 API”和“使用自定义 API”模式。
-- 代理模式支持 `cf_worker.js` 的 CORS 前缀拼接协议，由 Worker 完成官方 API 签名，不要求 Emby 保存本地 API ID/Secret。
-- 自定义模式继续直连弹弹 Play 官方 API，并保留原有凭据优先级和本地签名逻辑。
-- 两种模式继续调用 `/search/anime`、`/bangumi` 和 `/comment`，沿用标题、年份、季度和集数匹配；不使用视频 Hash 或 `/match`。
-
-## 2.0.1-r2 补丁
-
-- 智能匹配菜单扩展到电视剧、季度、单集和电影的详情页、卡片与 Android 长按菜单。
-- 新增电影跨站候选、评分、绑定、跟踪下载、超时和重试流程。
-- 单集匹配支持候选来源集数建议与手动覆盖，且不会改写整季绑定。
-- 单目标进度使用与季度一致的明细行、状态、停止和重试体验。
-- 修复爱奇艺电影 `qips://tvid` 解析，并限制腾讯弹幕请求超时。
-
-## 2.0.1-r1 补丁
-
-- 为所有弹幕来源增加统一的 XML 1.0 字符安全防线，过滤非法控制字符、`U+FFFE`、`U+FFFF` 和孤立代理项。
-- 保留中文、TAB/LF/CR、合法字符引用和有效 Unicode 补充字符（包括 emoji）。
-- 爱奇艺和 Bilibili 原始 XML 首次解析失败时，会在清理非法字符后重试一次；其他 JSON/protobuf 来源由最终 XML 输出防线统一保护。
-- 下载结果改为按弹幕条目和序列化结果判断，不再仅因合法 XML 小于 1 KB 而拒绝保存。
-- 空内容和最终 XML 序列化失败会返回对应错误；来源解析异常保留在日志中，不再统一误报为“弹幕内容少于 1KB”。
-
-## 2.0.0 相比旧版 emby-plugin-danmu 的改动
-
-本版本不是简单改名，而是在原项目基础上的独立增强线。主要差异如下：
-
-### 搜索与匹配
-
-- 爱奇艺搜索接口适配了新版返回结构，修复“缺少集号或集号超过弹幕数，忽略处理”等常见失败。
-- B 站搜索增加多种请求参数和响应解析兼容，减少动画、日韩剧无候选的问题。
-- 搜索时先使用父剧名轮询全部站点，再结合季名、年份、集数和别名评分；不再由站点优先级决定先搜哪个关键词。
-- 候选按综合评分排序；最高分相同才使用站点优先级决定绑定结果。
-- 识别并过滤预告、PV、花絮、特别篇等非正片候选，避免把这些内容当成正片集数。
-- 每季独立匹配；某一季失败不会阻塞其他季度，并提供季度级手动绑定。
-- 腾讯、爱奇艺、优酷、芒果、B 站和弹弹 Play 的结果统一纳入匹配流程。
-
-### 下载稳定性
-
-- 腾讯等分段弹幕下载支持失败重试、连接重置重试。
-- 某一分段失败时，已成功分段仍会合并成可用 XML，并明确标记“部分弹幕缺失”。
-- 下载结果区分成功、失败、跳过、部分缺失等状态，每集提供单独重试按钮。
-- 默认按 XML 文件判断七天内是否重复下载，显示“重复已跳过”；可勾选强制刷新。
-- 支持后台队列和强制停止，不要求前端一直保持下载窗口打开。
-- 修复普通目录、STRM 文件和 115 媒体库季目录在季识别上的兼容问题。
-- 增加弹弹 Play API ID/API Secret 配置输入，并避免凭据进入日志和错误提示。
-
-### 前端操作
-
-- 新增可独立安装的 CustomCssJS 前端脚本，电视剧详情页和季度详情页“更多”菜单可以一键下载整部剧或整季弹幕。
-- 前端支持流式显示季度、集数和实时结果，支持自动匹配结果调整、手动候选选择、后台下载、停止和重试。
-- 2.0.0 的 DLL 本身不修改 Emby 的 `dashboard-ui` 文件；需要菜单时手动安装 `Frontend/DanmuSmartMatch.CustomCssJS.js`。
-- Android 原生客户端不加载 CustomCssJS，因此菜单需要通过 Emby Web 客户端或浏览器使用；如需 Android 客户端支持，请参考 [Emby.CustomCssJS 仓库](https://github.com/Shurelol/Emby.CustomCssJS) 中针对 Android 客户端的注入/修改方法，将 CustomCssJS 支持集成到客户端后再安装本项目脚本。
-  <img width="1326" height="895" alt="image" src="https://github.com/user-attachments/assets/d6dba7ef-783e-4866-833e-c4eeece563db" />
-  <img width="1194" height="811" alt="image" src="https://github.com/user-attachments/assets/0decfc18-b4b5-4702-aabb-ec348d83624e" />
-  <img width="991" height="774" alt="image" src="https://github.com/user-attachments/assets/e8408009-98ef-4ce3-9d2b-b858365bbca5" />
-
-
-
+- 通过独立的 Emby.CustomCssJS 脚本提供电视剧、季度、单集和电影的智能匹配菜单，不修改 Emby `dashboard-ui`。
+- 显示后端返回的中文匹配来源和决策原因，支持重新智能匹配、自定义关键词、手动候选、来源集数调整、强制刷新、后台下载、停止和重试。
+- 点击弹窗遮罩不会关闭界面；普通界面可用右上角 X 或 `Escape` 关闭。
+- 支持 Android/WebView 回退层级：二级候选返回上级，顶层界面关闭；智能匹配请求进行中会拦截系统回退，只保留右上角 X，结果显示后恢复正常回退。
+- Android 窄屏标题栏适配状态栏安全区域，避免右上角 X 被状态栏遮挡。
 
 ## 安装 DLL
 
 1. 在 Emby 管理后台停用旧版弹幕插件。
-2. 将编译得到的 `Emby.Plugin.Danmu.dll` 复制到 Emby 插件目录。
-3. 重启 Emby，在“弹幕配置”中保存站点优先级和弹弹 Play API 模式（如使用）。
-4. 先扫描一个测试媒体，确认日志和 XML 输出正常，再用于整个媒体库。
+2. 从 [最新 GitHub Release](https://github.com/mouxiaohao/emby-plugin-danmuplus/releases/latest) 下载 `Emby.Plugin.Danmu.dll`，复制到 Emby 插件目录。
+3. 重启 Emby，在“弹幕配置”中保存站点顺序和弹弹 Play API 模式。
+4. 先用少量测试媒体确认匹配、XML 输出和元数据写入正常，再用于整个媒体库。
 
-本项目保留原程序集名称 `Emby.Plugin.Danmu.dll`，这样可以兼容现有 Emby 插件配置和数据；仓库名称与项目发行名称为 `emby-plugin-danmuplus`。
+项目保留程序集名称 `Emby.Plugin.Danmu.dll`，以兼容已有插件配置和数据。
 
 ## 弹弹 Play API 配置
 
-Emby 管理后台的“弹幕配置”提供两种互斥的调用方式：
+管理页面提供互斥的代理 API 与自定义 API 模式：
 
-- **使用代理 API**：填写你自己部署或信任的、兼容 `cf_worker.js` 的代理 CORS 前缀，例如 `https://worker.example/cors/`。插件把现有弹弹 Play 官方 API 地址附加到该前缀后转发，由 Cloudflare Worker 等代理完成应用签名；此模式不需要在 Emby 中填写 API ID 或 API Secret。插件不会预填或内置任何公共代理地址。
-- **使用自定义 API**：插件继续直连弹弹 Play 官方 API，并使用本地配置的 API ID 与 API Secret 生成签名。插件不会自动申请、生成或附带第三方凭据，请先从弹弹 Play 开放平台取得属于自己的凭据，并同时填写两项。
+- **代理 API**：可使用插件内置的官方 CORS 路由，或填写自己部署且兼容 `cf_worker.js` 的 CORS 前缀。代理负责完成官方 API 签名，Emby 不需要保存本地 API ID/Secret。
+- **自定义 API**：插件直连弹弹 Play 官方 API，并使用管理员配置的 API ID 与 API Secret 在本地签名。
 
-切换模式只改变请求的传输和签名位置，不会清空另一种模式已保存的值。两种模式均继续通过标题、年份、季度和集数进行服务端搜索与评分，使用相同的弹幕下载流程；不会计算视频 Hash，也不会调用弹弹 Play `/match` 接口。
+两种模式均继续使用标题、年份、季度和集数进行搜索与评分，不计算视频 Hash，也不调用弹弹 Play `/match` 接口。自定义模式的 ID 与 Secret 必须成对填写；Secret 会以明文保存在 Emby 插件配置 XML 中，请依靠服务器文件权限保护配置文件。
 
-使用自定义 API 时还需注意：
-
-- API ID 与 API Secret 必须作为完整的一对填写；只填写一项会明确报配置不完整，不会与其他来源的值拼接。
-- 插件配置中的完整凭据优先；配置为空时才依次尝试环境变量 `DANDAN_API_ID`、`DANDAN_API_SECRET` 和旧版内置值。
-- API Secret 在管理页面中以密码框遮罩，但仍以明文保存在 Emby 插件配置 XML 中；请依靠群晖和 Emby 文件权限保护配置文件。
-- 插件不会把 API ID、API Secret 或签名材料写入日志。提交诊断日志前仍应检查并移除其他令牌和个人路径。
-
-## 一键智能匹配前端
-
-`Frontend/DanmuSmartMatch.CustomCssJS.js` 是独立的 Emby.CustomCssJS 前端脚本，适用于不希望 DLL 修改 Emby `dashboard-ui` 文件的部署方式。
-
-使用方法：
+## 安装智能匹配前端
 
 1. 安装并启用 [Shurelol/Emby.CustomCssJS](https://github.com/Shurelol/Emby.CustomCssJS)。
-2. 在 CustomCssJS 中新建一个自定义 JavaScript 条目。
-3. 将 `Frontend/DanmuSmartMatch.CustomCssJS.js` 的完整内容粘贴到脚本框。
-4. 将脚本状态设为启用，并刷新 Emby 网页端。
-5. 在以下详情页或封面/列表卡片右侧的三点“更多”菜单中使用智能匹配：
-   - 电视剧：整部剧详情页以及电视、动画媒体库中的剧集卡片；
-   - 季度：季度详情页以及剧集详情页中的季度卡片；
-   - 单集：单集详情页以及季度详情页中的单集行或卡片；
-   - 电影：电影详情页以及电影卡片。
+2. 在 CustomCssJS 中新建 JavaScript 条目。
+3. 从 [最新 GitHub Release](https://github.com/mouxiaohao/emby-plugin-danmuplus/releases/latest) 下载 `DanmuSmartMatch.CustomCssJS.js`，将完整内容粘贴到脚本框并启用。
+4. 刷新 Emby 网页端；Android 客户端需先按 Emby.CustomCssJS 项目说明集成脚本注入，并在升级后彻底退出再重新打开。
 
-对应菜单项分别为“智能匹配并下载整部剧弹幕”“智能匹配并下载本季弹幕”“智能匹配并下载本集弹幕”和“智能匹配并下载电影弹幕”。界面会直接显示后端返回的匹配来源和决策原因，并按后端顺序展示全部候选；不会在浏览器中计算评分、重排或自行选择候选。provider-id 命中会显示“匹配成功 / 来源：本地外部标识符”，右侧的“重新智能匹配”会以 `mode=rematch`、`rematch=true` 和 `force=true` 请求服务端重新决策。单集界面会同时标出本地集数和候选来源集数；选中候选后，可在右侧的“来源集数”输入框中修改实际下载的集数，修改只影响当前本地单集，不会覆盖整季绑定。
+菜单适用于电视剧、季度、单集和电影的详情页、卡片或列表“更多”菜单。脚本只调用插件的 `plugin/danmu` API，不包含 Emby 账号、密码或弹弹 Play API Secret。
 
-所有手动搜索框都会预填媒体父名：电影使用电影名，整剧、季度和单集使用所属剧集名，仍可直接修改后重新搜索。脚本还提供候选确认、手动绑定、强制刷新、后台下载、强制停止、流式进度和季度任务的单集重试。它只调用插件已有的 `plugin/danmu` API，不包含账号、密码或 API Secret。
+## 构建与测试
 
-Android 原生客户端不加载 Emby 网页端的 CustomCssJS，因此不会显示该菜单。需要在 Android 客户端使用时，请先参考 [Emby.CustomCssJS 仓库](https://github.com/Shurelol/Emby.CustomCssJS) 的 Android 客户端修改方法，将对应脚本注入支持集成到客户端；未修改客户端时请使用 Emby Web 客户端或浏览器操作。
-
-## 构建
-
-需要 .NET SDK 和 NuGet 网络访问：
+需要 .NET SDK、Node.js 和 NuGet 网络访问：
 
 ```powershell
 dotnet restore Emby.Plugin.Danmu.sln
@@ -160,29 +77,12 @@ dotnet run --project RegressionTests/Emby.Plugin.Danmu.RegressionTests.csproj -c
 node Frontend/DanmuSmartMatch.RegressionTests.js
 ```
 
-构建产物为 `bin/Release/netstandard2.0/Emby.Plugin.Danmu.dll`。
-
-## 下载 DLL
-
-仓库中的 [`dist/Emby.Plugin.Danmu.dll`](dist/Emby.Plugin.Danmu.dll) 目前保留的是 2.0.1-r4 的归档 Release 构建。要使用 r6 的服务端决策与新版前端，请按本文构建当前源代码，并用生成的 r6 DLL 替换旧 DLL；该 DLL 仍保留程序集文件名 `Emby.Plugin.Danmu.dll`，以兼容已有插件配置。
-
-SHA-256：`353e615afce38a5c7f6f7027af9092a7af94d04423e740faa527ca94366261a0`
-
-## 按版本下载
-
-每个正式版本的 DLL、源码压缩包和智能搜索前端都会保存在对应版本目录中：
-
-- [`releases/v2.0.0/`](releases/v2.0.0/)
-- [`releases/v2.0.1-r1/`](releases/v2.0.1-r1/)
-- [`releases/v2.0.1-r2/`](releases/v2.0.1-r2/)
-- [`releases/v2.0.1-r4/`](releases/v2.0.1-r4/)
-
-后续版本不会覆盖旧版本文件，便于按 Emby 环境回退或比较。
+DLL 输出到 `bin/Release/netstandard2.0/Emby.Plugin.Danmu.dll`。
 
 ## 安全提醒
 
-不要提交 Emby 配置 XML、服务器日志、备份文件、API Secret、账号密码、`bin/` 或 `obj/`。站点接口变更时请保留失败日志中的请求上下文，但先删除访问令牌和个人路径。
+不要提交 Emby 配置 XML、服务器日志、备份文件、API Secret、账号密码、`bin/` 或 `obj/`。提交诊断资料前应移除访问令牌和个人路径。
 
 ## 致谢与许可证
 
-本项目参考原始 Emby 弹幕插件及其上游 Jellyfin 弹幕插件的实现。请同时遵守原项目许可证及各弹幕站点的服务条款。
+本项目参考原始 Emby 弹幕插件及其上游 Jellyfin 弹幕插件实现。请同时遵守原项目许可证及各弹幕站点服务条款。

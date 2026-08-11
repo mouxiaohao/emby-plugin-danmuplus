@@ -6,6 +6,7 @@ using Emby.Plugin.Danmu.Core.Extensions;
 using Emby.Plugin.Danmu.Scraper.Entity;
 using MediaBrowser.Common.Net;
 using MediaBrowser.Controller.Entities;
+using MediaBrowser.Controller.Entities.TV;
 using MediaBrowser.Model.Logging;
 using MediaBrowser.Model.Serialization;
 
@@ -137,31 +138,16 @@ namespace Emby.Plugin.Danmu.Scraper.Dandan
             media.Title = anime.AnimeTitle ?? string.Empty;
             media.Year = anime.Year;
             media.Category = anime.TypeDescription ?? string.Empty;
-            media.EpisodeCount = anime.EpisodeCount;
+            var normalizeSeasonOrdinals = item is Season;
+            media.Episodes.AddRange(DandanSeasonEpisodeMapper.Map(
+                anime.Episodes, normalizeSeasonOrdinals));
+            media.EpisodeCount = normalizeSeasonOrdinals
+                ? media.Episodes.Count
+                : anime.EpisodeCount;
 
-            if (isMovieItemType && anime.Episodes != null && anime.Episodes.Count > 0)
+            if (isMovieItemType && media.Episodes.Count > 0)
             {
-                media.CommentId = $"{anime.Episodes[0].EpisodeId}";
-            }
-
-            if (anime.Episodes != null && anime.Episodes.Count > 0)
-            {
-                foreach (var ep in anime.Episodes)
-                {
-                    if (EpisodeContentClassifier.IsExplicitNonMain(ep.EpisodeTitle))
-                    {
-                        continue;
-                    }
-
-                    media.Episodes.Add(new ScraperEpisode()
-                    {
-                        Id = $"{ep.EpisodeId}",
-                        CommentId = $"{ep.EpisodeId}",
-                        Title = ep.EpisodeTitle,
-                        EpisodeNumber = EpisodeContentClassifier.TryGetPositiveNumber(ep.EpisodeNumber) ??
-                            EpisodeContentClassifier.TryGetEpisodeNumber(ep.EpisodeTitle),
-                    });
-                }
+                media.CommentId = media.Episodes[0].CommentId;
             }
 
 

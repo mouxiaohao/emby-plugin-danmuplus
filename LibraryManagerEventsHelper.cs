@@ -390,7 +390,7 @@ namespace Emby.Plugin.Danmu
                             {
                                 var currentItem = _libraryManager.GetItemById(item.InternalId) as Movie ?? item;
                                 var providerDecision = await DanmuProviderIdResolver.ResolveAsync(
-                                    enabledScrapers, new BaseItem[] { currentItem }, _logger).ConfigureAwait(false);
+                                    enabledScrapers, DanmuProviderIdResolver.GetMovieScopes(currentItem), _logger).ConfigureAwait(false);
                                 selectedMovieCandidate = providerDecision.Candidate;
                                 if (selectedMovieCandidate == null &&
                                     DanmuMatchBindingHelper.TryGetSavedManualBinding(
@@ -734,6 +734,9 @@ namespace Emby.Plugin.Danmu
                     }
 
                     var series = season.GetParent();
+                    var authoritativeSeries = series is Series parentSeries
+                        ? _libraryManager.GetItemById(parentSeries.InternalId) as Series ?? parentSeries
+                        : null;
                     var originalSeasonName = season.Name;
                     var scrapers = _scraperManager.All();
 
@@ -753,8 +756,9 @@ namespace Emby.Plugin.Danmu
 
                     var providerDecision = await DanmuProviderIdResolver.ResolveAsync(
                         scrapers,
-                        new BaseItem[] { season, series },
-                        _logger).ConfigureAwait(false);
+                        DanmuProviderIdResolver.GetSeasonScopes(currentItem ?? season),
+                        _logger,
+                        authoritativeSeries).ConfigureAwait(false);
                     if (providerDecision.Candidate != null)
                     {
                         selectedScraper = providerDecision.Scraper;
@@ -764,7 +768,8 @@ namespace Emby.Plugin.Danmu
 
                     // A saved manual binding always wins over automatic scoring when
                     // no configured provider identifier can be resolved.
-                    var bindingProviderIds = currentItem?.ProviderIds ?? season.ProviderIds;
+                    var bindingProviderIds = DanmuProviderIdResolver.GetItemLocalProviderIds(
+                        currentItem ?? season, authoritativeSeries, scrapers);
                     foreach (var scraper in scrapers)
                     {
                         if (selectedScraper == null &&
@@ -838,17 +843,13 @@ namespace Emby.Plugin.Danmu
                             continue;
                         }
 
-                        // A Series-level identifier can resolve the Season download,
-                        // but it must never be copied onto the Season itself.
-                        var persistSeasonProviderId = providerDecision.Candidate == null ||
-                            !string.Equals(providerDecision.ResolvedScopeType, "Series", StringComparison.OrdinalIgnoreCase);
-                        var seasonProviderGeneration = persistSeasonProviderId
-                            ? BeginProviderWrite(season, selectedScraper.ProviderId)
-                            : 0;
+                        var seasonProviderGeneration = BeginProviderWrite(season, selectedScraper.ProviderId);
                         if (!await DownloadAutomaticSeasonForImport(
                                 season,
                                 media,
-                                selectedScraper).ConfigureAwait(false))
+                                selectedScraper,
+                                selectedMediaId,
+                                seasonProviderGeneration).ConfigureAwait(false))
                         {
                             _logger.LogInformation(
                                 "[{0}] 匹配到季度但没有成功写入有效弹幕文件，不保存 ProviderId: {1}",
@@ -857,15 +858,6 @@ namespace Emby.Plugin.Danmu
                             continue;
                         }
 
-                        if (persistSeasonProviderId)
-                        {
-                            await SaveAutomaticSeasonProviderId(
-                                season,
-                                selectedScraper.ProviderId,
-                                selectedMediaId,
-                                scrapers,
-                                seasonProviderGeneration).ConfigureAwait(false);
-                        }
                         _logger.LogInformation(
                             "[{0}]全站智能匹配成功：series={1}, season={2}, ProviderId={3}, title={4}, score={5}",
                             selectedScraper.Name,
@@ -1047,7 +1039,6 @@ namespace Emby.Plugin.Danmu
             Season season,
             string providerId,
             string providerValue,
-            IEnumerable<AbstractScraper> scrapers,
             long providerWriteGeneration)
         {
             var updateItem = _libraryManager.GetItemById(season.Id) as Season ?? season;
@@ -1058,7 +1049,9 @@ namespace Emby.Plugin.Danmu
         private async Task<bool> DownloadAutomaticSeasonForImport(
             Season season,
             ScraperMedia media,
-            AbstractScraper scraper)
+            AbstractScraper scraper,
+            string seasonProviderValue,
+            long seasonProviderGeneration)
         {
             var episodes = (season.GetEpisodes()?.Items ?? Array.Empty<BaseItem>())
                 .OfType<Episode>()
@@ -1066,6 +1059,7 @@ namespace Emby.Plugin.Danmu
                 .OrderBy(x => x.IndexNumber ?? int.MaxValue)
                 .ToList();
             var anyFilePersisted = false;
+            var seasonProviderPersisted = false;
 
             foreach (var episode in episodes)
             {
@@ -1077,8 +1071,36 @@ namespace Emby.Plugin.Danmu
                         (string.Equals(outcome.Status, "success", StringComparison.OrdinalIgnoreCase) ||
                          string.Equals(outcome.Status, "partial", StringComparison.OrdinalIgnoreCase)))
                     {
-                        await PersistDownloadProviderIdAsync(episode, outcome).ConfigureAwait(false);
                         anyFilePersisted = true;
+                        try
+                        {
+                            await PersistDownloadProviderIdAsync(episode, outcome).ConfigureAwait(false);
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.LogError(ex,
+                                "[{0}] 自动入库集 ProviderId 写回失败，但弹幕文件已保留：{1}",
+                                scraper.Name, episode.Name);
+                        }
+
+                        if (!seasonProviderPersisted)
+                        {
+                            try
+                            {
+                                await SaveAutomaticSeasonProviderId(
+                                    season,
+                                    scraper.ProviderId,
+                                    seasonProviderValue,
+                                    seasonProviderGeneration).ConfigureAwait(false);
+                                seasonProviderPersisted = true;
+                            }
+                            catch (Exception ex)
+                            {
+                                _logger.LogError(ex,
+                                    "[{0}] 自动入库季度 ProviderId 写回失败，但弹幕文件已保留：{1}",
+                                    scraper.Name, season.Name);
+                            }
+                        }
                     }
                 }
                 catch (DanmuDownloadErrorException ex)
@@ -1674,18 +1696,48 @@ namespace Emby.Plugin.Danmu
                 }
 
                 var manualKey = providerId + "Manual";
-                if (string.Equals(item.GetProviderId(providerId), providerVal, StringComparison.Ordinal) &&
-                    (!manual || string.Equals(item.GetProviderId(manualKey), providerVal, StringComparison.Ordinal)))
+                var registeredScrapers = _scraperManager.AllWithNoEnabled();
+                if (updateItem is Season)
+                {
+                    var parentSeries = updateItem.GetParent() as Series;
+                    var authoritativeParentSeries = parentSeries == null
+                        ? null
+                        : _libraryManager.GetItemById(parentSeries.InternalId) as Series ?? parentSeries;
+                    updateItem.ProviderIds = DanmuProviderIdResolver.GetItemLocalProviderIds(
+                        updateItem, authoritativeParentSeries, registeredScrapers);
+                }
+
+                ProviderIdDictionary nextProviderIds;
+                if (!manual && (updateItem is Season || updateItem is Episode))
+                {
+                    nextProviderIds = DanmuProviderIdWritePolicy.BuildSuccessfulWrite(
+                        updateItem.ProviderIds,
+                        registeredScrapers.Select(x => x.ProviderId),
+                        providerId,
+                        providerVal,
+                        true);
+                }
+                else
+                {
+                    nextProviderIds = DanmuProviderIdWritePolicy.BuildSuccessfulWrite(
+                        updateItem.ProviderIds,
+                        Enumerable.Empty<string>(),
+                        providerId,
+                        providerVal,
+                        false);
+                    if (manual)
+                    {
+                        nextProviderIds[manualKey] = providerVal;
+                    }
+                }
+
+                if (ProviderIdsEqual(updateItem.ProviderIds, nextProviderIds))
                 {
                     _providerWriteTracker.MarkCommitted(writeKey, generation);
                     return;
                 }
 
-                updateItem.ProviderIds[providerId] = providerVal;
-            if (manual)
-            {
-                updateItem.ProviderIds[manualKey] = providerVal;
-            }
+                updateItem.ProviderIds = nextProviderIds;
                 await updateItem.UpdateToRepositoryAsync(ItemUpdateType.MetadataEdit, CancellationToken.None)
                     .ConfigureAwait(false);
                 _providerWriteTracker.MarkCommitted(writeKey, generation);
@@ -1694,6 +1746,23 @@ namespace Emby.Plugin.Danmu
             {
                 writeLock.Release();
             }
+        }
+
+        private static bool ProviderIdsEqual(
+            IReadOnlyDictionary<string, string> left,
+            IReadOnlyDictionary<string, string> right)
+        {
+            if (ReferenceEquals(left, right))
+            {
+                return true;
+            }
+            if (left == null || right == null || left.Count != right.Count)
+            {
+                return false;
+            }
+
+            return left.All(pair => right.TryGetValue(pair.Key, out var value) &&
+                                    string.Equals(pair.Value, value, StringComparison.Ordinal));
         }
 
         public Task PersistDownloadProviderIdAsync(BaseItem item, DanmuEpisodeDownloadOutcome outcome)
@@ -1720,14 +1789,32 @@ namespace Emby.Plugin.Danmu
             return SaveProviderIdForGeneration(item, outcome.ProviderId, providerValue, false, generation);
         }
 
-        private long BeginProviderWrite(BaseItem item, string providerId)
+        public long BeginProviderWrite(BaseItem item, string providerId)
         {
             if (item == null || string.IsNullOrWhiteSpace(providerId))
             {
                 return 0;
             }
 
-            return Interlocked.Increment(ref _providerWriteGeneration);
+            var generation = Interlocked.Increment(ref _providerWriteGeneration);
+            _providerWriteTracker.MarkStarted(GetProviderWriteKey(item, providerId), generation);
+            return generation;
+        }
+
+        public Task PersistDownloadProviderIdAsync(
+            BaseItem item,
+            DanmuEpisodeDownloadOutcome outcome,
+            string providerValueOverride,
+            long providerWriteGeneration)
+        {
+            if (!DanmuDownloadPersistencePolicy.ShouldPersist(outcome, providerValueOverride) ||
+                providerWriteGeneration <= 0)
+            {
+                return Task.CompletedTask;
+            }
+
+            return SaveProviderIdForGeneration(
+                item, outcome.ProviderId, providerValueOverride, false, providerWriteGeneration);
         }
 
         private static string GetProviderWriteKey(BaseItem item, string providerId)
