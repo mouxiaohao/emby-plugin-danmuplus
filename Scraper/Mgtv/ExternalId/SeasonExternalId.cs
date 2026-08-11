@@ -24,7 +24,7 @@ namespace Emby.Plugin.Danmu.Scrapers.Mgtv.ExternalId
         public string UrlFormatString => "https://www.mgtv.com/h/{0}.html";
 
         /// <inheritdoc />
-        public bool Supports(IHasProviderIds item) => item is Season;
+        public bool Supports(IHasProviderIds item) => item is Season || item is Series;
     }
 
 }

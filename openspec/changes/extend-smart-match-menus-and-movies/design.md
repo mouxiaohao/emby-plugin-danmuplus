@@ -9,19 +9,20 @@ The design must remain compatible with Emby 4.9.x's dynamically rendered action 
 **Goals:**
 
 - Resolve each open action sheet to an authoritative Series, Season, Episode, or Movie item.
-- Reuse one provider-neutral ranking policy while scoring Movie evidence separately from Season evidence.
+- Use one backend r6 decision engine for interactive and library-import matching while scoring Movie evidence separately from Season evidence.
 - Represent Movie preview and tracked work explicitly without breaking existing season-shaped JSON fields.
 - Resolve an Episode through its Series/Season context, expose a suggested source Episode number, and permit a validated per-download override.
 - Initialize each manual-search input from one shared media-parent-name rule.
 - Reuse the proven provider-specific Movie resolution/download path behind an outcome-returning operation.
-- Resolve a narrow pool of close high-confidence results by configured site priority without changing score-ordered display.
+- Resolve local enabled-site provider identifiers before bindings or search, and resolve every `score >= 0.90` cross-site candidate pool by configured site priority.
+- Persist only level-correct provider identifiers after actual danmu-file success.
 
 **Non-Goals:**
 
 - Supporting Folder, Collection, Person, or music item menus.
 - Changing Emby's action-sheet implementation or requiring a custom Emby web build.
 - Treating a Movie as a synthetic one-episode Season.
-- Altering automatic library-import behavior for movies or seasons beyond the shared close-high-confidence site-priority rule.
+- Maintaining any legacy automatic-import matching algorithm outside the unified backend r6 policy.
 - Merging candidates across providers as if they were the same binding target.
 
 ## Decisions
@@ -64,15 +65,33 @@ The provider-specific steps currently embedded in queued Movie event processing�
 
 The controller will validate and persist the selected binding, create a one-target tracked task, run it through the existing serialized download queue, honor cancellation, and snapshot status for polling. Reusing the event queue without a returned outcome was rejected because the frontend could not distinguish submission from actual success.
 
-### Persist only confirmed selections
+### Route every decision through one backend r6 match engine
 
-Preview and forced search are read-only. Automatic selection is persisted only after user confirmation; a manual choice is stored with the existing manual suffix convention. If candidate detail validation fails, no replacement binding is saved. Existing saved manual bindings remain authoritative until a new confirmed selection succeeds.
+`DanmuController` preview requests and `LibraryManagerEventsHelper` automatic-import requests will call one backend orchestration service. Its default chain is `ProviderIdResolver -> compatible plugin binding -> search/score/select`. A `rematch` request bypasses the first two stages but does not delete their persisted data. The frontend submits only item identity, intent, and optional explicit keyword; it renders `matchOrigin`, decision reason, candidates, and selection returned by the backend.
 
-### Resolve close high-confidence candidates by site priority
+Provider-specific `SearchMediaId` and legacy preview helpers remain available only as low-level provider search adapters where unavoidable; they may not make the final match decision or act as a fallback after the r6 engine returns ambiguous or no-match.
 
-The shared automatic selector will preserve the existing top-score floor and weak-runner shortcut, then apply three deterministic layers. If all competing candidates come from one site, its unique highest score wins at any score above the existing floor, while a site-local highest-score tie remains ambiguous. If the global highest score is exactly tied across sites, configured site priority resolves the tie at any qualifying score. Only when different sites have different but close scores does the selector build a pool from candidates whose rounded internal score is at least `0.9500` and no more than `0.0300` below the highest score, then choose the earliest site's unique site-local highest result. During the parent-title intermediate search round, cross-site priority resolution stays disabled so fallback keywords can add stronger evidence; same-site unique-highest selection does not depend on site priority and may stop early.
+### Resolve provider identifiers by site before media hierarchy
 
-Candidate display remains globally ordered by descending score; automatic selection therefore returns an explicit selected candidate rather than assuming the first displayed row won. This permits a configured higher-priority site's 0.98 result to win over a lower-priority site's 1.00 result without allowing a merely adequate result to displace a clearly stronger match. Cross-provider candidate clustering remains rejected because provider identifiers are actual binding targets and similar titles can represent remakes, split seasons, or different episode groupings.
+`ProviderIdResolver` enumerates enabled scrapers in `ScraperManager.All()` order. For each site it inspects only identifiers using that scraper's registered external-id key. It checks the current item first, then applicable Season and Series ancestors. Thus site priority is the outer ordering and media specificity is the inner ordering. Movie and Series have only their own-item scope; Season checks itself then Series; Episode checks itself, Season, then Series.
+
+Each identifier is resolved through the provider's media-detail path and normalized into the same selected-candidate contract used by search. The first resolvable identifier terminates default matching with `matchOrigin=provider-id`. A disabled-site key is ignored. If all applicable identifiers fail, structured `provider-id-unresolved` diagnostics are retained and the chain continues to binding and scored search so unattended imports can self-heal.
+
+### Treat plugin bindings as a compatible secondary cache
+
+Existing automatic and manual binding keys remain readable for migration compatibility, but only after provider-identifier resolution. Bindings belonging to disabled sites are ignored. `rematch` bypasses them. A new manual choice may update its plugin binding for subsequent previews, but neither automatic selection nor confirmation writes the Emby external identifier before a successful file result.
+
+### Select r6 confident candidates by site priority
+
+Search rounds gather candidates from every enabled site before final automatic selection. The selector filters candidates at `score >= 0.90`, chooses the smallest `SourceOrder`, then chooses that site's unique highest score. Cross-site score differences are deliberately ignored inside the confident pool: an earlier site's 0.90 result beats a later site's 1.00 result. A site-local highest-score tie remains ambiguous. Scores below 0.90 produce only the explicit r6 low-confidence state; no r5 separation, close-pool, or provider-specific legacy selector runs afterward.
+
+Backend candidate order will reflect the business decision without requiring the browser to infer the winner: confident candidates sort first by whether they belong to the selected priority site and then by site-local score, while raw score and `SourceOrder` remain present for diagnostics. The response carries an explicit selected candidate and decision reason, so clients must never assume the first row independently.
+
+### Write level-correct provider identifiers only after file success
+
+The download coordinator returns an outcome that distinguishes actual valid XML persistence from preparation success, duplicate skip, empty/partial output, cancellation, timeout, and failure. Only actual successful persistence invokes `ProviderIdWriter`. The writer performs an idempotent upsert of the selected site's one key on the exact media level represented by a provider-returned identifier; it preserves every other site's key and never copies a Season id into Series or Episode metadata.
+
+The match result carries `matchOrigin` and the resolved identifier. When origin is `provider-id` and the same value is already present, the write can be skipped. Bindings, scored selections, and manual choices overwrite that site's old external identifier after success even if an old value exists. Batch tasks write only successful child targets. A metadata repository failure is reported separately from the already successful file result and does not roll the file back.
 
 ## Risks / Trade-offs
 
@@ -84,6 +103,10 @@ Candidate display remains globally ordered by descending score; automatic select
 - [Episode numbering can differ because of specials, absolute numbering, or provider omissions] → Display the proposed source number, require an explicit valid number at confirmation, and validate it against freshly resolved candidate media.
 - [Resolving media details for every Episode candidate adds provider requests] → Limit detail resolution to displayed candidates, reuse preview data within the dialog, and revalidate only the selected candidate on submit.
 - [Refactoring existing Movie event processing could change automatic downloads] → Route old and new paths through the same extracted operation and compare representative Bilibili and non-Bilibili outcomes before release.
+- [A stale external identifier can fail provider resolution] → Preserve structured diagnostics and continue to binding/scored matching; do not delete the stale value unless a later successful download overwrites that site's key.
+- [An earlier site's 0.90 result can intentionally displace a later site's 1.00 result] → Expose match origin, score, site order, and decision reason in preview so the configured business priority is visible and testable.
+- [Writing metadata before provider work finishes can preserve a false match] → Centralize writes after the valid-file outcome and regression-test failure, skip, cancellation, timeout, and partial batch cases.
+- [Late concurrent tasks can overwrite newer provider identifiers] → Serialize existing download work per target where possible and reject a late metadata update when its operation generation is older than the last successful write.
 
 ### Present every tracked single target as a one-row Season-style task
 
@@ -109,7 +132,7 @@ Gesture capture only records a short-lived candidate and never opens or modifies
 
 ## Migration Plan
 
-1. Deploy the additive API/model and shared Movie download operation with Series/Season behavior unchanged.
+1. Back up the deployed DLL and browser script, then deploy the additive r6 match-origin/API model, unified backend engine, and post-success provider-id writer as one compatible pair.
 2. Deploy the updated browser script and bump its installation flag so already loaded pages install the new listener after refresh.
-3. Verify detail and card menus, then verify Movie preview/bind/download and Episode suggestion/override/download on at least Bilibili and one non-Bilibili provider plus STRM media.
-4. Roll back by restoring the prior browser script and DLL together. Existing provider bindings and XML files require no data migration and remain usable.
+3. Verify ProviderId-first success and rematch for Movie, Series, Season, and Episode; compare interactive and library-import conclusions; test `0.90` priority, failed-download no-write, successful overwrite, partial batch, STRM, and one non-Bilibili provider.
+4. Roll back by restoring the backed-up browser script and DLL together. Existing provider identifiers, plugin bindings, and XML files remain readable; r6 writes only standard per-site external-id keys and requires no destructive data migration.

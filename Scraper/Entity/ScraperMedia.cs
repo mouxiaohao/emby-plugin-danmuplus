@@ -17,6 +17,14 @@ namespace Emby.Plugin.Danmu.Scraper.Entity
         /// 增加数据来源名称 (e.g., "BilibiliID", "IqiyiID").
         /// </summary>
         public string ProviderId { get; set; }
+
+        // Optional metadata returned by an identifier-specific upstream detail
+        // response. These values are deliberately separate from local Emby
+        // metadata so an exact ProviderId preview cannot fabricate provenance.
+        public string Title { get; set; } = string.Empty;
+        public int? Year { get; set; }
+        public string Category { get; set; } = string.Empty;
+        public int? EpisodeCount { get; set; }
         public List<ScraperEpisode> Episodes { get; set; } = new List<ScraperEpisode>();
 
     }

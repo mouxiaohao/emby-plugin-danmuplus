@@ -6,6 +6,7 @@ using Emby.Plugin.Danmu.Core.Extensions;
 using Emby.Plugin.Danmu.Scraper.Entity;
 using MediaBrowser.Common.Net;
 using MediaBrowser.Controller.Entities;
+using MediaBrowser.Controller.Entities.TV;
 using MediaBrowser.Model.Logging;
 using MediaBrowser.Model.Serialization;
 
@@ -134,29 +135,19 @@ namespace Emby.Plugin.Danmu.Scraper.Dandan
 
             media.Id = id;
             media.ProviderId = this.ProviderId; // 设置 ProviderId
-            if (isMovieItemType && anime.Episodes != null && anime.Episodes.Count > 0)
-            {
-                media.CommentId = $"{anime.Episodes[0].EpisodeId}";
-            }
+            media.Title = anime.AnimeTitle ?? string.Empty;
+            media.Year = anime.Year;
+            media.Category = anime.TypeDescription ?? string.Empty;
+            var normalizeSeasonOrdinals = item is Season;
+            media.Episodes.AddRange(DandanSeasonEpisodeMapper.Map(
+                anime.Episodes, normalizeSeasonOrdinals));
+            media.EpisodeCount = normalizeSeasonOrdinals
+                ? media.Episodes.Count
+                : anime.EpisodeCount;
 
-            if (anime.Episodes != null && anime.Episodes.Count > 0)
+            if (isMovieItemType && media.Episodes.Count > 0)
             {
-                foreach (var ep in anime.Episodes)
-                {
-                    if (EpisodeContentClassifier.IsExplicitNonMain(ep.EpisodeTitle))
-                    {
-                        continue;
-                    }
-
-                    media.Episodes.Add(new ScraperEpisode()
-                    {
-                        Id = $"{ep.EpisodeId}",
-                        CommentId = $"{ep.EpisodeId}",
-                        Title = ep.EpisodeTitle,
-                        EpisodeNumber = EpisodeContentClassifier.TryGetPositiveNumber(ep.EpisodeNumber) ??
-                            EpisodeContentClassifier.TryGetEpisodeNumber(ep.EpisodeTitle),
-                    });
-                }
+                media.CommentId = media.Episodes[0].CommentId;
             }
 
 
@@ -187,14 +178,10 @@ namespace Emby.Plugin.Danmu.Scraper.Dandan
             }
             else
             {
-                // id是episodeId
-                var epId = id.ToLong();
-                if (epId <= 0)
-                {
-                    return null;
-                }
-
-                return new ScraperEpisode() { Id = id, CommentId = id };
+                // Dandan's existing detail endpoint accepts Anime IDs, not
+                // Episode IDs. Do not turn an unverified local ID into an
+                // exact-match success; the resolver will continue fallback.
+                return null;
             }
         }
 

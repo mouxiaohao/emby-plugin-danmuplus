@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using System.Runtime.Serialization;
+using System.Text.Json.Serialization;
 
 namespace Emby.Plugin.Danmu.Scraper.Bilibili.Entity
 {
@@ -58,37 +59,51 @@ namespace Emby.Plugin.Danmu.Scraper.Bilibili.Entity
     public class Video
     {
         [DataMember(Name="bvid")]
+        [JsonPropertyName("bvid")]
         public string Bvid { get; set; }
         [DataMember(Name="aid")]
+        [JsonPropertyName("aid")]
         public long? Aid { get; set; } // Made nullable
         [DataMember(Name="videos")]
+        [JsonPropertyName("videos")]
         public int VideosCount { get; set; } // Number of parts
         [DataMember(Name="pic")]
+        [JsonPropertyName("pic")]
         public string Pic { get; set; } // Cover image
         [DataMember(Name="title")]
+        [JsonPropertyName("title")]
         public string Title { get; set; }
         [DataMember(Name="pubdate")]
+        [JsonPropertyName("pubdate")]
         public long Pubdate { get; set; } // Unix timestamp
         [DataMember(Name="desc")]
+        [JsonPropertyName("desc")]
         public string Desc { get; set; } // Description
         [DataMember(Name="cid")]
+        [JsonPropertyName("cid")]
         public long? Cid { get; set; } // CID of the first part, made nullable
         [DataMember(Name="duration")]
+        [JsonPropertyName("duration")]
         public long Duration { get; set; } // Total duration if single part, or duration of first part.
 
         [DataMember(Name="owner")]
+        [JsonPropertyName("owner")]
         public VideoOwner Owner { get; set; }
 
         [DataMember(Name="stat")]
+        [JsonPropertyName("stat")]
         public VideoStat Stat { get; set; }
 
         [DataMember(Name="pages")]
+        [JsonPropertyName("pages")]
         public List<VideoPart> Pages { get; set; } // List of video parts
 
         [DataMember(Name="ugc_season")]
+        [JsonPropertyName("ugc_season")]
         public VideoUgcSeason UgcSeason { get; set; }
 
         [DataMember(Name="staff")]
+        [JsonPropertyName("staff")]
         public List<VideoStaffInfo> Staff { get; set; } // Staff information for co-authored videos
     }
 }

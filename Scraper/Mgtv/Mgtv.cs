@@ -1,3 +1,5 @@
+using System;
+using System.Linq;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
@@ -55,13 +57,6 @@ namespace Emby.Plugin.Danmu.Scrapers.Mgtv
                 }
 
                 if (!isMovieItemType && video.TypeName == "电影")
-                {
-                    continue;
-                }
-
-                // 检测标题是否相似（越大越相似）
-                var score = searchName.Distance(title);
-                if (score < 0.7)
                 {
                     continue;
                 }
@@ -167,6 +162,12 @@ namespace Emby.Plugin.Danmu.Scrapers.Mgtv
                 }
             }
 
+            if (media.Episodes.Count > 0)
+            {
+                // Exact-ID details reliably establish only this usable episode list.
+                media.EpisodeCount = media.Episodes.Count;
+            }
+
             return media;
         }
 
@@ -194,11 +195,34 @@ namespace Emby.Plugin.Danmu.Scrapers.Mgtv
             }
 
 
-            // 从季信息元数据中，获取cid值
-            // 不能通过GetParent获取Season，因为没有SXX季文件夹时，GetParent是Series
-            var season = ((MediaBrowser.Controller.Entities.TV.Episode)item).Season;
-            season.ProviderIds.TryGetValue(ScraperProviderId, out var cid);
-            return new ScraperEpisode() { Id = id, CommentId = $"{cid},{id}" };
+            // MGTV has no single-episode detail endpoint in the current API.
+            // Verify the exact VideoId against its own saved collection detail
+            // instead of accepting the local Episode ProviderId as evidence.
+            var episodeItem = item as MediaBrowser.Controller.Entities.TV.Episode;
+            var season = episodeItem?.Season;
+            if (season?.ProviderIds == null ||
+                !season.ProviderIds.TryGetValue(ScraperProviderId, out var seasonId) ||
+                string.IsNullOrWhiteSpace(seasonId))
+            {
+                return null;
+            }
+
+            var seasonVideo = await _api.GetVideoAsync(seasonId, CancellationToken.None).ConfigureAwait(false);
+            var sourceEpisode = seasonVideo?.EpisodeList?.FirstOrDefault(x =>
+                string.Equals(x.VideoId, id, StringComparison.OrdinalIgnoreCase));
+            if (sourceEpisode == null)
+            {
+                return null;
+            }
+
+            return new ScraperEpisode()
+            {
+                Id = sourceEpisode.VideoId,
+                CommentId = $"{seasonId},{sourceEpisode.VideoId}",
+                Title = sourceEpisode.Title,
+                EpisodeNumber = EpisodeContentClassifier.TryGetEpisodeNumber(sourceEpisode.Title2) ??
+                    EpisodeContentClassifier.TryGetEpisodeNumber(sourceEpisode.Title),
+            };
         }
 
         public override async Task<ScraperDanmaku?> GetDanmuContent(BaseItem item, string commentId)

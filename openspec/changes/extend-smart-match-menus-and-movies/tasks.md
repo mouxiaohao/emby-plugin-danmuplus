@@ -51,3 +51,28 @@
 - [x] 7.1 Capture Android long-press media context from contextmenu/pointer/touch origins and bootstrap injection when an opened action sheet exposes its own media id without a prior desktop click.
 - [x] 7.2 Preserve authoritative target correlation for a long-pressed Season inside a Series detail page and reject stale, mismatched, or unsupported action sheets.
 - [x] 7.3 Bump the frontend installation flag, add deterministic long-press/action-sheet regressions, build, deploy with backup, and verify desktop menu injection remains functional.
+
+## 8. r6 Unified Match Decision
+
+- [x] 8.1 Add explicit default/rematch intent, match-origin and decision-reason fields, plus enabled-provider external-id key mapping to the backend match contracts.
+- [x] 8.2 Implement provider-id resolution in configured site order, with current-item then Season/Series fallback inside one site, disabled-site filtering, detail validation, and unresolved diagnostics.
+- [x] 8.3 Make compatible saved bindings secondary to provider identifiers and ensure rematch bypasses both without deleting persisted metadata.
+- [x] 8.4 Replace the r5 selector with the single r6 `score >= 0.90` confident pool: choose earliest site across providers, unique highest score within that site, and ambiguous on a site-local top tie.
+- [x] 8.5 Route Movie, Series, Season, and Episode preview plus automatic library-import matching through the same backend orchestration and remove legacy provider-specific match decisions from runtime paths.
+- [x] 8.6 Add deterministic regressions for provider-id/site/media-level precedence, disabled and stale identifiers, binding conflict, rematch bypass, the 0.90 boundary, earlier-site 0.90 over later-site 1.00, site-local ties, and identical interactive/import conclusions.
+
+## 9. r6 Successful-Download Provider Identifier Persistence
+
+- [x] 9.1 Replace all-sites-clearing metadata helpers with an idempotent single-site, exact-media-level ProviderId upsert that preserves every other provider key.
+- [x] 9.2 Carry match origin and level-correct provider identifiers through tracked Movie, Series, Season, and Episode download work without inventing identifiers for absent levels.
+- [x] 9.3 Move ProviderId persistence after valid danmu-file success; skip redundant writes only for same-value `provider-id` origin, and do not write for failed, cancelled, skipped, timed-out, empty, or non-persisted outcomes.
+- [x] 9.4 Apply identifier updates per successful target in batch/partial work and expose metadata-update errors separately without rolling back a successful file.
+- [x] 9.5 Add regressions proving failed downloads preserve metadata, successful downloads overwrite only the selected site's old value, provider-id-origin downloads can skip writes, and partial batches update only successful targets.
+
+## 10. r6 Frontend and Release Verification
+
+- [x] 10.1 Render backend `provider-id`, `binding`, `scored`, and `manual` origins and decision reasons without frontend scoring, reordering, or independent automatic selection.
+- [x] 10.2 Show provider-id resolution as matching success with a right-side `重新智能匹配` action; send explicit rematch intent and preserve metadata until download success.
+- [x] 10.3 Bump frontend installation/version markers and document r6 ProviderId precedence, 0.90 site-priority behavior, rematch semantics, and successful-download writeback.
+- [x] 10.4 Run strict OpenSpec validation, deterministic regression tests, and a Release build; verify packaged DLL and frontend assets are generated from the changed sources.
+- [x] 10.5 Back up and deploy the paired r6 DLL and browser script to the authorized Synology Emby test instance, refresh the client, and live-test ProviderId success/rematch, Movie/Series/Season/Episode behavior, automatic import parity, successful/failed writeback, and rollback readiness.
