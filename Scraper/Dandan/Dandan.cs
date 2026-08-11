@@ -178,10 +178,20 @@ namespace Emby.Plugin.Danmu.Scraper.Dandan
             }
             else
             {
-                // Dandan's existing detail endpoint accepts Anime IDs, not
-                // Episode IDs. Do not turn an unverified local ID into an
-                // exact-match success; the resolver will continue fallback.
-                return null;
+                // The saved Episode ProviderId identifies one Dandan episode.
+                // Its prefix only locates a candidate Anime; the full ID is
+                // verified against the detail payload before this becomes exact
+                // evidence, so malformed/stale IDs still fail closed.
+                if (!DandanEpisodeId.TryGetAnimeId(id, out var animeId))
+                {
+                    return null;
+                }
+
+                var anime = await _api.GetAnimeAsync(
+                    animeId,
+                    CancellationToken.None,
+                    includeNonMainEpisodes: true).ConfigureAwait(false);
+                return DandanEpisodeId.CreateVerifiedEpisode(id, anime?.Episodes);
             }
         }
 

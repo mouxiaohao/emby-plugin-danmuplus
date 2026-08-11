@@ -113,7 +113,10 @@ namespace Emby.Plugin.Danmu.Scraper.Dandan
             return new List<Anime>();
         }
 
-        public async Task<Anime?> GetAnimeAsync(long animeId, CancellationToken cancellationToken)
+        public async Task<Anime?> GetAnimeAsync(
+            long animeId,
+            CancellationToken cancellationToken,
+            bool includeNonMainEpisodes = false)
         {
             if (animeId <= 0)
             {
@@ -125,7 +128,7 @@ namespace Emby.Plugin.Danmu.Scraper.Dandan
                 { AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(30) };
             if (_memoryCache.TryGetValue<Anime?>(cacheKey, out var anime))
             {
-                return anime;
+                return FilterEpisodes(anime, includeNonMainEpisodes);
             }
 
             var officialUrl = $"{OfficialApiBaseUrl}bangumi/{animeId}";
@@ -157,21 +160,40 @@ namespace Emby.Plugin.Danmu.Scraper.Dandan
             {
                 // 过滤掉特典剧集，episodeNumber为S1/S2.。。
                 anime = result.Bangumi;
-                if (anime.Episodes != null)
-                {
-                    anime.Episodes = anime.Episodes.Where(x =>
-                    {
-                        bool success = int.TryParse(x.EpisodeNumber, out int parsedNumber);
-                        return success && parsedNumber > 0;
-                    }).ToList();
-                }
-            
+
+                // Cache the complete payload. Exact Episode ProviderId
+                // verification must still be able to inspect specials after an
+                // ordinary Season lookup has populated this cache entry.
                 _memoryCache.Set<Anime?>(cacheKey, anime, expiredOption);
-                return anime;
+                return FilterEpisodes(anime, includeNonMainEpisodes);
             }
 
             _memoryCache.Set<Anime?>(cacheKey, null, expiredOption);
             return null;
+        }
+
+        private static Anime FilterEpisodes(Anime anime, bool includeNonMainEpisodes)
+        {
+            if (anime == null || includeNonMainEpisodes || anime.Episodes == null)
+            {
+                return anime;
+            }
+
+            return new Anime
+            {
+                AnimeId = anime.AnimeId,
+                AnimeTitle = anime.AnimeTitle,
+                Type = anime.Type,
+                TypeDescription = anime.TypeDescription,
+                ImageUrl = anime.ImageUrl,
+                StartDate = anime.StartDate,
+                EpisodeCount = anime.EpisodeCount,
+                Episodes = anime.Episodes.Where(x =>
+                {
+                    var success = int.TryParse(x?.EpisodeNumber, out var parsedNumber);
+                    return success && parsedNumber > 0;
+                }).ToList(),
+            };
         }
 
         public async Task<List<Comment>> GetCommentsAsync(long epId, CancellationToken cancellationToken)

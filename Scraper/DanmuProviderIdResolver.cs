@@ -124,7 +124,14 @@ namespace Emby.Plugin.Danmu.Scraper
                             continue;
                         }
 
-                        var resolvedId = string.IsNullOrWhiteSpace(media.Id) ? externalId : media.Id;
+                        // An Episode ProviderId is a precise lookup token even
+                        // if its verified response also reveals a canonical
+                        // parent media identity. Keep the token in Candidate.Id
+                        // for exact download/retry; the media carries the
+                        // stable parent identity for composite planning.
+                        var resolvedId = scope is Episode
+                            ? externalId
+                            : string.IsNullOrWhiteSpace(media.Id) ? externalId : media.Id;
                         decision.Scraper = scraper;
                         decision.Media = media;
                         decision.MatchOrigin = "provider-id";
@@ -190,7 +197,12 @@ namespace Emby.Plugin.Danmu.Scraper
 
             return new ScraperMedia
             {
-                Id = providerId,
+                // The lookup token remains the saved Episode ProviderId. When
+                // a provider verified parent ownership, expose that canonical
+                // media identity so composite planning can distinguish S1/S2.
+                Id = !string.IsNullOrWhiteSpace(sourceEpisode.ParentMediaId)
+                    ? sourceEpisode.ParentMediaId
+                    : providerId,
                 ProviderId = scraper.ProviderId,
                 Title = sourceEpisode.Title ?? string.Empty,
                 EpisodeCount = 1,
@@ -200,6 +212,7 @@ namespace Emby.Plugin.Danmu.Scraper
                     {
                         Id = sourceEpisode.Id,
                         CommentId = sourceEpisode.CommentId,
+                        ParentMediaId = sourceEpisode.ParentMediaId,
                         Title = sourceEpisode.Title,
                         // The direct id already identifies this exact source episode.
                         // Prefer a reliable upstream number, then the local number;

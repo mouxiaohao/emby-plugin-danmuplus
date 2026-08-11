@@ -3,6 +3,8 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Collections.Concurrent;
+using System.Security.Cryptography;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Emby.Plugin.Danmu.Configuration;
@@ -53,6 +55,19 @@ namespace Emby.Plugin.Danmu
             new ProviderWriteGenerationTracker();
         private readonly ConcurrentDictionary<string, SemaphoreSlim> _providerWriteLocks =
             new ConcurrentDictionary<string, SemaphoreSlim>(StringComparer.Ordinal);
+
+        // A composite season has no single authoritative upstream season id.
+        // Keep its durable marker outside Emby's ProviderIds and serialize all
+        // Season metadata writes (including writes from different providers).
+        private readonly CompositeSeasonProviderWriteCoordinator _compositeSeasonWriteCoordinator =
+            new CompositeSeasonProviderWriteCoordinator();
+        private readonly ConcurrentDictionary<string, SemaphoreSlim> _seasonProviderWriteLocks =
+            new ConcurrentDictionary<string, SemaphoreSlim>(StringComparer.Ordinal);
+        private readonly ConcurrentDictionary<string, int> _activeCompositeSeasonBarriers =
+            new ConcurrentDictionary<string, int>(StringComparer.Ordinal);
+        private readonly ConcurrentDictionary<long, CompositeSeasonFirstFileDecision> _pendingCompositeSeasonFirstFiles =
+            new ConcurrentDictionary<long, CompositeSeasonFirstFileDecision>();
+        private readonly Lazy<CompositeSeasonStateStore> _compositeSeasonStateStore;
         
         // 为强制下载任务设计的专用队列和信号量
         private readonly ConcurrentQueue<LibraryEvent> _forceEventQueue = new ConcurrentQueue<LibraryEvent>();
@@ -90,9 +105,239 @@ namespace Emby.Plugin.Danmu
             _logger = logManager.getDefaultLogger(GetType().ToString());
             _scraperManager = SingletonManager.ScraperManager;
             _fileSystem = FileSystem.instant;
+            _compositeSeasonStateStore = new Lazy<CompositeSeasonStateStore>(CreateCompositeSeasonStateStore);
             
             // 启动强制下载任务的后台处理循环
             Task.Run(async () => await ProcessForceQueueLoopAsync(_cancellationTokenSource.Token).ConfigureAwait(false));
+        }
+
+        /// <summary>
+        /// Produces the stable identity used by the plugin-private composite-season
+        /// marker.  It deliberately uses stable Season/Series ownership only,
+        /// never provider ids, titles, or mutable episode membership.  A library
+        /// rescan may add or renumber Episodes without making a known composite
+        /// Season safe to bind back to one upstream media record.
+        /// </summary>
+        public string GetCompositeSeasonFingerprint(Season season)
+        {
+            if (season == null || season.Id == Guid.Empty)
+            {
+                throw new ArgumentException("A persisted Season is required.", nameof(season));
+            }
+
+            var parentSeries = season.GetParent() as Series;
+            var source = new StringBuilder("composite-season-fingerprint-v1\n");
+            source.Append(season.Id.ToString("N")).Append('\n');
+            source.Append(parentSeries?.Id.ToString("N") ?? string.Empty).Append('\n');
+
+            using (var sha256 = SHA256.Create())
+            {
+                var bytes = sha256.ComputeHash(Encoding.UTF8.GetBytes(source.ToString()));
+                return BitConverter.ToString(bytes).Replace("-", string.Empty).ToLowerInvariant();
+            }
+        }
+
+        /// <summary>
+        /// Rehydrates a durable composite marker into the in-process provider
+        /// write coordinator.  A stale marker with a different fingerprint is
+        /// intentionally ignored so matching starts fresh.
+        /// </summary>
+        public bool RestoreCompositeSeasonTombstone(Season season)
+        {
+            if (season == null || season.Id == Guid.Empty)
+            {
+                return false;
+            }
+
+            var seasonId = season.Id.ToString("N");
+            try
+            {
+                var status = _compositeSeasonStateStore.Value.GetStatus(
+                    seasonId, GetCompositeSeasonFingerprint(season), out _);
+                if (status == CompositeSeasonStateLookup.NotMarked)
+                {
+                    return false;
+                }
+
+                _compositeSeasonWriteCoordinator.RestoreTombstone(seasonId);
+                if (status == CompositeSeasonStateLookup.Unavailable)
+                {
+                    _logger.Error(
+                        "[CompositeSeason] Private state is unreadable for Season {0}; conservatively blocking Season ProviderId writes.",
+                        season.Name);
+                }
+                return true;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex,
+                    "[CompositeSeason] Unable to restore private state for Season {0}; provider-id matching will remain available.",
+                    season.Name);
+                return false;
+            }
+        }
+
+        public bool IsCompositeSeason(Season season)
+        {
+            if (season == null || season.Id == Guid.Empty)
+            {
+                return false;
+            }
+
+            return RestoreCompositeSeasonTombstone(season) ||
+                   _compositeSeasonWriteCoordinator.IsTombstoned(season.Id.ToString("N"));
+        }
+
+        /// <summary>
+        /// Starts a Season metadata lease. Controllers should start a composite
+        /// lease before downloading its first mapped Episode and always complete
+        /// it in a finally block.
+        /// </summary>
+        public CompositeSeasonProviderWriteLease BeginCompositeSeasonWrite(Season season, bool compositePlan)
+        {
+            if (season == null || season.Id == Guid.Empty)
+            {
+                throw new ArgumentException("A persisted Season is required.", nameof(season));
+            }
+
+            RestoreCompositeSeasonTombstone(season);
+            var lease = _compositeSeasonWriteCoordinator.BeginWrite(season.Id.ToString("N"), compositePlan);
+            if (compositePlan)
+            {
+                _activeCompositeSeasonBarriers.AddOrUpdate(lease.SeasonId, 1, (_, count) => count + 1);
+            }
+
+            return lease;
+        }
+
+        /// <summary>
+        /// Applies the durable composite transition after a mapped Episode file
+        /// has been written.  The private marker is persisted before any Emby
+        /// ProviderId is cleared, so a crash cannot leave a cleared Season that
+        /// later gets silently rebound to one upstream Season.
+        /// </summary>
+        public async Task<bool> OnCompositeSeasonFilePersistedAsync(
+            Season season,
+            CompositeSeasonProviderWriteLease lease)
+        {
+            if (season == null || lease == null || !lease.IsCompositePlan ||
+                !string.Equals(season.Id.ToString("N"), lease.SeasonId, StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            if (!_pendingCompositeSeasonFirstFiles.TryGetValue(lease.LeaseId, out var decision))
+            {
+                decision = _compositeSeasonWriteCoordinator.OnFilePersisted(lease);
+            }
+
+            if (!decision.ShouldPersistTombstoneAndClearProviderIds)
+            {
+                return false;
+            }
+
+            try
+            {
+                _compositeSeasonStateStore.Value.MarkComposite(
+                    lease.SeasonId, GetCompositeSeasonFingerprint(season));
+                _pendingCompositeSeasonFirstFiles.TryRemove(lease.LeaseId, out _);
+                await ClearCompositeSeasonProviderIdsAsync(season).ConfigureAwait(false);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                // Retain the decision so a later successful Episode in this task
+                // can retry durable persistence without ever clearing first.
+                _pendingCompositeSeasonFirstFiles.TryAdd(lease.LeaseId, decision);
+                _logger.LogError(ex,
+                    "[CompositeSeason] File persisted for Season {0}, but its private marker was not committed; Season ProviderIds were left unchanged.",
+                    season.Name);
+                return false;
+            }
+        }
+
+        public void CompleteCompositeSeasonWrite(CompositeSeasonProviderWriteLease lease)
+        {
+            if (lease == null)
+            {
+                return;
+            }
+
+            _pendingCompositeSeasonFirstFiles.TryRemove(lease.LeaseId, out _);
+            _compositeSeasonWriteCoordinator.Complete(lease);
+            if (!lease.IsCompositePlan)
+            {
+                return;
+            }
+
+            while (_activeCompositeSeasonBarriers.TryGetValue(lease.SeasonId, out var count))
+            {
+                if (count <= 1)
+                {
+                    if (_activeCompositeSeasonBarriers.TryRemove(lease.SeasonId, out _))
+                    {
+                        break;
+                    }
+                }
+                else if (_activeCompositeSeasonBarriers.TryUpdate(lease.SeasonId, count - 1, count))
+                {
+                    break;
+                }
+            }
+        }
+
+        private CompositeSeasonStateStore CreateCompositeSeasonStateStore()
+        {
+            var plugin = Plugin.Instance;
+            if (plugin == null || string.IsNullOrWhiteSpace(plugin.DataFolderPath))
+            {
+                throw new InvalidOperationException("Plugin data folder is unavailable for composite-season state.");
+            }
+
+            return new CompositeSeasonStateStore(
+                Path.Combine(plugin.DataFolderPath, "composite-seasons"));
+        }
+
+        private bool IsSeasonProviderIdWriteBlocked(Season season)
+        {
+            if (season == null || season.Id == Guid.Empty)
+            {
+                return false;
+            }
+
+            var seasonId = season.Id.ToString("N");
+            return IsCompositeSeason(season) ||
+                   _activeCompositeSeasonBarriers.ContainsKey(seasonId);
+        }
+
+        public async Task ClearCompositeSeasonProviderIdsAsync(Season season)
+        {
+            var seasonId = season.Id.ToString("N");
+            var seasonLock = _seasonProviderWriteLocks.GetOrAdd(seasonId, _ => new SemaphoreSlim(1, 1));
+            await seasonLock.WaitAsync().ConfigureAwait(false);
+            try
+            {
+                var currentSeason = _libraryManager.GetItemById(season.Id) as Season ?? season;
+                var clearPlan = CompositeSeasonProviderPolicy.BuildClearPlan(currentSeason.ProviderIds);
+                if (!clearPlan.RequiresClear)
+                {
+                    return;
+                }
+
+                currentSeason.ProviderIds = clearPlan.RemainingProviderIds;
+                await currentSeason.UpdateToRepositoryAsync(ItemUpdateType.MetadataEdit, CancellationToken.None)
+                    .ConfigureAwait(false);
+                foreach (var removed in clearPlan.RemovedProviderIds)
+                {
+                    _logger.LogInformation(
+                        "[CompositeSeason] Cleared Season ProviderId after first persisted file: season={0}, key={1}, value={2}",
+                        currentSeason.Name, removed.Key, removed.Value);
+                }
+            }
+            finally
+            {
+                seasonLock.Release();
+            }
         }
 
         /// <summary>
@@ -640,7 +885,8 @@ namespace Emby.Plugin.Danmu
         {
             if (!force)
             {
-                if (item.HasAnyDanmuProviderIds())
+                var season = item as Season;
+                if (item.HasAnyDanmuProviderIds() && (season == null || !IsCompositeSeason(season)))
                 {
                     return;
                 }
@@ -750,27 +996,41 @@ namespace Emby.Plugin.Danmu
                         originalSeasonName = currentItem.Name ?? originalSeasonName;
                     }
 
+                    // A composite Season intentionally has no authoritative
+                    // ProviderId.  Even if a stale external write is present,
+                    // its private tombstone requires a fresh candidate search.
+                    var compositeSeason = IsCompositeSeason(currentItem ?? season);
+                    if (compositeSeason)
+                    {
+                        await ClearCompositeSeasonProviderIdsAsync(currentItem ?? season).ConfigureAwait(false);
+                    }
+
                     AbstractScraper selectedScraper = null;
                     string selectedMediaId = null;
                     DanmuMatchCandidate selectedCandidate = null;
 
-                    var providerDecision = await DanmuProviderIdResolver.ResolveAsync(
-                        scrapers,
-                        DanmuProviderIdResolver.GetSeasonScopes(currentItem ?? season),
-                        _logger,
-                        authoritativeSeries).ConfigureAwait(false);
-                    if (providerDecision.Candidate != null)
+                    if (!compositeSeason)
                     {
-                        selectedScraper = providerDecision.Scraper;
-                        selectedMediaId = providerDecision.Candidate.Id;
-                        selectedCandidate = providerDecision.Candidate;
+                        var providerDecision = await DanmuProviderIdResolver.ResolveAsync(
+                            scrapers,
+                            DanmuProviderIdResolver.GetSeasonScopes(currentItem ?? season),
+                            _logger,
+                            authoritativeSeries).ConfigureAwait(false);
+                        if (providerDecision.Candidate != null)
+                        {
+                            selectedScraper = providerDecision.Scraper;
+                            selectedMediaId = providerDecision.Candidate.Id;
+                            selectedCandidate = providerDecision.Candidate;
+                        }
                     }
 
                     // A saved manual binding always wins over automatic scoring when
                     // no configured provider identifier can be resolved.
                     var bindingProviderIds = DanmuProviderIdResolver.GetItemLocalProviderIds(
                         currentItem ?? season, authoritativeSeries, scrapers);
-                    foreach (var scraper in scrapers)
+                    foreach (var scraper in compositeSeason
+                        ? Enumerable.Empty<AbstractScraper>()
+                        : scrapers)
                     {
                         if (selectedScraper == null &&
                             bindingProviderIds != null &&
@@ -1053,67 +1313,143 @@ namespace Emby.Plugin.Danmu
             string seasonProviderValue,
             long seasonProviderGeneration)
         {
-            var episodes = (season.GetEpisodes()?.Items ?? Array.Empty<BaseItem>())
-                .OfType<Episode>()
-                .Where(x => x.ParentIndexNumber.HasValue && x.ParentIndexNumber.Value > 0)
-                .OrderBy(x => x.IndexNumber ?? int.MaxValue)
-                .ToList();
-            var anyFilePersisted = false;
-            var seasonProviderPersisted = false;
+            return await DownloadAutomaticSeasonWithCompositePlan(
+                season, media, scraper, seasonProviderValue, seasonProviderGeneration).ConfigureAwait(false);
 
+        }
+
+        private async Task<bool> DownloadAutomaticSeasonWithCompositePlan(
+            Season season, ScraperMedia primaryMedia, AbstractScraper primaryScraper,
+            string primaryLookupId, long primaryGeneration)
+        {
+            var episodes = (season.GetEpisodes()?.Items ?? Array.Empty<BaseItem>()).OfType<Episode>()
+                .Where(x => x.ParentIndexNumber.GetValueOrDefault() > 0)
+                .OrderBy(x => x.IndexNumber ?? int.MaxValue).ToList();
+            var direct = new List<CompositeSeasonEpisodeMapping>();
+            var used = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var episode in episodes)
             {
                 try
                 {
-                    var outcome = await DownloadEpisodeForProgress(
-                        episode, media, scraper, false).ConfigureAwait(false);
-                    if (outcome.FilePersisted &&
-                        (string.Equals(outcome.Status, "success", StringComparison.OrdinalIgnoreCase) ||
-                         string.Equals(outcome.Status, "partial", StringComparison.OrdinalIgnoreCase)))
-                    {
-                        anyFilePersisted = true;
-                        try
-                        {
-                            await PersistDownloadProviderIdAsync(episode, outcome).ConfigureAwait(false);
-                        }
-                        catch (Exception ex)
-                        {
-                            _logger.LogError(ex,
-                                "[{0}] 自动入库集 ProviderId 写回失败，但弹幕文件已保留：{1}",
-                                scraper.Name, episode.Name);
-                        }
+                    var resolved = await DanmuProviderIdResolver.ResolveAsync(_scraperManager.All(),
+                        new BaseItem[] { episode }, _logger).ConfigureAwait(false);
+                    if (resolved.Candidate == null || resolved.Scraper == null ||
+                        !string.Equals(resolved.ResolvedScopeType, "Episode", StringComparison.OrdinalIgnoreCase)) continue;
+                    var mapping = CompositeSeasonMatchService.CreateDirectMapping(episode.Id.ToString(),
+                        resolved.Scraper.ProviderId, resolved.Media, resolved.Candidate.Id);
+                    var key = mapping == null ? string.Empty : mapping.Source.ProviderId + "\u001f" +
+                        mapping.Source.MediaId + "\u001f" + mapping.SourceEpisodeId;
+                    if (mapping != null && used.Add(key)) direct.Add(mapping);
+                }
+                catch (Exception ex) { _logger.LogError(ex, "[CompositeSeason] Auto direct mapping failed: {0}", episode.Name); }
+            }
+            if (!CompositeSeasonPlanner.TryCreatePlan(CompositeSeasonMatchService.GetLocalEpisodes(episodes), direct,
+                    out var plan, out var error))
+            {
+                _logger.Error("[CompositeSeason] Auto plan rejected: season={0}, error={1}", season.Name, error);
+                return false;
+            }
 
-                        if (!seasonProviderPersisted)
-                        {
-                            try
-                            {
-                                await SaveAutomaticSeasonProviderId(
-                                    season,
-                                    scraper.ProviderId,
-                                    seasonProviderValue,
-                                    seasonProviderGeneration).ConfigureAwait(false);
-                                seasonProviderPersisted = true;
-                            }
-                            catch (Exception ex)
-                            {
-                                _logger.LogError(ex,
-                                    "[{0}] 自动入库季度 ProviderId 写回失败，但弹幕文件已保留：{1}",
-                                    scraper.Name, season.Name);
-                            }
-                        }
-                    }
-                }
-                catch (DanmuDownloadErrorException ex)
+            var seriesTitle = (season.GetParent() as Series)?.Name ?? season.Name ?? string.Empty;
+            var primarySource = CompositeSeasonMatchService.GetSource(
+                primaryScraper.ProviderId, primaryMedia, primaryLookupId);
+            if (!CompositeSeasonMatchService.TryNormalizeAndContinueSource(plan, primarySource,
+                    CompositeSeasonMatchService.GetSourceEpisodes(primaryMedia), "automatic-primary",
+                    out plan, out var primaryExhausted, out error))
+            {
+                _logger.Error("[CompositeSeason] Automatic primary continuation rejected: season={0}, error={1}",
+                    season.Name, error);
+                return false;
+            }
+
+            // A source is excluded by its original provider lookup token only
+            // after all of its verified source Episodes were consumed. This
+            // lets an interior direct mapping continue the same source, yet
+            // prevents an exhausted source from being selected again for a
+            // later temporary group.
+            var exhaustedSources = new List<CompositeSeasonSourceIdentity>();
+            if (primaryExhausted) exhaustedSources.Add(primarySource);
+            while (plan.UnmatchedRuns.Count > 0)
+            {
+                var run = plan.UnmatchedRuns[0];
+                var search = await DanmuMatchSearchEngine.SearchSeasonAsync(_scraperManager.All(), seriesTitle,
+                    seriesTitle, season.ProductionYear, run.Episodes.Count, seriesTitle, _logger).ConfigureAwait(false);
+                // Exclusion happens before scoring/uniqueness selection, so
+                // every exhausted source (not only the primary) cannot mask a
+                // unique supplemental candidate on a later temporary group.
+                var candidate = CompositeSeasonMatchService.SelectSupplementalCandidate(
+                    search.Candidates, exhaustedSources);
+                var sourceScraper = candidate == null ? null : _scraperManager.All().FirstOrDefault(x =>
+                    string.Equals(x.ProviderId, candidate.Site, StringComparison.OrdinalIgnoreCase));
+                if (sourceScraper == null) break;
+                ScraperMedia sourceMedia;
+                try { sourceMedia = await sourceScraper.GetMedia(season, candidate.Id).ConfigureAwait(false); }
+                catch (Exception ex) { _logger.LogError(ex, "[CompositeSeason] Auto residual source failed: {0}", season.Name); break; }
+                var source = CompositeSeasonMatchService.GetSource(sourceScraper.ProviderId, sourceMedia, candidate.Id);
+                if (!CompositeSeasonMatchService.TryNormalizeAndContinueSource(plan, source,
+                        CompositeSeasonMatchService.GetSourceEpisodes(sourceMedia), "automatic-residual",
+                        out var continuedPlan, out var sourceExhausted, out error))
                 {
-                    _logger.LogInformation("[{0}] 自动入库季度下载失败：{1}", scraper.Name, ex.Message);
+                    _logger.LogInformation("[CompositeSeason] Ignored unusable residual source: season={0}, error={1}",
+                        season.Name, error);
+                    break;
                 }
-                catch (Exception ex)
+                plan = continuedPlan;
+                if (sourceExhausted && !exhaustedSources.Any(existing =>
+                        string.Equals(existing.ProviderId, source.ProviderId, StringComparison.OrdinalIgnoreCase) &&
+                        string.Equals(existing.MediaLookupId, source.MediaLookupId, StringComparison.OrdinalIgnoreCase)))
                 {
-                    _logger.LogError(ex, "[{0}] 自动入库季度下载异常：{1}", scraper.Name, episode.Name);
+                    exhaustedSources.Add(source);
                 }
             }
 
-            return anyFilePersisted;
+            if (plan.Mappings.Count == 0) return false;
+            var byId = episodes.ToDictionary(x => x.Id.ToString(), StringComparer.OrdinalIgnoreCase);
+            var sources = plan.Mappings.Select(x => x.Source).Distinct().ToList();
+            var canSaveSeason = !plan.IsComposite && sources.Count == 1 &&
+                plan.Mappings.All(x => !string.Equals(x.Origin, "episode-provider-id", StringComparison.OrdinalIgnoreCase));
+            var savedSeason = false;
+            var persisted = false;
+            var lease = BeginCompositeSeasonWrite(season, plan.IsComposite);
+            try
+            {
+                foreach (var mapping in plan.Mappings)
+                {
+                    if (!byId.TryGetValue(mapping.LocalEpisodeItemId, out var episode)) continue;
+                    try
+                    {
+                        var sourceScraper = _scraperManager.All().FirstOrDefault(x => string.Equals(
+                            x.ProviderId, mapping.Source.ProviderId, StringComparison.OrdinalIgnoreCase));
+                        if (sourceScraper == null) continue;
+                        var lookup = !string.IsNullOrWhiteSpace(mapping.Source.MediaLookupId)
+                            ? mapping.Source.MediaLookupId : mapping.Source.MediaId;
+                        var media = string.Equals(mapping.Origin, "episode-provider-id", StringComparison.OrdinalIgnoreCase)
+                            ? await DanmuProviderIdResolver.ResolveDirectEpisodeMediaAsync(sourceScraper, episode, lookup, 1).ConfigureAwait(false)
+                            : await sourceScraper.GetMedia(season, lookup).ConfigureAwait(false);
+                        var sourceEpisode = (media?.Episodes ?? new List<ScraperEpisode>()).FirstOrDefault(x => x != null &&
+                            string.Equals(x.Id, mapping.SourceEpisodeId, StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(x.CommentId));
+                        if (sourceEpisode == null) continue;
+                        var exact = new ScraperMedia { Id = media.Id, ProviderId = sourceScraper.ProviderId,
+                            Episodes = new List<ScraperEpisode> { new ScraperEpisode { Id = sourceEpisode.Id,
+                                CommentId = sourceEpisode.CommentId, EpisodeNumber = 1, Title = sourceEpisode.Title } } };
+                        var outcome = await DownloadEpisodeForProgress(episode, exact, sourceScraper, false, 1).ConfigureAwait(false);
+                        if (!outcome.FilePersisted) continue;
+                        persisted = true;
+                        await PersistDownloadProviderIdAsync(episode, outcome).ConfigureAwait(false);
+                        if (plan.IsComposite) await OnCompositeSeasonFilePersistedAsync(season, lease).ConfigureAwait(false);
+                        else if (canSaveSeason && !savedSeason)
+                        {
+                            await SaveAutomaticSeasonProviderId(season, sources[0].ProviderId,
+                                !string.IsNullOrWhiteSpace(sources[0].MediaLookupId) ? sources[0].MediaLookupId : sources[0].MediaId,
+                                primaryGeneration).ConfigureAwait(false);
+                            savedSeason = true;
+                        }
+                    }
+                    catch (Exception ex) { _logger.LogError(ex, "[CompositeSeason] Auto exact download failed: {0}", episode.Name); }
+                }
+            }
+            finally { CompleteCompositeSeasonWrite(lease); }
+            return persisted;
         }
 
         /// <summary>
@@ -1685,6 +2021,14 @@ namespace Emby.Plugin.Danmu
             // 保存指定弹幕元数据
             var writeKey = GetProviderWriteKey(item, providerId);
             var writeLock = _providerWriteLocks.GetOrAdd(writeKey, _ => new SemaphoreSlim(1, 1));
+            var seasonForWrite = updateItem as Season;
+            SemaphoreSlim seasonWriteLock = null;
+            if (seasonForWrite != null)
+            {
+                seasonWriteLock = _seasonProviderWriteLocks.GetOrAdd(
+                    seasonForWrite.Id.ToString("N"), _ => new SemaphoreSlim(1, 1));
+                await seasonWriteLock.WaitAsync().ConfigureAwait(false);
+            }
             await writeLock.WaitAsync().ConfigureAwait(false);
             try
             {
@@ -1692,6 +2036,17 @@ namespace Emby.Plugin.Danmu
                 {
                     _logger.Info("Skip stale ProviderId write: item={0}, providerId={1}, generation={2}, committed={3}",
                         item.Name, providerId, generation, latestGeneration);
+                    return;
+                }
+
+                if (seasonForWrite != null &&
+                    CompositeSeasonProviderPolicy.IsPluginSeasonProviderKey(providerId) &&
+                    IsSeasonProviderIdWriteBlocked(seasonForWrite))
+                {
+                    _logger.LogInformation(
+                        "[CompositeSeason] Blocked Season ProviderId write: season={0}, provider={1}, generation={2}",
+                        seasonForWrite.Name, providerId, generation);
+                    _providerWriteTracker.MarkCommitted(writeKey, generation);
                     return;
                 }
 
@@ -1745,6 +2100,7 @@ namespace Emby.Plugin.Danmu
             finally
             {
                 writeLock.Release();
+                seasonWriteLock?.Release();
             }
         }
 

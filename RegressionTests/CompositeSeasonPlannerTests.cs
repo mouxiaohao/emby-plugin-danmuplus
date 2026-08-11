@@ -1,0 +1,550 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Reflection;
+using System.Runtime.Serialization;
+using System.Threading.Tasks;
+using Emby.Plugin.Danmu.Core.Controllers;
+using Emby.Plugin.Danmu.Model;
+using Emby.Plugin.Danmu.Scraper;
+using Emby.Plugin.Danmu.Scraper.Dandan;
+using Emby.Plugin.Danmu.Scraper.Entity;
+using DandanEpisode = Emby.Plugin.Danmu.Scraper.Dandan.Entity.Episode;
+using MediaBrowser.Controller.Entities;
+using MediaBrowser.Controller.Entities.TV;
+
+namespace Emby.Plugin.Danmu.RegressionTests
+{
+    internal static class CompositeSeasonPlannerTests
+    {
+        public static void Run()
+        {
+            PreservesExplicitEvidenceAndBuildsRemainingRuns();
+            SupportsSourceStartsAndPartialCoverage();
+            MapsFrierenThirtyEightEpisodesAcrossTwoUpstreamSeasons();
+            KeepsMarkedFrierenEpisodeEvidenceWhenNoCandidateIsUsable();
+            KeepsMarkedPreviewDirectEvidenceAheadOfFreshSearch();
+            ContinuesPrimaryAcrossInteriorExactEpisode();
+            SelectsSupplementalAfterPrimaryExhaustion();
+            ContinuesSupplementalAcrossSpecialAndReentrantDirectEvidence();
+            ParsesCompositeSelectionsFromScalarQueryJson();
+            SupportsCompositeMappingForAnyLocalSeason();
+            DoesNotClassifySingleSourcePartialCoverageAsComposite();
+            MapsMultipleSpecialRunsWithoutChangingLocalSeasonMembership();
+            SeparatesCanonicalMediaIdentityFromLookupToken();
+            RejectsOverlapsAndUnverifiedMappings();
+            IdentifiesCompositeSourcesByProviderAndMediaId();
+            KeepsDirectEpisodeEvidenceFromFalselyCreatingCompositeSources();
+            SortsByStableLocalIdentityWithoutDependingOnDisplayNumbers();
+        }
+
+        private static void PreservesExplicitEvidenceAndBuildsRemainingRuns()
+        {
+            var direct = new[]
+            {
+                Mapping("local-1", "DandanID", "frieren-s1", "source-1", "comment-1"),
+                Mapping("local-2", "DandanID", "frieren-s1", "source-2", "comment-2"),
+                Mapping("local-4", "DandanID", "frieren-s1", "source-4", "comment-4"),
+            };
+            Assert(CompositeSeasonPlanner.TryCreatePlan(LocalEpisodes(1, 5), direct, out var plan, out var error), error);
+            Assert(plan.Mappings.Count == 3 && plan.Mappings.All(mapping => mapping.Origin == "direct"),
+                "explicit/direct mappings must remain the planning baseline");
+            Assert(plan.UnmatchedRuns.Count == 2 && RunIds(plan.UnmatchedRuns[0]) == "local-3" &&
+                   RunIds(plan.UnmatchedRuns[1]) == "local-5",
+                "mapped episodes must split gaps into maximum contiguous runs");
+
+            var request = Segment("local-3", "DandanID", "frieren-ova", "ova-1", new[] { Source("ova-1", "ova-comment", 1) });
+            Assert(CompositeSeasonPlanner.TryApplySegment(plan, request, out plan, out var applied, out error), error);
+            Assert(applied == 1 && plan.Mappings.Single(mapping => mapping.LocalEpisodeItemId == "local-3").Source.MediaId == "frieren-ova",
+                "a manual mapping must only fill its selected unmatched run");
+            Assert(plan.UnmatchedRuns.Count == 1 && RunIds(plan.UnmatchedRuns[0]) == "local-5",
+                "remaining gaps must be recomputed after every mapping");
+        }
+
+        private static void SupportsSourceStartsAndPartialCoverage()
+        {
+            Assert(CompositeSeasonPlanner.TryCreatePlan(LocalEpisodes(29, 38), null, out var plan, out var error), error);
+            var request = Segment("local-29", "DandanID", "frieren-s2", "source-4", new[]
+            {
+                Source("source-1", "comment-1", 1), Source("source-2", "comment-2", 2),
+                Source("source-3", "comment-3", 3), Source("source-4", "comment-4", 4),
+                Source("source-5", "comment-5", 5), Source("source-6", "comment-6", 6),
+            }, 10);
+            Assert(CompositeSeasonPlanner.TryApplySegment(plan, request, out plan, out var applied, out error), error);
+            Assert(applied == 3 && plan.Mappings[0].LocalEpisodeItemId == "local-29" &&
+                   plan.Mappings[0].SourceEpisodeId == "source-4" && RunIds(plan.UnmatchedRuns.Single()) ==
+                   "local-32,local-33,local-34,local-35,local-36,local-37,local-38",
+                "a short source must map only its verified prefix from the selected source start");
+
+            var fill = Segment("local-32", "DandanID", "frieren-s2b", "part-1", Enumerable.Range(1, 8)
+                .Select(number => Source("part-" + number, "part-comment-" + number, number)));
+            Assert(CompositeSeasonPlanner.TryApplySegment(plan, fill, out plan, out applied, out error), error);
+            Assert(applied == 7 && plan.UnmatchedRuns.Count == 0,
+                "a long source must not overflow the selected local run");
+        }
+
+        private static void MapsFrierenThirtyEightEpisodesAcrossTwoUpstreamSeasons()
+        {
+            var directS1 = Enumerable.Range(1, 28).Select(number => new CompositeSeasonEpisodeMapping
+            {
+                LocalEpisodeItemId = "local-" + number,
+                Source = new CompositeSeasonSourceIdentity { ProviderId = "DandanID", MediaId = "frieren-s1" },
+                SourceEpisodeId = "s1-" + number,
+                CommentId = "s1-comment-" + number,
+                SourceEpisodeNumber = number,
+                Origin = "episode-provider-id",
+            });
+            Assert(CompositeSeasonPlanner.TryCreatePlan(LocalEpisodes(1, 38), directS1, out var plan, out var error), error);
+            Assert(plan.Mappings.Count == 28 && RunIds(plan.UnmatchedRuns.Single()) ==
+                   string.Join(",", Enumerable.Range(29, 10).Select(number => "local-" + number)),
+                "direct Frieren S1 E1-E28 evidence must leave E29-E38 as one temporary group");
+
+            var secondSeason = Segment("local-29", "DandanID", "frieren-s2", "s2-1",
+                Enumerable.Range(1, 10).Select(number => Source("s2-" + number, "s2-comment-" + number, number)));
+            Assert(CompositeSeasonPlanner.TryApplySegment(plan, secondSeason, out plan, out var applied, out error), error);
+            Assert(applied == 10 && plan.IsComposite && plan.UnmatchedRuns.Count == 0 && plan.Mappings.Count == 38,
+                "Frieren 38 = upstream S1(28) + S2(10) must become a complete two-source plan without a temporary group");
+            Assert(plan.Mappings.Single(mapping => mapping.LocalEpisodeItemId == "local-29").Source.MediaId == "frieren-s2" &&
+                   plan.Mappings.Single(mapping => mapping.LocalEpisodeItemId == "local-29").SourceEpisodeNumber == 1,
+                "the second local range must start at the independently verified S2 E1, not continue S1 numbering");
+        }
+
+        private static void KeepsMarkedFrierenEpisodeEvidenceWhenNoCandidateIsUsable()
+        {
+            // This is the restart/ambiguous-search safety case: every local
+            // Episode already has an exact Dandan binding, but the Season is
+            // marked composite and no automatic candidate may be selected.
+            // The planner must therefore retain direct evidence instead of
+            // emitting 38 temporary/unmatched episodes.
+            var direct = new List<CompositeSeasonEpisodeMapping>();
+            foreach (var number in Enumerable.Range(1, 28))
+            {
+                direct.Add(DirectDandanMapping(number, "17617", "17617" + number.ToString("0000")));
+            }
+            foreach (var number in Enumerable.Range(1, 10))
+            {
+                direct.Add(DirectDandanMapping(28 + number, "18886", "18886" + number.ToString("0000")));
+            }
+
+            Assert(DandanEpisodeId.TryGetAnimeId("176170001", out var firstParent) && firstParent == 17617 &&
+                   DandanEpisodeId.TryGetAnimeId("188860010", out var secondParent) && secondParent == 18886 &&
+                   !DandanEpisodeId.TryGetAnimeId("18886x001", out _) &&
+                   !DandanEpisodeId.TryGetAnimeId("1888", out _),
+                "Dandan Episode ProviderIds must derive only their candidate parent 17617/18886 from a strict numeric four-digit suffix");
+            var verified = DandanEpisodeId.CreateVerifiedEpisode("188860010", new[]
+            {
+                new DandanEpisode { EpisodeId = 188860009, EpisodeTitle = "E09", EpisodeNumber = "9" },
+                new DandanEpisode { EpisodeId = 188860010, EpisodeTitle = "E10", EpisodeNumber = "10" },
+            });
+            Assert(verified?.Id == "188860010" && verified.CommentId == "188860010" &&
+                   verified.ParentMediaId == "18886" && verified.EpisodeNumber == 10 &&
+                   DandanEpisodeId.CreateVerifiedEpisode("188860010", new[]
+                   {
+                       new DandanEpisode { EpisodeId = 176170010, EpisodeTitle = "wrong parent", EpisodeNumber = "10" },
+                   }) == null,
+                "a Dandan direct Episode mapping must be created only from the exact full EpisodeId returned by its parent detail");
+
+            var firstResolver = new DirectEpisodeFakeScraper("DandanID", new ScraperEpisode
+            {
+                Id = "176170001", CommentId = "176170001", ParentMediaId = "17617", EpisodeNumber = 1,
+            });
+            var secondResolver = new DirectEpisodeFakeScraper("DandanID", new ScraperEpisode
+            {
+                Id = "188860001", CommentId = "188860001", ParentMediaId = "18886", EpisodeNumber = 1,
+            });
+            var firstMedia = DanmuProviderIdResolver.ResolveDirectEpisodeMediaAsync(
+                firstResolver, new Episode { IndexNumber = 1 }, "176170001", 1).GetAwaiter().GetResult();
+            var secondMedia = DanmuProviderIdResolver.ResolveDirectEpisodeMediaAsync(
+                secondResolver, new Episode { IndexNumber = 29 }, "188860001", 1).GetAwaiter().GetResult();
+            var firstMapping = CompositeSeasonMatchService.CreateDirectMapping("local-1", "DandanID", firstMedia, "176170001");
+            var secondMapping = CompositeSeasonMatchService.CreateDirectMapping("local-29", "DandanID", secondMedia, "188860001");
+            Assert(firstMapping.Source.MediaId == "17617" && firstMapping.Source.MediaLookupId == "176170001" &&
+                   secondMapping.Source.MediaId == "18886" && secondMapping.Source.MediaLookupId == "188860001" &&
+                   firstResolver.MediaCalls == 0 && secondResolver.MediaCalls == 0 &&
+                   firstResolver.MediaEpisodeCalls == 1 && secondResolver.MediaEpisodeCalls == 1,
+                "direct Episode resolution must preserve the exact EpisodeId lookup token while exposing the verified parent AnimeId as canonical source identity");
+            Assert(CompositeSeasonPlanner.TryCreatePlan(new[]
+            {
+                new CompositeSeasonLocalEpisode { ItemId = "local-1", SortOrder = 1 },
+                new CompositeSeasonLocalEpisode { ItemId = "local-29", SortOrder = 2 },
+            }, new[] { firstMapping, secondMapping }, out var directPlan, out var directError) && directPlan.IsComposite,
+                "two direct Dandan Episodes with parents 17617 and 18886 must produce distinct stable composite sources; " + directError);
+
+            Assert(CompositeSeasonPlanner.TryCreatePlan(LocalEpisodes(1, 38), direct, out var plan, out var error), error);
+            var stableGroups = plan.Mappings
+                .GroupBy(mapping => mapping.Source)
+                .OrderBy(group => group.Key.MediaId, StringComparer.Ordinal)
+                .ToList();
+            Assert(plan.Mappings.Count == 38 && plan.UnmatchedRuns.Count == 0 && plan.IsComposite &&
+                   stableGroups.Count == 2 && stableGroups.Single(group => group.Key.MediaId == "17617").Count() == 28 &&
+                   stableGroups.Single(group => group.Key.MediaId == "18886").Count() == 10,
+                "a marked 38-episode Frieren Season must keep all exact Episode DandanIDs as 17617(28)+18886(10), " +
+                "be composite, and never regress to an all-unmatched preview when candidate search is absent or ambiguous");
+            Assert(plan.Mappings.Single(mapping => mapping.LocalEpisodeItemId == "local-29").Source.MediaId == "18886" &&
+                   plan.Mappings.Single(mapping => mapping.LocalEpisodeItemId == "local-29").SourceEpisodeId == "188860001",
+                "the restart preview must preserve the exact S2 parent and episode identity for local E29");
+        }
+
+        private static void KeepsMarkedPreviewDirectEvidenceAheadOfFreshSearch()
+        {
+            var repositoryRoot = Path.GetFullPath(Path.Combine(
+                AppContext.BaseDirectory, "..", "..", "..", ".."));
+            var controller = File.ReadAllText(Path.Combine(
+                repositoryRoot, "Core", "Controllers", "DanmuController.cs")).Replace("\r\n", "\n");
+            var markedBranch = controller.IndexOf("if (compositeMarked)\n", StringComparison.Ordinal);
+            var forceSearch = controller.IndexOf("var effectiveForceSearch = forceSearch || compositeMarked;", StringComparison.Ordinal);
+            var directPlan = controller.IndexOf("BuildCompositePlanAsync(latest, null, true)", StringComparison.Ordinal);
+            Assert(markedBranch >= 0 && directPlan > markedBranch && forceSearch > directPlan,
+                "a marked Season preview must rebuild direct Episode evidence before it begins fresh Season searching");
+            var directBlock = controller.Substring(markedBranch, forceSearch - markedBranch);
+            Assert(directBlock.Contains("result.CompositePlan = direct.Plan;") &&
+                   directBlock.Contains("result.CompositeGroups = CompositeSeasonMatchService.ToGroups"),
+                "a marked preview must retain its direct plan/groups even when later candidate search is absent or ambiguous");
+        }
+
+        private static void SupportsCompositeMappingForAnyLocalSeason()
+        {
+            // The behavior must not be coupled to Season 1: this represents a
+            // later local season containing an upstream continuation and an OVA.
+            Assert(CompositeSeasonPlanner.TryCreatePlan(LocalEpisodes(1, 15), null, out var plan, out var error), error);
+            Assert(CompositeSeasonPlanner.TryApplySegment(plan,
+                Segment("local-1", "BilibiliID", "later-s3", "s3-1",
+                    Enumerable.Range(1, 12).Select(number => Source("s3-" + number, "c3-" + number, number))),
+                out plan, out var applied, out error), error);
+            Assert(applied == 12 && RunIds(plan.UnmatchedRuns.Single()) == "local-13,local-14,local-15",
+                "a non-first local season must expose its own remaining temporary group");
+            Assert(CompositeSeasonPlanner.TryApplySegment(plan,
+                Segment("local-13", "BilibiliID", "later-special", "sp-1",
+                    Enumerable.Range(1, 3).Select(number => Source("sp-" + number, "spc-" + number, number))),
+                out plan, out applied, out error), error);
+            Assert(applied == 3 && plan.IsComposite && plan.UnmatchedRuns.Count == 0,
+                "a later local season must be able to complete with an independently selected special");
+        }
+
+        private static void ContinuesPrimaryAcrossInteriorExactEpisode()
+        {
+            var direct = new[] { Mapping("local-13", "DandanID", "direct-episode-provider:DandanID", "s1-13", "c13") };
+            direct[0].Origin = "episode-provider-id";
+            Assert(CompositeSeasonPlanner.TryCreatePlan(LocalEpisodes(1, 38), direct, out var plan, out var error), error);
+            var primary = new CompositeSeasonSourceIdentity { ProviderId = "DandanID", MediaId = "s1", MediaLookupId = "s1-lookup" };
+            var allPrimaryEpisodes = Enumerable.Range(1, 28).Select(x => Source("s1-" + x, "c" + x, x));
+            Assert(CompositeSeasonMatchService.TryNormalizeAndContinueSource(plan, primary, allPrimaryEpisodes,
+                "automatic-primary", out plan, out var exhausted, out error), error);
+            Assert(plan.UnmatchedRuns.Single().Episodes[0].ItemId == "local-29" &&
+                   exhausted && plan.Mappings.Single(x => x.LocalEpisodeItemId == "local-14").SourceEpisodeId == "s1-14",
+                "an interior exact primary episode must continue S1 in order and exhaust it before the residual run");
+            Assert(CompositeSeasonPlanner.TryApplySegment(plan,
+                Segment("local-29", "DandanID", "s2", "s2-1",
+                    Enumerable.Range(1, 10).Select(x => Source("s2-" + x, "s2c" + x, x))),
+                out plan, out _, out error), error);
+            Assert(plan.IsComposite && plan.Mappings.Single(x => x.LocalEpisodeItemId == "local-29").SourceEpisodeId == "s2-1",
+                "after the primary is exhausted, the residual must begin at verified S2 E1");
+        }
+
+        private static void SelectsSupplementalAfterPrimaryExhaustion()
+        {
+            var primary = new CompositeSeasonSourceIdentity { ProviderId = "DandanID", MediaId = "s1", MediaLookupId = "s1-lookup" };
+            var supplemental = new CompositeSeasonSourceIdentity { ProviderId = "DandanID", MediaId = "s2", MediaLookupId = "s2-lookup" };
+            var candidates = new List<DanmuMatchCandidate>
+            {
+                new DanmuMatchCandidate { Id = "s1-lookup", Site = "DandanID", SourceOrder = 0, Score = 0.99 },
+                new DanmuMatchCandidate { Id = "s2-lookup", Site = "DandanID", SourceOrder = 0, Score = 0.95 },
+                new DanmuMatchCandidate { Id = "s3-lookup", Site = "DandanID", SourceOrder = 0, Score = 0.93 },
+            };
+            Assert(CompositeSeasonMatchService.SelectSupplementalCandidate(candidates, Enumerable.Empty<CompositeSeasonSourceIdentity>())?.Id == "s1-lookup" &&
+                   CompositeSeasonMatchService.SelectSupplementalCandidate(candidates, new[] { primary })?.Id == "s2-lookup" &&
+                   CompositeSeasonMatchService.SelectSupplementalCandidate(candidates, new[] { primary, supplemental })?.Id == "s3-lookup",
+                "all exhausted sources must be filtered before unique high-confidence supplemental selection");
+        }
+
+        private static void ContinuesSupplementalAcrossSpecialAndReentrantDirectEvidence()
+        {
+            var primary = Enumerable.Range(1, 28).Select(number => Mapping("local-" + number,
+                "DandanID", "s1", "s1-" + number, "s1c-" + number)).ToList();
+            primary.Add(Mapping("local-34", "DandanID", "special", "sp-1", "spc-1"));
+            Assert(CompositeSeasonPlanner.TryCreatePlan(LocalEpisodes(1, 39), primary, out var plan, out var error), error);
+            var secondSource = new CompositeSeasonSourceIdentity
+            {
+                ProviderId = "DandanID", MediaId = "s2", MediaLookupId = "s2-lookup",
+            };
+            var secondEpisodes = Enumerable.Range(1, 10).Select(number => Source("s2-" + number, "s2c-" + number, number));
+            Assert(CompositeSeasonMatchService.TryNormalizeAndContinueSource(plan, secondSource, secondEpisodes,
+                "automatic-residual", out plan, out var exhausted, out error), error);
+            Assert(exhausted && plan.Mappings.Single(x => x.LocalEpisodeItemId == "local-35").SourceEpisodeId == "s2-6" &&
+                   plan.Mappings.Single(x => x.LocalEpisodeItemId == "local-35").SourceEpisodeNumber == 6,
+                "a supplemental source must continue across an intervening direct special instead of restarting at E1");
+
+            var reentrantDirect = Enumerable.Range(1, 28).Select(number => Mapping("local-" + number,
+                "DandanID", "s1", "s1-" + number, "s1c-" + number)).ToList();
+            reentrantDirect.Add(Mapping("local-34", "DandanID", "special", "sp-1", "spc-1"));
+            foreach (var number in Enumerable.Range(1, 5))
+            {
+                var direct = Mapping("local-" + (28 + number), "DandanID",
+                    "direct-episode-provider:DandanID", "s2-" + number, "s2c-" + number);
+                direct.Origin = "episode-provider-id";
+                direct.Source.MediaLookupId = "s2-direct-" + number;
+                reentrantDirect.Add(direct);
+            }
+            Assert(CompositeSeasonPlanner.TryCreatePlan(LocalEpisodes(1, 39), reentrantDirect, out plan, out error), error);
+            Assert(CompositeSeasonMatchService.TryNormalizeAndContinueSource(plan, secondSource, secondEpisodes,
+                "automatic-residual", out plan, out exhausted, out error), error);
+            Assert(exhausted && plan.Mappings.Single(x => x.LocalEpisodeItemId == "local-29").Source.MediaId == "s2" &&
+                   plan.Mappings.Single(x => x.LocalEpisodeItemId == "local-29").Source.MediaLookupId == "s2-direct-1" &&
+                   plan.Mappings.Single(x => x.LocalEpisodeItemId == "local-35").SourceEpisodeId == "s2-6",
+                "re-entry must normalize direct S2 placeholders, preserve their lookup tokens, and resume at S2 E6 after the special");
+        }
+
+        private static void ParsesCompositeSelectionsFromScalarQueryJson()
+        {
+            var property = typeof(DanmuParams).GetProperty("CompositeSelections");
+            var member = property?.GetCustomAttribute<DataMemberAttribute>();
+            Assert(property?.PropertyType == typeof(string) && property.Name == "CompositeSelections" &&
+                   member?.Name == "compositeSelections",
+                "the Emby GET-bound compositeSelections CLR/DataMember contract must remain one scalar JSON string");
+            Assert(typeof(DanmuParams).GetProperty("ParsedCompositeSelections")?.PropertyType ==
+                   typeof(List<DanmuCompositeSeasonSelection>) &&
+                   typeof(DanmuParams).GetProperty("ParsedCompositeSelections")
+                       .GetCustomAttribute<IgnoreDataMemberAttribute>() != null,
+                "the parsed runtime selections must not be exposed to the Emby GET binder");
+
+            const string frontendPayload = "[{\"LocalStartEpisodeItemId\":\"episode-29\",\"RequestedEpisodeCount\":10,\"Site\":\"DandanID\",\"CandidateId\":\"frieren-s2\",\"SourceStartEpisodeId\":\"s2-1\",\"SourceStartEpisodeNumber\":1,\"MatchOrigin\":\"manual\"}]";
+            Assert(DanmuCompositeSeasonSelectionJson.TryParse(frontendPayload, out var parsed, out var error) &&
+                   parsed.Count == 1 && parsed[0].CandidateId == "frieren-s2" &&
+                   parsed[0].RequestedEpisodeCount == 10 && string.IsNullOrEmpty(error),
+                "the frontend JSON.stringify payload must deserialize into a compact composite selection");
+            Assert(DanmuCompositeSeasonSelectionJson.TryParse("[]", out parsed, out error) && parsed.Count == 0,
+                "an empty array must remain compatible with direct-only composite plans");
+            Assert(!DanmuCompositeSeasonSelectionJson.TryParse("{not-json", out parsed, out error) &&
+                   parsed.Count == 0 && !string.IsNullOrWhiteSpace(error),
+                "malformed composite JSON must be safely rejected with a readable error");
+        }
+
+        private static void DoesNotClassifySingleSourcePartialCoverageAsComposite()
+        {
+            Assert(CompositeSeasonPlanner.TryCreatePlan(LocalEpisodes(1, 12), null, out var plan, out var error), error);
+            Assert(CompositeSeasonPlanner.TryApplySegment(plan,
+                Segment("local-1", "DandanID", "one-source", "one-1",
+                    Enumerable.Range(1, 8).Select(number => Source("one-" + number, "one-comment-" + number, number))),
+                out plan, out var applied, out error), error);
+            Assert(applied == 8 && !plan.IsComposite && RunIds(plan.UnmatchedRuns.Single()) == "local-9,local-10,local-11,local-12",
+                "a partial download from one upstream media must retain a temporary group but must not clear the Season binding");
+        }
+
+        private static void MapsMultipleSpecialRunsWithoutChangingLocalSeasonMembership()
+        {
+            var direct = new[]
+            {
+                Mapping("local-1", "DandanID", "main", "main-1", "main-c1"),
+                Mapping("local-2", "DandanID", "main", "main-2", "main-c2"),
+                Mapping("local-5", "DandanID", "main", "main-5", "main-c5"),
+                Mapping("local-6", "DandanID", "main", "main-6", "main-c6"),
+                Mapping("local-8", "DandanID", "main", "main-8", "main-c8"),
+            };
+            Assert(CompositeSeasonPlanner.TryCreatePlan(LocalEpisodes(1, 8), direct, out var plan, out var error), error);
+            Assert(RunIds(plan.UnmatchedRuns[0]) == "local-3,local-4" && RunIds(plan.UnmatchedRuns[1]) == "local-7",
+                "separate holes must be retained as separate temporary groups in stable local order");
+            Assert(CompositeSeasonPlanner.TryApplySegment(plan,
+                Segment("local-3", "DandanID", "special-a", "a-1", new[] { Source("a-1", "a-c1", 1), Source("a-2", "a-c2", 2) }),
+                out plan, out var applied, out error), error);
+            Assert(applied == 2 && RunIds(plan.UnmatchedRuns.Single()) == "local-7",
+                "mapping one special group must not move or absorb another unmatched group");
+            Assert(CompositeSeasonPlanner.TryApplySegment(plan,
+                Segment("local-7", "DandanID", "special-b", "b-1", new[] { Source("b-1", "b-c1", 1) }),
+                out plan, out applied, out error), error);
+            Assert(applied == 1 && plan.UnmatchedRuns.Count == 0 && plan.IsComposite,
+                "multiple independently selected special groups must complete without changing local episode identities");
+        }
+
+        private static void SeparatesCanonicalMediaIdentityFromLookupToken()
+        {
+            var resolved = new ScraperMedia
+            {
+                // This is the canonical identity returned by the provider detail
+                // response, while the token below is what GetMedia accepts.
+                Id = "canonical-frieren-s2",
+                Episodes = new List<ScraperEpisode>
+                {
+                    new ScraperEpisode { Id = "source-e1", CommentId = "comment-e1", EpisodeNumber = 1 },
+                },
+            };
+            var source = CompositeSeasonMatchService.GetSource("DandanID", resolved, "lookup-token-s2");
+            Assert(source.MediaId == "canonical-frieren-s2" && source.MediaLookupId == "lookup-token-s2",
+                "canonical media identity and the provider lookup token must remain separate");
+
+            var sameCanonicalDifferentLookup = new CompositeSeasonSourceIdentity
+            {
+                ProviderId = "dandanid", MediaId = "CANONICAL-FRIEREN-S2", MediaLookupId = "retry-token-s2",
+            };
+            Assert(source.Equals(sameCanonicalDifferentLookup),
+                "composite classification must use provider plus canonical media identity, never a transient lookup token");
+
+            var direct = CompositeSeasonMatchService.CreateDirectMapping(
+                "local-1", "DandanID", resolved, "direct-episode-lookup-token");
+            Assert(direct != null && direct.Source.MediaId == "canonical-frieren-s2" &&
+                   direct.Source.MediaLookupId == "direct-episode-lookup-token" &&
+                   direct.SourceEpisodeId == "source-e1" && direct.CommentId == "comment-e1",
+                "a direct Episode ProviderId mapping must keep its exact lookup token while retaining canonical media ownership");
+        }
+
+        private static void RejectsOverlapsAndUnverifiedMappings()
+        {
+            var local = LocalEpisodes(1, 2);
+            Assert(!CompositeSeasonPlanner.TryCreatePlan(local, new[]
+            {
+                Mapping("local-1", "DandanID", "s1", "source-1", "comment-1"),
+                Mapping("local-1", "DandanID", "s1", "source-2", "comment-2"),
+            }, out _, out var error) && error.Contains("only be mapped once"),
+                "overlapping local mappings must be rejected");
+
+            Assert(!CompositeSeasonPlanner.TryCreatePlan(local, new[]
+            {
+                Mapping("local-1", "DandanID", "s1", "source-1", "comment-1"),
+                Mapping("local-2", "DandanID", "s1", "source-1", "comment-1"),
+            }, out _, out error) && error.Contains("source episode"),
+                "one source episode cannot silently serve two local episodes");
+
+            Assert(CompositeSeasonPlanner.TryCreatePlan(local, null, out var plan, out error), error);
+            Assert(!CompositeSeasonPlanner.TryApplySegment(plan,
+                Segment("local-1", "DandanID", "s1", "source-1", new[] { Source("source-1", string.Empty, 1) }),
+                out _, out _, out error) && error.Contains("CommentId"),
+                "unverified source episodes must never enter a download plan");
+        }
+
+        private static void IdentifiesCompositeSourcesByProviderAndMediaId()
+        {
+            var mappings = new[]
+            {
+                Mapping("local-1", "DandanID", "frieren-s1", "source-1", "comment-1"),
+                Mapping("local-2", "dandanid", "FRIEREN-S1", "source-2", "comment-2"),
+            };
+            Assert(CompositeSeasonPlanner.TryCreatePlan(LocalEpisodes(1, 2), mappings, out var plan, out var error), error);
+            Assert(!plan.IsComposite, "provider/media identity equality must be stable and case-insensitive");
+
+            mappings[1] = Mapping("local-2", "DandanID", "frieren-s2", "source-1", "comment-1");
+            Assert(CompositeSeasonPlanner.TryCreatePlan(LocalEpisodes(1, 2), mappings, out plan, out error), error);
+            Assert(plan.IsComposite, "different media IDs must classify a season as composite");
+        }
+
+        private static void SortsByStableLocalIdentityWithoutDependingOnDisplayNumbers()
+        {
+            var local = new[]
+            {
+                new CompositeSeasonLocalEpisode { ItemId = "episode-c", SortOrder = 3 },
+                new CompositeSeasonLocalEpisode { ItemId = "episode-a", EpisodeNumber = 1, SortOrder = 20 },
+                new CompositeSeasonLocalEpisode { ItemId = "episode-b", EpisodeNumber = 1, SortOrder = 10 },
+                new CompositeSeasonLocalEpisode { ItemId = "episode-d", SortOrder = 2 },
+            };
+            Assert(CompositeSeasonPlanner.TryCreatePlan(local, null, out var plan, out var error), error);
+            Assert(string.Join(",", plan.OrderedEpisodes.Select(episode => episode.ItemId)) == "episode-d,episode-c,episode-b,episode-a",
+                "duplicate and missing display numbers must retain stable ItemId-based episode identity");
+        }
+
+        private static void KeepsDirectEpisodeEvidenceFromFalselyCreatingCompositeSources()
+        {
+            var mappings = new[]
+            {
+                Mapping("local-1", "DandanID", "direct-episode-provider:DandanID", "direct-1", "comment-1"),
+                Mapping("local-2", "DandanID", "direct-episode-provider:DandanID", "direct-2", "comment-2"),
+            };
+            Assert(CompositeSeasonPlanner.TryCreatePlan(LocalEpisodes(1, 2), mappings, out var plan, out var error), error);
+            Assert(!plan.IsComposite,
+                "multiple exact Episode ProviderIds from one provider must not falsely classify a Season as composite");
+
+            var withSecondSeason = mappings.Concat(new[]
+            {
+                Mapping("local-3", "DandanID", "frieren-s2", "s2-1", "s2-comment-1"),
+            });
+            Assert(CompositeSeasonPlanner.TryCreatePlan(LocalEpisodes(1, 3), withSecondSeason, out plan, out error), error);
+            Assert(plan.IsComposite,
+                "direct Episode evidence plus a separately verified upstream Season must classify as composite");
+        }
+
+        private static List<CompositeSeasonLocalEpisode> LocalEpisodes(int first, int last) =>
+            Enumerable.Range(first, last - first + 1).Select(number => new CompositeSeasonLocalEpisode
+            {
+                ItemId = "local-" + number, EpisodeNumber = number, SortOrder = number,
+            }).ToList();
+
+        private static CompositeSeasonEpisodeMapping Mapping(string local, string provider, string media, string source, string comment) =>
+            new CompositeSeasonEpisodeMapping
+            {
+                LocalEpisodeItemId = local,
+                Source = new CompositeSeasonSourceIdentity { ProviderId = provider, MediaId = media },
+                SourceEpisodeId = source, CommentId = comment, Origin = "direct",
+            };
+
+        private static CompositeSeasonEpisodeMapping DirectDandanMapping(int localEpisodeNumber, string parentMediaId,
+            string episodeId) =>
+            new CompositeSeasonEpisodeMapping
+            {
+                LocalEpisodeItemId = "local-" + localEpisodeNumber,
+                Source = new CompositeSeasonSourceIdentity
+                {
+                    ProviderId = "DandanID",
+                    MediaId = parentMediaId,
+                    MediaLookupId = episodeId,
+                },
+                SourceEpisodeId = episodeId,
+                CommentId = "chat-" + episodeId,
+                SourceEpisodeNumber = localEpisodeNumber <= 28 ? localEpisodeNumber : localEpisodeNumber - 28,
+                Origin = "episode-provider-id",
+            };
+
+        private static CompositeSeasonSegmentRequest Segment(
+            string local, string provider, string media, string sourceStart,
+            IEnumerable<CompositeSeasonSourceEpisode> sources, int count = 0) =>
+            new CompositeSeasonSegmentRequest
+            {
+                LocalStartEpisodeItemId = local, RequestedEpisodeCount = count,
+                Source = new CompositeSeasonSourceIdentity { ProviderId = provider, MediaId = media },
+                SourceStartEpisodeId = sourceStart, SourceEpisodes = sources.ToList(),
+            };
+
+        private static CompositeSeasonSourceEpisode Source(string id, string comment, int number) =>
+            new CompositeSeasonSourceEpisode { EpisodeId = id, CommentId = comment, EpisodeNumber = number };
+
+        private static string RunIds(CompositeSeasonUnmatchedRun run) =>
+            string.Join(",", run.Episodes.Select(episode => episode.ItemId));
+
+        private static void Assert(bool condition, string message)
+        {
+            if (!condition) throw new InvalidOperationException(message);
+        }
+
+        private sealed class DirectEpisodeFakeScraper : AbstractScraper
+        {
+            private readonly string _providerId;
+            private readonly ScraperEpisode _episode;
+
+            public DirectEpisodeFakeScraper(string providerId, ScraperEpisode episode) : base(null)
+            {
+                _providerId = providerId;
+                _episode = episode;
+            }
+
+            public int MediaCalls { get; private set; }
+            public int MediaEpisodeCalls { get; private set; }
+            public override string Name => _providerId;
+            public override string ProviderName => _providerId;
+            public override string ProviderId => _providerId;
+            public override Task<List<ScraperSearchInfo>> Search(BaseItem item) =>
+                Task.FromResult(new List<ScraperSearchInfo>());
+            public override Task<string> SearchMediaId(BaseItem item) => Task.FromResult(string.Empty);
+            public override Task<List<ScraperSearchInfo>> SearchForApi(string keyword) =>
+                Task.FromResult(new List<ScraperSearchInfo>());
+            public override Task<ScraperMedia> GetMedia(BaseItem item, string id)
+            {
+                MediaCalls++;
+                return Task.FromResult<ScraperMedia>(null);
+            }
+            public override Task<ScraperEpisode> GetMediaEpisode(BaseItem item, string id)
+            {
+                MediaEpisodeCalls++;
+                return Task.FromResult(_episode);
+            }
+            public override Task<ScraperDanmaku> GetDanmuContent(BaseItem item, string commentId) =>
+                Task.FromResult<ScraperDanmaku>(null);
+        }
+    }
+}

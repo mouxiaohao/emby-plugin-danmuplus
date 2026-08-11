@@ -205,7 +205,7 @@ vm.runInContext(source, context, { filename: scriptPath });
 const hooks = context.window.__embyDanmuSmartMatchTest;
 
 async function main() {
-    assert((source.match(/__embyDanmuSmartMenuV15/g) || []).length === 1,
+    assert((source.match(/__embyDanmuSmartMenuV17/g) || []).length === 1,
         "the frontend installation flag should be bumped exactly once");
     assert(!/\bScore\b|综合评分|评分：/.test(source),
         "the frontend must not calculate or display candidate scores");
@@ -275,6 +275,92 @@ async function main() {
         "normalization should trim, case-normalize, and normalize separators");
     assert(!hooks.hasBackendMatch({ MatchOrigin: "provider-id", Status: "ambiguous" }),
         "an unresolved source-episode choice must not be displayed as a successful match");
+
+    const compositeSeason = {
+        SeriesId: "series", SeasonId: "season-composite", SeasonNumber: 1,
+        SeasonName: "Composite", EpisodeCount: 5,
+        CompositePlan: {
+            OrderedEpisodes: [1, 2, 3, 4, 5].map(number => ({
+                ItemId: "episode-" + number, EpisodeNumber: number, SortOrder: number
+            })),
+            Mappings: [1, 2].map(number => ({
+                LocalEpisodeItemId: "episode-" + number,
+                Source: { ProviderId: "Dandan", MediaId: "frieren-s1" },
+                SourceEpisodeId: "source-" + number, CommentId: "server-only-" + number,
+                SourceEpisodeNumber: number, Origin: "provider-id"
+            })),
+            UnmatchedRuns: [{ Episodes: [3, 4, 5].map(number => ({
+                ItemId: "episode-" + number, EpisodeNumber: number, SortOrder: number
+            })) }]
+        }
+    };
+    assert(hooks.hasCompositePlan(compositeSeason),
+        "a server composite plan must activate the virtual-season UI");
+    const compositeSelections = {};
+    compositeSelections.__compositeSelections = {};
+    compositeSelections.__compositeSelections["series::season-composite::1::::Composite"] = [{
+        LocalStartEpisodeItemId: "episode-3", RequestedEpisodeCount: 2,
+        Source: { ProviderId: "Dandan", MediaId: "frieren-s2" },
+        SourceStartEpisodeNumber: 1, Origin: "manual"
+    }];
+    const virtualGroups = hooks.compositeVirtualGroups(compositeSeason, compositeSelections);
+    assert(virtualGroups.map(group => group.kind).join(",") === "mapped,manual,unmatched" &&
+        virtualGroups[2].episodes.length === 1 && virtualGroups[2].episodes[0].ItemId === "episode-5",
+        "a manual temporary season must consume only its chosen range and leave the next unmatched run visible");
+    assert(hooks.compositeHasDownloadableMappings(compositeSeason, compositeSelections),
+        "exact mappings or a manual virtual season must permit downloading the confirmed subset");
+    const compactSelections = hooks.compositeRequestSelections(compositeSelections, compositeSeason);
+    assert(compactSelections.length === 2 && compactSelections[0].CandidateId === "frieren-s1" &&
+        compactSelections[0].LocalStartEpisodeItemId === "episode-1" && compactSelections[0].RequestedEpisodeCount === 2 &&
+        compactSelections[1].CandidateId === "frieren-s2" && compactSelections[1].SourceStartEpisodeNumber === 1 &&
+        JSON.stringify(compactSelections).indexOf("server-only") < 0,
+        "the browser must resubmit the verified S1 base group together with manual S2 intent and never expose CommentId values");
+    const directSeason = {
+        SeriesId: compositeSeason.SeriesId, SeasonId: compositeSeason.SeasonId,
+        SeasonNumber: compositeSeason.SeasonNumber, SeasonName: compositeSeason.SeasonName,
+        CompositePlan: {
+            OrderedEpisodes: compositeSeason.CompositePlan.OrderedEpisodes,
+            Mappings: compositeSeason.CompositePlan.Mappings.concat([{
+                LocalEpisodeItemId: "episode-5",
+                Source: { ProviderId: "Dandan", MediaId: "direct-episode" },
+                SourceEpisodeId: "direct-source", CommentId: "direct-server-only",
+                SourceEpisodeNumber: 5, Origin: "episode-provider-id"
+            }]),
+            UnmatchedRuns: [{ Episodes: compositeSeason.CompositePlan.UnmatchedRuns[0].Episodes.slice(0, 2) }]
+        }
+    };
+    const directCompactSelections = hooks.compositeRequestSelections(compositeSelections, directSeason);
+    assert(directCompactSelections.length === 2 &&
+        directCompactSelections.map(selection => selection.CandidateId).join(",") === "frieren-s1,frieren-s2" &&
+        JSON.stringify(directCompactSelections).indexOf("direct-episode") < 0 &&
+        JSON.stringify(directCompactSelections).indexOf("CommentId") < 0,
+        "direct Episode provider-id mappings must be rebuilt by the server and never submitted by the browser");
+    const staleSelections = {};
+    staleSelections.__compositeSelections = {};
+    staleSelections.__compositeSelections["series::season-composite::1::::Composite"] = [{
+        LocalStartEpisodeItemId: "episode-1", RequestedEpisodeCount: 2,
+        Source: { ProviderId: "Dandan", MediaId: "obsolete" }, SourceStartEpisodeNumber: 1
+    }];
+    assert(hooks.compositeVirtualGroups(compositeSeason, staleSelections).map(group => group.kind).join(",") === "mapped,unmatched" &&
+        hooks.compositeRequestSelections(staleSelections, compositeSeason).length === 1 &&
+        hooks.compositeRequestSelections(staleSelections, compositeSeason)[0].CandidateId === "frieren-s1",
+        "a refreshed server plan must hide and omit stale manual choices that now overlap exact mappings");
+    assert(hooks.removeCompositeSelection(compositeSelections, compositeSeason, "episode-3") &&
+        hooks.compositeVirtualGroups(compositeSeason, compositeSelections).map(group => group.kind).join(",") === "mapped,unmatched" &&
+        !hooks.removeCompositeSelection(compositeSelections, compositeSeason, "episode-3"),
+        "a virtual season can be removed and the original unmatched run is restored for re-match");
+    const groupOnlySeason = {
+        SeriesId: "series", SeasonId: "group-only", SeasonNumber: 2, SeasonName: "Group only",
+        RequiresCompositeMapping: true,
+        CompositeGroups: [{ IsTemporary: false, Site: "Dandan", CandidateId: "s1", Episodes: [{ ItemId: "a", EpisodeNumber: 1 }] },
+            { IsTemporary: true, Episodes: [{ ItemId: "b", EpisodeNumber: 2 }] }]
+    };
+    assert(hooks.hasCompositePlan(groupOnlySeason) &&
+        hooks.compositeVirtualGroups(groupOnlySeason, {}).map(group => group.kind).join(",") === "mapped,unmatched" &&
+        hooks.compositeHasDownloadableMappings(groupOnlySeason, {}) &&
+        hooks.compositeRequestSelections({}, groupOnlySeason).length === 1 &&
+        hooks.compositeRequestSelections({}, groupOnlySeason)[0].CandidateId === "s1",
+        "the UI must also accept the compact CompositeGroups preview contract during controller rollout");
 
     const closableDialog = hooks.openDialog("closable");
     await closableDialog.overlay.dispatch("click");

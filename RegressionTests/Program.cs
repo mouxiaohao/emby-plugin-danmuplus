@@ -30,8 +30,30 @@ namespace Emby.Plugin.Danmu.RegressionTests
 {
     internal static class Program
     {
-        private static int Main()
+        private static int Main(string[] args)
         {
+            if (args != null && args.Contains("--composite-season-state", StringComparer.Ordinal))
+            {
+                CompositeSeasonStateTests.Run();
+                Console.WriteLine("Composite season state regression checks passed.");
+                return 0;
+            }
+
+            if (args != null && args.Contains("--composite-season-planner", StringComparer.Ordinal))
+            {
+                CompositeSeasonPlannerTests.Run();
+                Console.WriteLine("Composite season planner regression checks passed.");
+                return 0;
+            }
+
+            if (args != null && args.Contains("--composite-season", StringComparer.Ordinal))
+            {
+                CompositeSeasonStateTests.Run();
+                CompositeSeasonPlannerTests.Run();
+                Console.WriteLine("Composite season regression checks passed.");
+                return 0;
+            }
+
             MapsAnimeSeason();
             MapsLiveActionSeasonAndCleansTitle();
             UsesIdentifierFallbackOrder();
@@ -59,8 +81,10 @@ namespace Emby.Plugin.Danmu.RegressionTests
             AppliesDuplicateAndForceRefreshPolicy();
             PreservesSingleEpisodeIsolationAndLegacyTaskShape();
             PreservesProviderWriteGenerationOrdering();
+            CompositeSeasonStateTests.Run();
             ReplacesOnlyRegisteredOrdinaryProviderIds();
             MapsEpisodeSourceNumbersSafely();
+            CompositeSeasonPlannerTests.Run();
             DeserializesAndNormalizesBilibiliEpisodes();
             DeserializesBilibiliExactVideoDetails();
             DeserializesBilibiliExactSeasonDetails();
@@ -737,10 +761,10 @@ namespace Emby.Plugin.Danmu.RegressionTests
             var library = File.ReadAllText(Path.Combine(repositoryRoot, "LibraryManagerEventsHelper.cs"));
             Assert(controller.Contains("latest, authoritativeParentSeries, scrapers") &&
                    controller.Contains("authoritativeSeries).ConfigureAwait(false)") &&
-                   controller.Contains("item.ProviderIds = DanmuProviderIdResolver.GetItemLocalProviderIds(") &&
+                   controller.Contains("_libraryManagerEventsHelper.SaveProviderId(item, providerId, providerValue, true)") &&
                    library.Contains("currentItem ?? season, authoritativeSeries, scrapers") &&
                    library.Contains("updateItem.ProviderIds = DanmuProviderIdResolver.GetItemLocalProviderIds("),
-                "Season manual binding, automatic import, and metadata writes must all use item-local IDs");
+                "Season manual binding, automatic import, and metadata writes must use the guarded item-local persistence path");
         }
 
         private static void DiscoversCandidatesWithBoundedTitleClauses()
@@ -924,7 +948,7 @@ namespace Emby.Plugin.Danmu.RegressionTests
                    controller.Contains("if (request.Manual)") &&
                    controller.Contains("SaveManualBindingAsync(season"),
                 "tracked Season downloads must write each successful Episode and commit the Season only from accepted file success");
-            Assert(library.Contains("anyFilePersisted = true") &&
+            Assert(library.Contains("persisted = true") &&
                    library.Contains("SaveAutomaticSeasonProviderId(") &&
                    library.Contains("MarkStarted(GetProviderWriteKey(item, providerId), generation)") &&
                    library.Contains("_scraperManager.AllWithNoEnabled()") &&
@@ -938,7 +962,8 @@ namespace Emby.Plugin.Danmu.RegressionTests
             var repositoryRoot = Path.GetFullPath(Path.Combine(
                 AppContext.BaseDirectory, "..", "..", "..", ".."));
             var controller = File.ReadAllText(Path.Combine(
-                repositoryRoot, "Core", "Controllers", "DanmuController.cs"));
+                    repositoryRoot, "Core", "Controllers", "DanmuController.cs"))
+                .Replace("\r\n", "\n");
             var seriesStart = controller.IndexOf("else if (item is Series series)", StringComparison.Ordinal);
             var seriesEnd = controller.IndexOf("if (request.SeasonNumber.HasValue", seriesStart, StringComparison.Ordinal);
             var seriesPreview = controller.Substring(seriesStart, seriesEnd - seriesStart);
@@ -948,7 +973,7 @@ namespace Emby.Plugin.Danmu.RegressionTests
                    seriesPreview.Contains("Recursive = false") &&
                    !seriesPreview.Contains("DtoOptions"),
                 "Series match preview must enumerate direct, non-projected library Seasons with ProviderIds intact");
-            Assert(controller.Contains("item is Series,\n                    item as Series).ConfigureAwait(false)") &&
+            Assert(controller.Contains("item is Series,\n                    item as Series,") &&
                    controller.Contains("bool preserveProvidedSeason = false") &&
                    controller.Contains("Series explicitParentSeries = null") &&
                    controller.Contains("_libraryManager.GetItemById(parentSeries.InternalId)") &&
@@ -1136,9 +1161,11 @@ namespace Emby.Plugin.Danmu.RegressionTests
             var tencent = File.ReadAllText(Path.Combine(repositoryRoot, "Scraper", "Tencent", "Tencent.cs"));
             var youku = File.ReadAllText(Path.Combine(repositoryRoot, "Scraper", "Youku", "Youku.cs"));
 
-            Assert(dandan.Contains("Dandan's existing detail endpoint accepts Anime IDs") &&
-                   !dandan.Contains("return new ScraperEpisode() { Id = id, CommentId = id }"),
-                "Dandan Episode ProviderIds must fail closed when no exact episode detail endpoint exists");
+            Assert(dandan.Contains("DandanEpisodeId.TryGetAnimeId(id, out var animeId)") &&
+                   dandan.Contains("includeNonMainEpisodes: true") &&
+                   dandan.Contains("DandanEpisodeId.CreateVerifiedEpisode(id, anime?.Episodes)") &&
+                   !dandan.Contains("Dandan's existing detail endpoint accepts Anime IDs"),
+                "Dandan Episode ProviderIds must derive only a candidate Anime parent, then verify the complete EpisodeId from detail before becoming exact evidence");
             Assert(mgtv.Contains("GetVideoAsync(seasonId") &&
                    mgtv.Contains("string.Equals(x.VideoId, id") &&
                    tencent.Contains("GetVideoAsync(seasonId") &&
@@ -1991,7 +2018,7 @@ namespace Emby.Plugin.Danmu.RegressionTests
             public override Task<ScraperDanmaku> GetDanmuContent(BaseItem item, string commentId) => Task.FromResult<ScraperDanmaku>(null);
         }
 
-        private static void Assert(bool condition, string message)
+        internal static void Assert(bool condition, string message)
         {
             if (!condition)
             {
