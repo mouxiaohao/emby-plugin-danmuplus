@@ -15,11 +15,15 @@ $approvedFiles = [System.Collections.Generic.HashSet[string]]::new([System.Strin
     'Configuration/PluginConfiguration.cs',
     'Core/Controllers/DanmuController.cs',
     'Core/ProviderWriteGenerationTracker.cs',
+    'dist/Emby.Plugin.Danmu.dll',
+    'dist/emby-plugin-danmuplus-2.0.1-r5-source.zip',
+    'dist/emby-plugin-danmuplus-2.0.2r4-source.zip',
     'Emby.Plugin.Danmu.csproj',
     'Frontend/DanmuSmartMatch.CustomCssJS.js',
     'Frontend/DanmuSmartMatch.RegressionTests.js',
     'LibraryManagerEventsHelper.cs',
     'Model/DanmuMatchResult.cs',
+    'openspec/changes/add-official-dandan-cors-option/tasks.md',
     'README.md',
     'RegressionTests/Program.cs',
     'RegressionTests/VerifyR3ReleaseScope.ps1',
@@ -45,7 +49,8 @@ $approvedPrefixes = @(
     'artifacts/2.0.2r3/',
     'artifacts/2.0.2r4/',
     'openspec/changes/fix-anime-season-smart-match/',
-    'openspec/changes/extend-r4-alias-and-provider-id-policy/'
+    'openspec/changes/extend-r4-alias-and-provider-id-policy/',
+    'releases/v2.0.1-r5/'
 )
 
 function Test-ApprovedCandidatePath([string]$path) {
