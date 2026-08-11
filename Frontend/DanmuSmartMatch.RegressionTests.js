@@ -171,7 +171,7 @@ vm.runInContext(source, context, { filename: scriptPath });
 const hooks = context.window.__embyDanmuSmartMatchTest;
 
 async function main() {
-    assert((source.match(/__embyDanmuSmartMenuV12/g) || []).length === 1,
+    assert((source.match(/__embyDanmuSmartMenuV13/g) || []).length === 1,
         "the frontend installation flag should be bumped exactly once");
     assert(!/\bScore\b|综合评分|评分：/.test(source),
         "the frontend must not calculate or display candidate scores");

@@ -134,6 +134,11 @@ namespace Emby.Plugin.Danmu.Scraper.Dandan
 
             media.Id = id;
             media.ProviderId = this.ProviderId; // 设置 ProviderId
+            media.Title = anime.AnimeTitle ?? string.Empty;
+            media.Year = anime.Year;
+            media.Category = anime.TypeDescription ?? string.Empty;
+            media.EpisodeCount = anime.EpisodeCount;
+
             if (isMovieItemType && anime.Episodes != null && anime.Episodes.Count > 0)
             {
                 media.CommentId = $"{anime.Episodes[0].EpisodeId}";
@@ -187,14 +192,10 @@ namespace Emby.Plugin.Danmu.Scraper.Dandan
             }
             else
             {
-                // id是episodeId
-                var epId = id.ToLong();
-                if (epId <= 0)
-                {
-                    return null;
-                }
-
-                return new ScraperEpisode() { Id = id, CommentId = id };
+                // Dandan's existing detail endpoint accepts Anime IDs, not
+                // Episode IDs. Do not turn an unverified local ID into an
+                // exact-match success; the resolver will continue fallback.
+                return null;
             }
         }
 

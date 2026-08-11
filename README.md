@@ -1,6 +1,6 @@
 # emby-plugin-danmuplus
 
-Emby 弹幕插件增强版，参考 [fengymi/emby-plugin-danmu](https://github.com/fengymi/emby-plugin-danmu) 开发。项目从原移植版继续演进，当前版本为 **2.0.2r1**。
+Emby 弹幕插件增强版，参考 [fengymi/emby-plugin-danmu](https://github.com/fengymi/emby-plugin-danmu) 开发。项目从原移植版继续演进，当前版本为 **2.0.2r2**。
 
 已验证的服务器环境：Synology 套件版 Emby **4.9.3.0**。其他 Emby 版本可能需要调整配置页或前端菜单兼容代码。
 
@@ -12,7 +12,15 @@ Emby 弹幕插件增强版，参考 [fengymi/emby-plugin-danmu](https://github.c
 - 腾讯分段重试、连接重置重试，以及已完成分段合并为部分弹幕 XML。
 - 七天 XML 重复跳过；支持强制刷新、后台队列、强制停止、单集重试和流式进度。
 - STRM、115 挂载等普通 Emby 媒体库场景兼容。
-- 配置页面版本显示为 `2.0.2r1`。
+- 配置页面版本显示为 `2.0.2r2`。
+
+## 2.0.2r2 补丁
+
+- 本地外部标识符（provider-id）命中时，后端只使用该站点的同一精确 ID 详情结果展示候选；不会为了补全展示字段执行关键词搜索、评分或跨站候选竞争。
+- 标题、年份、分类和声明集数仅在网站详情明确返回时显示。详情未提供的字段会保持“未知”，不会用本地 Emby 元数据、标题猜测或类型规则伪造网站信息。
+- 芒果 TV、腾讯视频和优酷的当前精确详情路径可靠提供可用剧集列表时，集数采用实际可用列表数；其余详情字段仍按网站是否明确提供决定是否显示。
+- 搜索、评分和“重新智能匹配”仍使用原有的启用站点搜索工作流，与 provider-id 的精确详情展示严格区分。
+- CustomCssJS 安装标记升级为 `__embyDanmuSmartMenuV13`；升级后请覆盖旧条目并刷新 Emby 网页端。
 
 ## 2.0.2r1 补丁
 

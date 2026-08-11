@@ -360,6 +360,38 @@ namespace Emby.Plugin.Danmu.Scraper.Bilibili
         }
 
         /// <summary>
+        /// Gets presentation metadata for one exact PGC season. Episode mapping
+        /// remains owned by GetSeasonAsync's normalized ep/list response.
+        /// </summary>
+        public async Task<VideoSeasonDetail> GetSeasonDetailAsync(long seasonId, CancellationToken cancellationToken)
+        {
+            if (seasonId <= 0)
+            {
+                return null;
+            }
+
+            var cacheKey = $"season_detail_{seasonId}";
+            var expiredOption = new MemoryCacheEntryOptions
+                { AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(30) };
+            VideoSeasonDetail seasonDetail;
+            if (this._memoryCache.TryGetValue<VideoSeasonDetail>(cacheKey, out seasonDetail))
+            {
+                return seasonDetail;
+            }
+
+            await this.EnsureSessionCookie(cancellationToken).ConfigureAwait(false);
+            var url = $"https://api.bilibili.com/pgc/view/web/season?season_id={seasonId}";
+            var response = await _httpClient.GetAsync(url, cancellationToken).ConfigureAwait(false);
+            response.EnsureSuccessStatusCode();
+            var responseString = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+            var result = JsonSerializer.Deserialize<ApiResult<VideoSeasonDetail>>(responseString, _jsonOptions);
+
+            seasonDetail = result?.Code == 0 ? result.Result : null;
+            this._memoryCache.Set<VideoSeasonDetail>(cacheKey, seasonDetail, expiredOption);
+            return seasonDetail;
+        }
+
+        /// <summary>
         /// Get Bilibili episode details by episode ID.
         /// </summary>
         /// <param name="epId">The Bilibili episode ID.</param>
@@ -564,6 +596,43 @@ namespace Emby.Plugin.Danmu.Scraper.Bilibili
   
             // Ensure correct type for caching null
             this._memoryCache.Set<Entity.Video?>(cacheKey, null, expiredOption); // Cache null result
+            return null;
+        }
+
+        /// <summary>
+        /// Gets the official video-detail object for one exact AID. This is
+        /// deliberately an identifier lookup, not a keyword search.
+        /// </summary>
+        public async Task<Entity.Video> GetVideoByAidAsync(long aid, CancellationToken cancellationToken)
+        {
+            if (aid <= 0)
+            {
+                return null;
+            }
+
+            var cacheKey = $"video_aid_{aid}";
+            var expiredOption = new MemoryCacheEntryOptions()
+                { AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(30) };
+            Entity.Video videoData;
+            if (this._memoryCache.TryGetValue<Entity.Video>(cacheKey, out videoData))
+            {
+                return videoData;
+            }
+
+            await this.EnsureSessionCookie(cancellationToken).ConfigureAwait(false);
+            var url = $"https://api.bilibili.com/x/web-interface/view?aid={aid}";
+            var response = await _httpClient.GetAsync(url, cancellationToken).ConfigureAwait(false);
+            response.EnsureSuccessStatusCode();
+
+            var responseString = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+            var result = System.Text.Json.JsonSerializer.Deserialize<ApiResult<Entity.Video>>(responseString, _jsonOptions);
+            if (result != null && result.Code == 0 && result.Data != null)
+            {
+                this._memoryCache.Set<Entity.Video>(cacheKey, result.Data, expiredOption);
+                return result.Data;
+            }
+
+            this._memoryCache.Set<Entity.Video>(cacheKey, null, expiredOption);
             return null;
         }
 

@@ -283,6 +283,10 @@ namespace Emby.Plugin.Danmu.Scraper.Iqiyi
             var media = new ScraperMedia();
             media.Id = id; // 使用url编码后的id (LinkId)
             media.ProviderId = this.ProviderId;
+            media.Title = video.VideoName ?? string.Empty;
+            media.Category = video.channelName ?? string.Empty;
+            media.EpisodeCount = video.VideoCount > 0 ? video.VideoCount : (int?)null;
+
             if (isMovieItemType && video.Epsodelist != null && video.Epsodelist.Count > 0)
             {
                 var tvId = video.Epsodelist[0].TvId;

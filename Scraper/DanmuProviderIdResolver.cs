@@ -89,12 +89,13 @@ namespace Emby.Plugin.Danmu.Scraper
                             Site = scraper.ProviderId,
                             SiteName = scraper.ProviderName,
                             SourceOrder = sourceOrder,
-                            Name = scope.Name ?? "已解析的 ProviderId",
+                            Name = "标题未知",
                             Score = 1,
                             MatchOrigin = decision.MatchOrigin,
                             DecisionReason = decision.DecisionReason,
                             Reason = "使用已保存的 ProviderId",
                         };
+                        ApplyResolvedUpstreamMetadata(decision.Candidate, media);
                         return decision;
                     }
                     catch (Exception ex)
@@ -141,6 +142,8 @@ namespace Emby.Plugin.Danmu.Scraper
             {
                 Id = providerId,
                 ProviderId = scraper.ProviderId,
+                Title = sourceEpisode.Title ?? string.Empty,
+                EpisodeCount = 1,
                 Episodes = new List<ScraperEpisode>
                 {
                     new ScraperEpisode
@@ -164,7 +167,27 @@ namespace Emby.Plugin.Danmu.Scraper
             return media != null &&
                    (!string.IsNullOrWhiteSpace(media.Id) ||
                     !string.IsNullOrWhiteSpace(media.CommentId) ||
-                    (media.Episodes != null && media.Episodes.Count > 0));
+                   (media.Episodes != null && media.Episodes.Count > 0));
+        }
+
+        private static void ApplyResolvedUpstreamMetadata(DanmuMatchCandidate candidate, ScraperMedia media)
+        {
+            if (candidate == null || media == null)
+            {
+                return;
+            }
+
+            var usableEpisodeCount = (media.Episodes ?? new List<ScraperEpisode>())
+                .Count(x => x != null && !string.IsNullOrWhiteSpace(x.CommentId));
+            var declaredCount = media.EpisodeCount.GetValueOrDefault();
+
+            // Never label a local Emby scope name as the upstream title.
+            candidate.Name = !string.IsNullOrWhiteSpace(media.Title)
+                ? media.Title
+                : "标题未知";
+            candidate.Category = media.Category ?? string.Empty;
+            candidate.Year = media.Year;
+            candidate.EpisodeSize = declaredCount > 0 ? declaredCount : usableEpisodeCount;
         }
 
         private static string GetScopeType(BaseItem scope)

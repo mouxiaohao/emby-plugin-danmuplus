@@ -155,6 +155,12 @@ namespace Emby.Plugin.Danmu.Scraper.Youku
             }
 
             // 优酷的id包括非法的=符号，会导致jellyfin自动删除，这里做下encode
+            if (media.Episodes.Count > 0)
+            {
+                // Exact-ID details reliably establish only this usable episode list.
+                media.EpisodeCount = media.Episodes.Count;
+            }
+
             if (isMovieItemType)
             {
                 media.Id = HttpUtility.UrlEncode(media.Episodes.Count > 0 ? $"{media.Episodes[0].Id}" : "");
@@ -176,7 +182,22 @@ namespace Emby.Plugin.Danmu.Scraper.Youku
             }
 
             id = HttpUtility.UrlDecode(id);
-            return new ScraperEpisode() { Id = id, CommentId = id };
+            var sourceEpisode = await _api.GetEpisodeAsync(id, CancellationToken.None).ConfigureAwait(false);
+            var expectedId = id.Replace("=", "_");
+            if (sourceEpisode == null || string.IsNullOrWhiteSpace(sourceEpisode.ID) ||
+                !string.Equals(sourceEpisode.ID, expectedId, StringComparison.OrdinalIgnoreCase))
+            {
+                return null;
+            }
+
+            return new ScraperEpisode()
+            {
+                Id = sourceEpisode.ID,
+                CommentId = sourceEpisode.ID,
+                Title = sourceEpisode.Title,
+                EpisodeNumber = EpisodeContentClassifier.TryGetPositiveNumber(sourceEpisode.Seq) ??
+                    EpisodeContentClassifier.TryGetEpisodeNumber(sourceEpisode.Title),
+            };
         }
 
         public override async Task<ScraperDanmaku?> GetDanmuContent(BaseItem item, string commentId)

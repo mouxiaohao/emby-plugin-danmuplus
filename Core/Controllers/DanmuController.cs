@@ -470,7 +470,17 @@ namespace Emby.Plugin.Danmu.Core.Controllers
             }
             else if (item is Series series)
             {
-                seasons.AddRange(series.GetSeasons(null, new DtoOptions(false))
+                // The Series helper returns lightweight Season projections that
+                // can omit ProviderIds. Query the library directly without a
+                // DTO projection for provider-ID
+                // precedence, while retaining the existing filter/order/UI
+                // context selection below.
+                seasons.AddRange(_libraryManager.GetItemList(new InternalItemsQuery
+                {
+                    ParentIds = new[] { series.InternalId },
+                    IncludeItemTypes = new[] { "Season" },
+                    Recursive = false,
+                })
                     .OfType<Season>()
                     .Where(x => !x.IndexNumber.HasValue || x.IndexNumber.Value != 0)
                     .OrderBy(x => x.IndexNumber ?? int.MaxValue));
@@ -498,7 +508,8 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 result.Seasons.Add(await GetSeasonMatchPreview(
                     currentSeason,
                     request.Keyword,
-                    rematch).ConfigureAwait(false));
+                    rematch,
+                    item is Series).ConfigureAwait(false));
             }
 
             if (item is Season && result.Seasons.Count == 1)
@@ -747,9 +758,16 @@ namespace Emby.Plugin.Danmu.Core.Controllers
         private async Task<DanmuSeasonMatchResult> GetSeasonMatchPreview(
             Season season,
             string keywordOverride,
-            bool forceSearch)
+            bool forceSearch,
+            bool preserveProvidedSeason = false)
         {
-            var latest = _libraryManager.GetItemById(season.Id) as Season ?? season;
+            // Series preview supplies an authoritative non-projected Season
+            // object. Do not replace it with the Guid lookup projection, which
+            // may discard ProviderIds. Direct Season/Episode behavior remains
+            // unchanged.
+            var latest = preserveProvidedSeason
+                ? season
+                : _libraryManager.GetItemById(season.Id) as Season ?? season;
             var parent = latest.GetParent();
             var seriesName = parent?.Name ?? string.Empty;
             var seasonName = latest.Name ?? seriesName;
