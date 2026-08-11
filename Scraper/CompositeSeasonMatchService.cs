@@ -80,6 +80,9 @@ namespace Emby.Plugin.Danmu.Scraper
             {
                 return false;
             }
+            plan.EffectiveExcludedLocalEpisodeItemIds = currentPlan.EffectiveExcludedLocalEpisodeItemIds
+                .ToList();
+            plan.CompositeSafetyRequired = currentPlan.CompositeSafetyRequired || plan.IsComposite;
 
             var consumedIds = new HashSet<string>(plan.Mappings
                 .Where(mapping => mapping.Source != null && mapping.Source.Equals(source))
@@ -209,33 +212,13 @@ namespace Emby.Plugin.Danmu.Scraper
             var names = (localEpisodes ?? Enumerable.Empty<Episode>())
                 .Where(x => x != null)
                 .ToDictionary(x => x.Id.ToString(), x => x.Name ?? string.Empty, StringComparer.OrdinalIgnoreCase);
+            var episodeNumbers = (plan?.OrderedEpisodes ?? new List<CompositeSeasonLocalEpisode>())
+                .ToDictionary(x => x.ItemId, x => x.EpisodeNumber, StringComparer.OrdinalIgnoreCase);
             var groups = new List<DanmuCompositeSeasonGroup>();
             var groupIndex = 0;
-            foreach (var group in (plan?.Mappings ?? new List<CompositeSeasonEpisodeMapping>())
-                         .GroupBy(x => (x.Source.ProviderId ?? string.Empty) + "\u001f" +
-                                       (x.Source.MediaId ?? string.Empty) + "\u001f" +
-                                       (x.Origin ?? string.Empty), StringComparer.OrdinalIgnoreCase))
+            foreach (var run in CompositeSeasonPlanner.GetEditableMappedRuns(plan))
             {
-                groups.Add(new DanmuCompositeSeasonGroup
-                {
-                    GroupId = "mapped-" + (++groupIndex),
-                    IsTemporary = false,
-                    Site = group.First().Source.ProviderId ?? string.Empty,
-                    CandidateId = !string.IsNullOrWhiteSpace(group.First().Source.MediaLookupId)
-                        ? group.First().Source.MediaLookupId
-                        : group.First().Source.MediaId ?? string.Empty,
-                    SourceStartEpisodeId = group.First().SourceEpisodeId ?? string.Empty,
-                    SourceStartEpisodeNumber = group.First().SourceEpisodeNumber,
-                    MatchOrigin = group.First().Origin ?? string.Empty,
-                    Episodes = group.Select(mapping => new DanmuCompositeEpisode
-                    {
-                        ItemId = mapping.LocalEpisodeItemId,
-                        EpisodeNumber = plan.OrderedEpisodes.FirstOrDefault(x =>
-                            string.Equals(x.ItemId, mapping.LocalEpisodeItemId, StringComparison.OrdinalIgnoreCase))?.EpisodeNumber,
-                        EpisodeName = names.TryGetValue(mapping.LocalEpisodeItemId, out var name) ? name : string.Empty,
-                        SourceEpisodeNumber = mapping.SourceEpisodeNumber,
-                    }).ToList(),
-                });
+                AddMappedGroup(groups, run.Mappings, names, episodeNumbers, ref groupIndex);
             }
 
             foreach (var run in plan?.UnmatchedRuns ?? new List<CompositeSeasonUnmatchedRun>())
@@ -254,6 +237,39 @@ namespace Emby.Plugin.Danmu.Scraper
             }
 
             return groups;
+        }
+
+        private static void AddMappedGroup(
+            ICollection<DanmuCompositeSeasonGroup> groups,
+            IList<CompositeSeasonEpisodeMapping> mappings,
+            IReadOnlyDictionary<string, string> names,
+            IReadOnlyDictionary<string, int?> episodeNumbers,
+            ref int groupIndex)
+        {
+            if (mappings == null || mappings.Count == 0) return;
+            var first = mappings[0];
+            var origins = mappings.Select(x => x.Origin ?? string.Empty)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            groups.Add(new DanmuCompositeSeasonGroup
+            {
+                GroupId = "mapped-" + (++groupIndex),
+                IsTemporary = false,
+                Site = first.Source.ProviderId ?? string.Empty,
+                CandidateId = !string.IsNullOrWhiteSpace(first.Source.MediaLookupId)
+                    ? first.Source.MediaLookupId
+                    : first.Source.MediaId ?? string.Empty,
+                SourceStartEpisodeId = first.SourceEpisodeId ?? string.Empty,
+                SourceStartEpisodeNumber = first.SourceEpisodeNumber,
+                MatchOrigin = origins.Count == 1 ? origins[0] : "mixed",
+                Episodes = mappings.Select(mapping => new DanmuCompositeEpisode
+                {
+                    ItemId = mapping.LocalEpisodeItemId,
+                    EpisodeNumber = episodeNumbers.TryGetValue(mapping.LocalEpisodeItemId, out var number) ? number : null,
+                    EpisodeName = names.TryGetValue(mapping.LocalEpisodeItemId, out var name) ? name : string.Empty,
+                    SourceEpisodeNumber = mapping.SourceEpisodeNumber,
+                }).ToList(),
+            });
         }
     }
 }

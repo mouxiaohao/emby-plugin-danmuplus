@@ -659,7 +659,14 @@ namespace Emby.Plugin.Danmu
                                 {
                                     var movieSearch = await DanmuMatchSearchEngine.SearchMovieAsync(
                                         enabledScrapers, currentItem, null, _logger).ConfigureAwait(false);
-                                    selectedMovieCandidate = DanmuMatchScorer.SelectAutoCandidate(movieSearch.Candidates);
+                                    if (!IsCompleteAutomaticSearch(movieSearch))
+                                    {
+                                        LogIncompleteAutomaticSearch(currentItem.Name, "movie", movieSearch);
+                                    }
+                                    else
+                                    {
+                                        selectedMovieCandidate = DanmuMatchScorer.SelectAutoCandidate(movieSearch.Candidates);
+                                    }
                                 }
                                 movieMatchSearched = true;
                             }
@@ -1068,6 +1075,12 @@ namespace Emby.Plugin.Danmu
                                 null,
                                 _logger).ConfigureAwait(false);
 
+                            if (!IsCompleteAutomaticSearch(search))
+                            {
+                                LogIncompleteAutomaticSearch(originalSeasonName, "season", search);
+                                continue;
+                            }
+
                             selectedCandidate = DanmuMatchScorer.SelectAutoCandidate(search.Candidates);
                             if (selectedCandidate == null)
                             {
@@ -1344,7 +1357,7 @@ namespace Emby.Plugin.Danmu
                 catch (Exception ex) { _logger.LogError(ex, "[CompositeSeason] Auto direct mapping failed: {0}", episode.Name); }
             }
             if (!CompositeSeasonPlanner.TryCreatePlan(CompositeSeasonMatchService.GetLocalEpisodes(episodes), direct,
-                    out var plan, out var error))
+                    null, null, IsCompositeSeason(season), out var plan, out var error))
             {
                 _logger.Error("[CompositeSeason] Auto plan rejected: season={0}, error={1}", season.Name, error);
                 return false;
@@ -1374,6 +1387,15 @@ namespace Emby.Plugin.Danmu
                 var run = plan.UnmatchedRuns[0];
                 var search = await DanmuMatchSearchEngine.SearchSeasonAsync(_scraperManager.All(), seriesTitle,
                     seriesTitle, season.ProductionYear, run.Episodes.Count, seriesTitle, _logger).ConfigureAwait(false);
+                if (!IsCompleteAutomaticSearch(search))
+                {
+                    LogIncompleteAutomaticSearch(season.Name, "residual-range", search);
+                    // Plan construction precedes every file write.  Aborting
+                    // here therefore leaves the residual run unmatched and
+                    // prevents a partial round from binding or downloading
+                    // even mappings that were already known.
+                    return false;
+                }
                 // Exclusion happens before scoring/uniqueness selection, so
                 // every exhausted source (not only the primary) cannot mask a
                 // unique supplemental candidate on a later temporary group.
@@ -1406,11 +1428,11 @@ namespace Emby.Plugin.Danmu
             if (plan.Mappings.Count == 0) return false;
             var byId = episodes.ToDictionary(x => x.Id.ToString(), StringComparer.OrdinalIgnoreCase);
             var sources = plan.Mappings.Select(x => x.Source).Distinct().ToList();
-            var canSaveSeason = !plan.IsComposite && sources.Count == 1 &&
+            var canSaveSeason = !plan.CompositeSafetyRequired && sources.Count == 1 &&
                 plan.Mappings.All(x => !string.Equals(x.Origin, "episode-provider-id", StringComparison.OrdinalIgnoreCase));
             var savedSeason = false;
             var persisted = false;
-            var lease = BeginCompositeSeasonWrite(season, plan.IsComposite);
+            var lease = BeginCompositeSeasonWrite(season, plan.CompositeSafetyRequired);
             try
             {
                 foreach (var mapping in plan.Mappings)
@@ -1436,7 +1458,7 @@ namespace Emby.Plugin.Danmu
                         if (!outcome.FilePersisted) continue;
                         persisted = true;
                         await PersistDownloadProviderIdAsync(episode, outcome).ConfigureAwait(false);
-                        if (plan.IsComposite) await OnCompositeSeasonFilePersistedAsync(season, lease).ConfigureAwait(false);
+                        if (plan.CompositeSafetyRequired) await OnCompositeSeasonFilePersistedAsync(season, lease).ConfigureAwait(false);
                         else if (canSaveSeason && !savedSeason)
                         {
                             await SaveAutomaticSeasonProviderId(season, sources[0].ProviderId,
@@ -1450,6 +1472,29 @@ namespace Emby.Plugin.Danmu
             }
             finally { CompleteCompositeSeasonWrite(lease); }
             return persisted;
+        }
+
+        internal static bool IsCompleteAutomaticSearch(DanmuMatchSearchResult search)
+        {
+            return search != null && search.IsComplete;
+        }
+
+        private void LogIncompleteAutomaticSearch(
+            string seasonName,
+            string searchScope,
+            DanmuMatchSearchResult search)
+        {
+            var diagnostics = search?.CompletionDiagnostics ?? new List<DanmuSearchCompletionDiagnostic>();
+            var summary = string.Join(", ", diagnostics
+                .Where(item => item != null &&
+                    !string.Equals(item.Status, "completed", StringComparison.OrdinalIgnoreCase))
+                .Select(item => (item.Provider ?? string.Empty) + ":" + (item.Status ?? string.Empty))
+                .Distinct(StringComparer.OrdinalIgnoreCase));
+            _logger.LogInformation(
+                "[SmartMatch] Automatic {0} search incomplete; no binding or download will run. season={1}, diagnostics={2}",
+                searchScope,
+                seasonName,
+                summary);
         }
 
         /// <summary>

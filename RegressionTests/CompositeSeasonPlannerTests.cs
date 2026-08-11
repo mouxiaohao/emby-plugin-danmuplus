@@ -37,6 +37,15 @@ namespace Emby.Plugin.Danmu.RegressionTests
             IdentifiesCompositeSourcesByProviderAndMediaId();
             KeepsDirectEpisodeEvidenceFromFalselyCreatingCompositeSources();
             SortsByStableLocalIdentityWithoutDependingOnDisplayNumbers();
+            ValidatesAndAppliesAuthoritativeExclusionsBeforeDirectEvidence();
+            SplitsEditableRunsAndRestoresOnlyTheRequestedRange();
+            RetainsCompositeSafetyForSubsetAndZeroPersist();
+            RebuildsPreviewAndDownloadFromTheSameExclusionAwarePlan();
+            RejectsIncompleteAutomaticSeasonAndResidualSearches();
+            PreservesDirectMetadataAcrossRemoveReplacementAndRestore();
+            RetainsCompositeSafetyWhenReplacementCollapsesToOneSource();
+            RejectsForeignAndStaleTemporaryRangesWithoutMutatingThePlan();
+            VerifiesControllerParityMetadataAndDialogResetContracts();
         }
 
         private static void PreservesExplicitEvidenceAndBuildsRemainingRuns()
@@ -192,9 +201,11 @@ namespace Emby.Plugin.Danmu.RegressionTests
                 AppContext.BaseDirectory, "..", "..", "..", ".."));
             var controller = File.ReadAllText(Path.Combine(
                 repositoryRoot, "Core", "Controllers", "DanmuController.cs")).Replace("\r\n", "\n");
-            var markedBranch = controller.IndexOf("if (compositeMarked)\n", StringComparison.Ordinal);
-            var forceSearch = controller.IndexOf("var effectiveForceSearch = forceSearch || compositeMarked;", StringComparison.Ordinal);
-            var directPlan = controller.IndexOf("BuildCompositePlanAsync(latest, null, true)", StringComparison.Ordinal);
+            var markedBranch = controller.IndexOf("if (compositeMarked && !metadataOnly)\n", StringComparison.Ordinal);
+            var forceSearch = controller.IndexOf(
+                "var effectiveForceSearch = forceSearch || compositeMarked || metadataOnly;",
+                StringComparison.Ordinal);
+            var directPlan = controller.IndexOf("BuildCompositePlanAsync(latest, null, true", StringComparison.Ordinal);
             Assert(markedBranch >= 0 && directPlan > markedBranch && forceSearch > directPlan,
                 "a marked Season preview must rebuild direct Episode evidence before it begins fresh Season searching");
             var directBlock = controller.Substring(markedBranch, forceSearch - markedBranch);
@@ -458,6 +469,372 @@ namespace Emby.Plugin.Danmu.RegressionTests
             Assert(CompositeSeasonPlanner.TryCreatePlan(LocalEpisodes(1, 3), withSecondSeason, out plan, out error), error);
             Assert(plan.IsComposite,
                 "direct Episode evidence plus a separately verified upstream Season must classify as composite");
+        }
+
+        private static void ValidatesAndAppliesAuthoritativeExclusionsBeforeDirectEvidence()
+        {
+            var direct = new[]
+            {
+                Mapping("local-1", "DandanID", "s1", "s1-1", "s1c-1"),
+                Mapping("local-2", "DandanID", "s1", "s1-2", "s1c-2"),
+                Mapping("local-3", "DandanID", "s2", "s2-1", "s2c-1"),
+                Mapping("local-4", "DandanID", "s2", "s2-2", "s2c-2"),
+                Mapping("local-5", "DandanID", "s2", "s2-3", "s2c-3"),
+            };
+            Assert(!CompositeSeasonPlanner.TryCreatePlan(LocalEpisodes(1, 5), direct, null,
+                    new[] { "local-3", "foreign" }, false, out _, out var error) &&
+                   error.Contains("outside the target season"),
+                "a single foreign exclusion must reject the whole authoritative draft");
+
+            Assert(CompositeSeasonPlanner.TryCreatePlan(LocalEpisodes(1, 5), direct, null,
+                new[] { "local-5", "local-3", "local-5", "local-4" }, false, out var plan, out error), error);
+            Assert(string.Join(",", plan.EffectiveExcludedLocalEpisodeItemIds) == "local-3,local-4,local-5" &&
+                   plan.Mappings.Select(x => x.LocalEpisodeItemId).SequenceEqual(new[] { "local-1", "local-2" }) &&
+                   RunIds(plan.UnmatchedRuns.Single()) == "local-3,local-4,local-5",
+                "trailing exclusions must deduplicate in authoritative local order and suppress direct evidence before runs are built");
+
+            var replacement = new[]
+            {
+                Mapping("local-3", "DandanID", "s3", "s3-1", "s3c-1"),
+                Mapping("local-4", "DandanID", "s3", "s3-2", "s3c-2"),
+                Mapping("local-5", "DandanID", "s3", "s3-3", "s3c-3"),
+            };
+            Assert(CompositeSeasonPlanner.TryCreatePlan(LocalEpisodes(1, 5), direct, replacement,
+                new[] { "local-3", "local-4", "local-5" }, false, out plan, out error), error);
+            Assert(plan.Mappings.Skip(2).All(x => x.Source.MediaId == "s3") && plan.UnmatchedRuns.Count == 0,
+                "a verified replacement must occupy the removed trailing range without changing retained mappings");
+        }
+
+        private static void SplitsEditableRunsAndRestoresOnlyTheRequestedRange()
+        {
+            var mappings = new[]
+            {
+                Mapping("local-1", "DandanID", "s1", "s1-1", "s1c-1"),
+                Mapping("local-2", "DandanID", "special", "sp-1", "spc-1"),
+                Mapping("local-3", "DandanID", "s1", "s1-2", "s1c-2"),
+                Mapping("local-4", "DandanID", "s2", "s2-1", "s2c-1"),
+                Mapping("local-5", "DandanID", "s2", "s2-2", "s2c-2"),
+            };
+            Assert(CompositeSeasonPlanner.TryCreatePlan(LocalEpisodes(1, 5), mappings, out var plan, out var error), error);
+            var cards = CompositeSeasonPlanner.GetEditableMappedRuns(plan);
+            Assert(cards.Count == 4 &&
+                   string.Join(",", cards.Select(card => string.Join("/", card.Mappings.Select(x => x.LocalEpisodeItemId)))) ==
+                   "local-1,local-2,local-3,local-4/local-5",
+                "S1-special-S1 must render as three independent source cards, with contiguous S2 kept together");
+
+            Assert(CompositeSeasonPlanner.TryCreatePlan(LocalEpisodes(1, 5), mappings, null,
+                new[] { "local-2" }, false, out plan, out error), error);
+            Assert(RunIds(plan.UnmatchedRuns.Single()) == "local-2" &&
+                   plan.Mappings.Any(x => x.LocalEpisodeItemId == "local-1") &&
+                   plan.Mappings.Any(x => x.LocalEpisodeItemId == "local-3"),
+                "removing an interior special must leave both neighboring source cards intact");
+            Assert(CompositeSeasonPlanner.TryRestoreExcludedLocalEpisodeItemIds(LocalEpisodes(1, 5),
+                plan.EffectiveExcludedLocalEpisodeItemIds, new[] { "local-2" }, out var restored, out error) &&
+                   restored.Count == 0,
+                "Restore must remove only its own local ids from dialog intent");
+            Assert(!CompositeSeasonPlanner.TryRestoreExcludedLocalEpisodeItemIds(LocalEpisodes(1, 5),
+                plan.EffectiveExcludedLocalEpisodeItemIds, new[] { "local-3" }, out _, out error) &&
+                   error.Contains("currently excluded"),
+                "Restore must reject a non-excluded foreign-to-the-draft local range");
+        }
+
+        private static void RetainsCompositeSafetyForSubsetAndZeroPersist()
+        {
+            var direct = new[]
+            {
+                Mapping("local-1", "DandanID", "s1", "s1-1", "s1c-1"),
+                Mapping("local-2", "DandanID", "s1", "s1-2", "s1c-2"),
+                Mapping("local-3", "DandanID", "s2", "s2-1", "s2c-1"),
+            };
+            Assert(CompositeSeasonPlanner.TryCreatePlan(LocalEpisodes(1, 3), direct, null,
+                new[] { "local-3" }, false, out var plan, out var error), error);
+            Assert(!plan.IsComposite && plan.CompositeSafetyRequired,
+                "a pre-exclusion two-source plan must retain composite safety after a one-source subset draft");
+            Assert(!CompositeSeasonPlanner.ShouldApplyCompositeSafetyAfterPersist(plan, false) &&
+                   CompositeSeasonPlanner.ShouldApplyCompositeSafetyAfterPersist(plan, true),
+                "zero persisted files must never create a marker/cleanup transition, while the first persisted file keeps the barrier");
+        }
+
+        private static void RebuildsPreviewAndDownloadFromTheSameExclusionAwarePlan()
+        {
+            var repositoryRoot = Path.GetFullPath(Path.Combine(
+                AppContext.BaseDirectory, "..", "..", "..", ".."));
+            var controller = File.ReadAllText(Path.Combine(
+                repositoryRoot, "Core", "Controllers", "DanmuController.cs")).Replace("\r\n", "\n");
+            Assert(controller.Contains("ExcludedLocalEpisodeItemIds") &&
+                   controller.Contains("ParsedExcludedLocalEpisodeItemIds") &&
+                   controller.Contains("DanmuExcludedLocalEpisodeItemIdsJson.TryParse"),
+                "the scalar GET exclusion contract must be parsed before preview/download dispatch");
+            Assert(controller.Contains("BuildCompositePlanAsync(latest, request.ParsedCompositeSelections, true,\n                    request.ParsedExcludedLocalEpisodeItemIds") &&
+                   controller.Contains("BuildCompositePlanAsync(season, request.ParsedCompositeSelections, true,\n                request.ParsedExcludedLocalEpisodeItemIds)"),
+                "composite preview and tracked download must rebuild from the same parsed exclusions");
+            Assert(controller.Contains("TryCreatePlan(local, mappings, null,\n                    excludedLocalEpisodeItemIds, durableCompositeMarker") &&
+                   controller.Contains("TryCreatePlan(local, mappings, replacementMappings,\n                    excludedLocalEpisodeItemIds, durableCompositeMarker"),
+                "the controller must validate exclusions before direct evidence and then rebuild confirmed replacements");
+            Assert(controller.Contains("IsCompositePlan = build.Plan.CompositeSafetyRequired") &&
+                   controller.Contains("!build.Plan.CompositeSafetyRequired") &&
+                   controller.Contains("task.IsCompositePlan && outcome.FilePersisted"),
+                "subset downloads must retain the composite barrier, while zero persisted files cannot trigger cleanup");
+            var automatic = File.ReadAllText(Path.Combine(repositoryRoot, "LibraryManagerEventsHelper.cs"))
+                .Replace("\r\n", "\n");
+            Assert(automatic.Contains("null, null, IsCompositeSeason(season), out var plan") &&
+                   automatic.Contains("!plan.CompositeSafetyRequired") &&
+                   automatic.Contains("BeginCompositeSeasonWrite(season, plan.CompositeSafetyRequired)") &&
+                   automatic.Contains("if (plan.CompositeSafetyRequired) await OnCompositeSeasonFilePersistedAsync"),
+                "automatic composite downloads must preserve the same durable safety barrier as tracked downloads");
+        }
+
+        private static void RejectsIncompleteAutomaticSeasonAndResidualSearches()
+        {
+            var completeness = typeof(Emby.Plugin.Danmu.LibraryManagerEventsHelper).GetMethod(
+                "IsCompleteAutomaticSearch",
+                BindingFlags.Static | BindingFlags.NonPublic);
+            Assert(completeness != null,
+                "automatic matching must expose one shared completeness predicate for initial and residual searches");
+
+            var unique = new DanmuMatchCandidate
+            {
+                Site = "DandanID", Id = "unique", Name = "Unique", Score = 0.99, SourceOrder = 0,
+            };
+            var incomplete = new DanmuMatchSearchResult
+            {
+                IsComplete = false,
+                Candidates = new List<DanmuMatchCandidate> { unique },
+                CompletionDiagnostics = new List<DanmuSearchCompletionDiagnostic>
+                {
+                    new DanmuSearchCompletionDiagnostic { Provider = "Bilibili", Status = "timed_out", TimedOut = true },
+                    new DanmuSearchCompletionDiagnostic { Provider = "Bilibili", Status = "unstarted", Cancelled = true },
+                },
+            };
+            Assert(!(bool)completeness.Invoke(null, new object[] { incomplete }),
+                "a unique partial candidate must remain unusable after any timed-out or unstarted planned call");
+
+            var complete = new DanmuMatchSearchResult
+            {
+                IsComplete = true,
+                Candidates = new List<DanmuMatchCandidate> { unique },
+            };
+            Assert((bool)completeness.Invoke(null, new object[] { complete }) &&
+                   ReferenceEquals(DanmuMatchScorer.SelectAutoCandidate(complete.Candidates), unique),
+                "a complete uniquely confident automatic result must preserve the r1 selection behavior");
+
+            var repositoryRoot = Path.GetFullPath(Path.Combine(
+                AppContext.BaseDirectory, "..", "..", "..", ".."));
+            var automatic = File.ReadAllText(Path.Combine(repositoryRoot, "LibraryManagerEventsHelper.cs"))
+                .Replace("\r\n", "\n");
+            var initialGuard = automatic.IndexOf(
+                "if (!IsCompleteAutomaticSearch(search))\n                            {\n                                LogIncompleteAutomaticSearch(originalSeasonName, \"season\", search);\n                                continue;",
+                StringComparison.Ordinal);
+            var initialSelection = automatic.IndexOf(
+                "selectedCandidate = DanmuMatchScorer.SelectAutoCandidate(search.Candidates);",
+                StringComparison.Ordinal);
+            var residualGuard = automatic.IndexOf(
+                "LogIncompleteAutomaticSearch(season.Name, \"residual-range\", search);",
+                StringComparison.Ordinal);
+            var residualSelection = automatic.IndexOf(
+                "var candidate = CompositeSeasonMatchService.SelectSupplementalCandidate(",
+                StringComparison.Ordinal);
+            var firstDownload = automatic.IndexOf(
+                "var outcome = await DownloadEpisodeForProgress(episode, exact, sourceScraper, false, 1)",
+                StringComparison.Ordinal);
+            var movieGuard = automatic.IndexOf(
+                "if (!IsCompleteAutomaticSearch(movieSearch))",
+                StringComparison.Ordinal);
+            var movieSelection = automatic.IndexOf(
+                "selectedMovieCandidate = DanmuMatchScorer.SelectAutoCandidate(movieSearch.Candidates);",
+                StringComparison.Ordinal);
+            Assert(initialGuard >= 0 && initialGuard < initialSelection,
+                "initial automatic Season search must reject incomplete coverage before selecting a candidate");
+            Assert(residualGuard >= 0 && residualGuard < residualSelection && residualSelection < firstDownload &&
+                   automatic.Substring(residualGuard, residualSelection - residualGuard).Contains("return false;"),
+                "an incomplete residual search must abort deterministically before selection, binding, or any file download");
+            Assert(movieGuard >= 0 && movieGuard < movieSelection,
+                "automatic Movie search must reject incomplete coverage before selecting, binding, or downloading a partial candidate");
+        }
+
+        private static void PreservesDirectMetadataAcrossRemoveReplacementAndRestore()
+        {
+            var direct = new[]
+            {
+                Mapping("local-1", "DandanID", "s1", "s1-1", "s1c-1"),
+                Mapping("local-2", "DandanID", "s1", "s1-2", "s1c-2"),
+                Mapping("local-3", "DandanID", "s2", "s2-1", "s2c-1"),
+                Mapping("local-4", "DandanID", "s2", "s2-2", "s2c-2"),
+            };
+            foreach (var mapping in direct)
+            {
+                mapping.Origin = "episode-provider-id";
+            }
+            var durableSnapshot = direct.Select(MappingSnapshot).ToArray();
+
+            Assert(CompositeSeasonPlanner.TryCreatePlan(LocalEpisodes(1, 4), direct, null,
+                    new[] { "local-3", "local-4" }, false, out var removed, out var error), error);
+            Assert(RunIds(removed.UnmatchedRuns.Single()) == "local-3,local-4" &&
+                   removed.Mappings.Select(mapping => mapping.LocalEpisodeItemId)
+                       .SequenceEqual(new[] { "local-1", "local-2" }),
+                "removing a direct trailing run must retain every mapping outside that exact local range");
+            Assert(direct.Select(MappingSnapshot).SequenceEqual(durableSnapshot),
+                "session removal must not mutate durable direct ProviderId/source evidence supplied to the planner");
+
+            var replacement = new[]
+            {
+                Mapping("local-3", "BilibiliID", "s2-rematch", "r-1", "rc-1"),
+                Mapping("local-4", "BilibiliID", "s2-rematch", "r-2", "rc-2"),
+            };
+            replacement[0].Origin = replacement[1].Origin = "manual";
+            Assert(CompositeSeasonPlanner.TryCreatePlan(LocalEpisodes(1, 4), direct, replacement,
+                    new[] { "local-3", "local-4" }, false, out var rematched, out error), error);
+            Assert(rematched.UnmatchedRuns.Count == 0 &&
+                   rematched.Mappings.Where(mapping => mapping.LocalEpisodeItemId == "local-3" ||
+                                                       mapping.LocalEpisodeItemId == "local-4")
+                       .All(mapping => mapping.Source.MediaId == "s2-rematch" && mapping.Origin == "manual"),
+                "a confirmed replacement must fill only the excluded direct run with its exact verified source");
+            Assert(direct.Select(MappingSnapshot).SequenceEqual(durableSnapshot),
+                "replacement planning must leave the original Episode metadata evidence byte-for-byte unchanged");
+
+            Assert(CompositeSeasonPlanner.TryRestoreExcludedLocalEpisodeItemIds(
+                    LocalEpisodes(1, 4),
+                    rematched.EffectiveExcludedLocalEpisodeItemIds,
+                    new[] { "local-3", "local-4" },
+                    out var restoredExclusions,
+                    out error) && restoredExclusions.Count == 0,
+                error);
+            Assert(CompositeSeasonPlanner.TryCreatePlan(LocalEpisodes(1, 4), direct, null,
+                    restoredExclusions, false, out var restored, out error), error);
+            Assert(restored.Mappings.Select(MappingSnapshot).SequenceEqual(durableSnapshot),
+                "Restore plus removal of the run's replacement intent must reconstruct unchanged direct evidence");
+        }
+
+        private static void RetainsCompositeSafetyWhenReplacementCollapsesToOneSource()
+        {
+            var direct = new[]
+            {
+                Mapping("local-1", "DandanID", "s1", "s1-1", "s1c-1"),
+                Mapping("local-2", "DandanID", "s1", "s1-2", "s1c-2"),
+                Mapping("local-3", "DandanID", "s2", "s2-1", "s2c-1"),
+                Mapping("local-4", "DandanID", "s2", "s2-2", "s2c-2"),
+            };
+            var sameSourceReplacement = new[]
+            {
+                Mapping("local-3", "DandanID", "s1", "s1-3", "s1c-3"),
+                Mapping("local-4", "DandanID", "s1", "s1-4", "s1c-4"),
+            };
+            Assert(CompositeSeasonPlanner.TryCreatePlan(LocalEpisodes(1, 4), direct, sameSourceReplacement,
+                    new[] { "local-3", "local-4" }, false, out var plan, out var error), error);
+            Assert(!plan.IsComposite && plan.CompositeSafetyRequired &&
+                   plan.Mappings.Select(mapping => mapping.Source.MediaId).Distinct().Single() == "s1",
+                "a same-source replacement may collapse the executable plan to one source but must not downgrade pre-exclusion composite safety");
+            Assert(!CompositeSeasonPlanner.ShouldApplyCompositeSafetyAfterPersist(plan, false) &&
+                   CompositeSeasonPlanner.ShouldApplyCompositeSafetyAfterPersist(plan, true),
+                "same-source replacement safety must still be persistence-gated and remain inert for zero files");
+        }
+
+        private static void RejectsForeignAndStaleTemporaryRangesWithoutMutatingThePlan()
+        {
+            var direct = new[]
+            {
+                Mapping("local-1", "DandanID", "s1", "s1-1", "s1c-1"),
+                Mapping("local-2", "DandanID", "s1", "s1-2", "s1c-2"),
+                Mapping("local-5", "DandanID", "s1", "s1-5", "s1c-5"),
+            };
+            Assert(CompositeSeasonPlanner.TryCreatePlan(LocalEpisodes(1, 5), direct,
+                    out var plan, out var error), error);
+            var beforeMappings = plan.Mappings.Select(MappingSnapshot).ToArray();
+            var beforeRuns = plan.UnmatchedRuns.Select(RunIds).ToArray();
+
+            Assert(!DanmuTemporaryRangeSearchPolicy.TryResolveUnmatchedRun(
+                       plan, "foreign-item", 2, out _, out _) &&
+                   !DanmuTemporaryRangeSearchPolicy.TryResolveUnmatchedRun(
+                       plan, "local-4", 1, out _, out _) &&
+                   !DanmuTemporaryRangeSearchPolicy.TryResolveUnmatchedRun(
+                       plan, "local-3", 1, out _, out _),
+                "foreign starts, stale shifted starts, and stale shortened counts must all be rejected");
+            Assert(plan.Mappings.Select(MappingSnapshot).SequenceEqual(beforeMappings) &&
+                   plan.UnmatchedRuns.Select(RunIds).SequenceEqual(beforeRuns),
+                "foreign or stale temporary-range validation must leave the authoritative plan unchanged");
+            Assert(DanmuTemporaryRangeSearchPolicy.TryResolveUnmatchedRun(
+                       plan, "local-3", 2, out var run, out error) && RunIds(run) == "local-3,local-4",
+                error);
+        }
+
+        private static void VerifiesControllerParityMetadataAndDialogResetContracts()
+        {
+            var repositoryRoot = Path.GetFullPath(Path.Combine(
+                AppContext.BaseDirectory, "..", "..", "..", ".."));
+            var controller = File.ReadAllText(Path.Combine(
+                repositoryRoot, "Core", "Controllers", "DanmuController.cs")).Replace("\r\n", "\n");
+            var preview = SliceSource(controller,
+                "private async Task<DanmuSeasonMatchResult> GetCompositeSeasonPlanPreview",
+                "private async Task PopulateCompositePreviewIfRequired");
+            var download = SliceSource(controller,
+                "private async Task<DanmuDownloadTaskResult> StartTrackedCompositeSeasonDownload",
+                "private async Task<DanmuDownloadTaskResult> StartTrackedSingleEpisodeDownload");
+            var builder = SliceSource(controller,
+                "private async Task<CompositePlanBuild> BuildCompositePlanAsync",
+                "private async Task<DanmuDownloadTaskResult> StartTrackedCompositeSeasonDownload");
+
+            Assert(preview.Contains("request.ParsedCompositeSelections, true,\n                    request.ParsedExcludedLocalEpisodeItemIds") &&
+                   download.Contains("request.ParsedCompositeSelections, true,\n                request.ParsedExcludedLocalEpisodeItemIds"),
+                "preview and download must pass the identical exclusion and selection collections into the authoritative builder");
+            Assert(builder.Contains("TryCreatePlan(local, mappings, null,\n                    excludedLocalEpisodeItemIds, durableCompositeMarker") &&
+                   builder.Contains("TryCreatePlan(local, mappings, replacementMappings,\n                    excludedLocalEpisodeItemIds, durableCompositeMarker"),
+                "the shared builder must apply exclusions to direct evidence before replaying verified replacement selections");
+            Assert(!preview.Contains("SaveProviderId", StringComparison.Ordinal) &&
+                   !preview.Contains("UpdateItem", StringComparison.Ordinal) &&
+                   !preview.Contains("SetProviderId", StringComparison.Ordinal) &&
+                   !builder.Contains("SaveProviderId", StringComparison.Ordinal) &&
+                   !builder.Contains("UpdateItem", StringComparison.Ordinal) &&
+                   !builder.Contains("SetProviderId", StringComparison.Ordinal),
+                "preview, removal, rematch, and range validation must not write durable ProviderIds or library metadata");
+
+            var frontend = File.ReadAllText(Path.Combine(
+                repositoryRoot, "Frontend", "DanmuSmartMatch.CustomCssJS.js")).Replace("\r\n", "\n");
+            var dialog = SliceSource(frontend, "function openDialog(title)", "function setBusy(dialog, message, search)");
+            Assert(dialog.Contains("compositeDraft: { exclusions: {}, removedRuns: {} }") &&
+                   dialog.Contains("dialog.compositeDraft = { exclusions: {}, removedRuns: {} };") &&
+                   dialog.IndexOf("dialog.compositeDraft = { exclusions: {}, removedRuns: {} };", StringComparison.Ordinal) <
+                   dialog.IndexOf("overlay.remove();", StringComparison.Ordinal),
+                "each dialog must own a fresh composite draft and clear it synchronously before close disposal");
+            Assert(frontend.Contains("var draft = dialog && dialog.compositeDraft;") &&
+                   !frontend.Contains("localStorage", StringComparison.OrdinalIgnoreCase) &&
+                   !frontend.Contains("sessionStorage", StringComparison.OrdinalIgnoreCase),
+                "composite exclusions must remain dialog-local and must not survive into a later dialog through browser storage");
+
+            var restoreHandler = SliceSource(frontend,
+                "restore.addEventListener(\"click\", async function ()",
+                "container.appendChild(restore);");
+            var filterIndex = restoreHandler.IndexOf("filterCompositeSelectionsByItemIds(", StringComparison.Ordinal);
+            var restoreIndex = restoreHandler.IndexOf("restoreCompositeRun(dialog, season, removed.itemIds)", StringComparison.Ordinal);
+            var requestIndex = restoreHandler.IndexOf("requestAuthoritativeCompositePlan", StringComparison.Ordinal);
+            Assert(filterIndex >= 0 && restoreIndex > filterIndex && requestIndex > restoreIndex &&
+                   restoreHandler.Contains("compositeRequestSelections(selections, season), removed.itemIds") &&
+                   restoreHandler.Contains("cloneCompositeSelections(removed.selections)") &&
+                   restoreHandler.Contains("currentSelections.concat(restoreSelections)"),
+                "Restore must filter replacements by the run's real ItemIds, restore only its saved snapshot, and do both before rebuilding direct evidence");
+        }
+
+        private static string MappingSnapshot(CompositeSeasonEpisodeMapping mapping)
+        {
+            return string.Join("|", new[]
+            {
+                mapping?.LocalEpisodeItemId ?? string.Empty,
+                mapping?.Source?.ProviderId ?? string.Empty,
+                mapping?.Source?.MediaId ?? string.Empty,
+                mapping?.Source?.MediaLookupId ?? string.Empty,
+                mapping?.SourceEpisodeId ?? string.Empty,
+                mapping?.CommentId ?? string.Empty,
+                mapping?.SourceEpisodeNumber?.ToString() ?? string.Empty,
+                mapping?.Origin ?? string.Empty,
+            });
+        }
+
+        private static string SliceSource(string source, string startMarker, string endMarker)
+        {
+            var start = source.IndexOf(startMarker, StringComparison.Ordinal);
+            var end = source.IndexOf(endMarker, start + startMarker.Length, StringComparison.Ordinal);
+            Assert(start >= 0 && end > start,
+                "source-contract markers must remain discoverable: " + startMarker + " -> " + endMarker);
+            return source.Substring(start, end - start);
         }
 
         private static List<CompositeSeasonLocalEpisode> LocalEpisodes(int first, int last) =>

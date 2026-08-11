@@ -39,6 +39,7 @@ namespace Emby.Plugin.Danmu.Scraper.Iqiyi
         
     public async Task<List<IqiyiSearchAlbumInfo>> SearchAsync(string keyword, CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         if (string.IsNullOrEmpty(keyword))
         {
             return new List<IqiyiSearchAlbumInfo>();
@@ -52,13 +53,13 @@ namespace Emby.Plugin.Danmu.Scraper.Iqiyi
             return cacheValue;
         }
 
-        await this.LimitRequestFrequently();
+        await this.LimitRequestFrequently(cancellationToken).ConfigureAwait(false);
 
         keyword = HttpUtility.UrlEncode(keyword);
         var url = $"https://search.video.iqiyi.com/o?if=html5&key={keyword}&pageNum=1&pageSize=20";
 
         var result = new List<IqiyiSearchAlbumInfo>();
-        var searchResult = await httpClient.GetSelfResultAsync<IqiyiSearchResult>(GetDefaultHttpRequestOptions(url), null).ConfigureAwait(false);
+        var searchResult = await httpClient.GetSelfResultAsync<IqiyiSearchResult>(GetDefaultHttpRequestOptions(url, null, cancellationToken), null).ConfigureAwait(false);
         if (searchResult != null && searchResult.Data != null)
         {
             result = searchResult.Data.DocInfos
@@ -709,10 +710,9 @@ namespace Emby.Plugin.Danmu.Scraper.Iqiyi
         return Xml10Sanitizer.SanitizeDocument(xml);
     }
 
-    protected Task LimitRequestFrequently()
+    protected override Task LimitRequestFrequently(CancellationToken cancellationToken = default)
     {
-        Thread.Sleep(1000);
-        return Task.CompletedTask;
+        return Task.Delay(1000, cancellationToken);
         // Task.CompletedTask;
         // await this._timeConstraint;
     }

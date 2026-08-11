@@ -50,6 +50,7 @@ namespace Emby.Plugin.Danmu.Scraper.Tencent
 
         public async Task<List<TencentVideo>> SearchAsync(string keyword, CancellationToken cancellationToken)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             if (string.IsNullOrEmpty(keyword))
             {
                 return new List<TencentVideo>();
@@ -63,7 +64,7 @@ namespace Emby.Plugin.Danmu.Scraper.Tencent
                 return cacheValue;
             }
 
-            await this.LimitRequestFrequently();
+            await this.LimitRequestFrequently(cancellationToken).ConfigureAwait(false);
 
             var originPostData = new TencentSearchRequest() { Query = keyword };
             var url = "https://pbaccess.video.qq.com/trpc.videosearch.mobile_search.MultiTerminalSearch/MbSearch?vplatform=2";
@@ -338,9 +339,9 @@ namespace Emby.Plugin.Danmu.Scraper.Tencent
             return downloadResult;
         }
 
-        protected async Task LimitRequestFrequently()
+        protected override async Task LimitRequestFrequently(CancellationToken cancellationToken = default)
         {
-            await Task.Delay(1000).ConfigureAwait(false);
+            await Task.Delay(1000, cancellationToken).ConfigureAwait(false);
         }
     }
 }

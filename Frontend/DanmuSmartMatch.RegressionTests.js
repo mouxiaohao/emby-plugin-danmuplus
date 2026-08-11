@@ -78,10 +78,13 @@ class FakeElement {
         const matches = [];
         const dataMatch = selector.match(/^\[data-id="([^"]+)"\]$/);
         const classMatch = selector.match(/^\.([A-Za-z0-9_-]+)$/);
+        const checkedInputMatch = selector.match(/^input\[name="([^"]+)"\]:checked$/);
         function visit(node) {
             node.children.forEach(child => {
                 if ((dataMatch && child.dataset.id === dataMatch[1]) ||
-                    (classMatch && child.className.split(/\s+/).includes(classMatch[1]))) {
+                    (classMatch && child.className.split(/\s+/).includes(classMatch[1])) ||
+                    (checkedInputMatch && child.tagName === "INPUT" &&
+                        child.name === checkedInputMatch[1] && child.checked)) {
                     matches.push(child);
                 }
                 visit(child);
@@ -188,7 +191,7 @@ const context = {
         getCurrentUserId: function () { return "user"; },
         getItem: async function (_user, id) { return { Id: id, Type: "Movie", Name: id }; },
         getUrl: function (url, query) { return { url: url, query: query }; },
-        ajax: async function (request) {
+        ajax: function (request) {
             const option = request.url.query.option;
             apiCalls.push({ option: option, itemId: request.url.url.split("/").pop(), parameters: request.url.query });
             const response = apiResponses[option];
@@ -204,9 +207,18 @@ const source = fs.readFileSync(scriptPath, "utf8");
 vm.runInContext(source, context, { filename: scriptPath });
 const hooks = context.window.__embyDanmuSmartMatchTest;
 
+async function waitUntil(predicate, message) {
+    for (let attempt = 0; attempt < 12; attempt++) {
+        if (predicate()) return;
+        await new Promise(resolve => setImmediate(resolve));
+    }
+    throw new Error(message);
+}
+
 async function main() {
-    assert((source.match(/__embyDanmuSmartMenuV17/g) || []).length === 1,
-        "the frontend installation flag should be bumped exactly once");
+    assert((source.match(/__embyDanmuSmartMenuV18/g) || []).length === 1 &&
+        !source.includes("__embyDanmuSmartMenuV17"),
+        "the r2 frontend installation flag should be V18 exactly once");
     assert(!/\bScore\b|综合评分|评分：/.test(source),
         "the frontend must not calculate or display candidate scores");
     assert(!/textContent\s*=\s*["'](?:取消|关闭)["']/.test(source),
@@ -298,7 +310,7 @@ async function main() {
         "a server composite plan must activate the virtual-season UI");
     const compositeSelections = {};
     compositeSelections.__compositeSelections = {};
-    compositeSelections.__compositeSelections["series::season-composite::1::::Composite"] = [{
+    compositeSelections.__compositeSelections["series::season-composite"] = [{
         LocalStartEpisodeItemId: "episode-3", RequestedEpisodeCount: 2,
         Source: { ProviderId: "Dandan", MediaId: "frieren-s2" },
         SourceStartEpisodeNumber: 1, Origin: "manual"
@@ -315,6 +327,15 @@ async function main() {
         compactSelections[1].CandidateId === "frieren-s2" && compactSelections[1].SourceStartEpisodeNumber === 1 &&
         JSON.stringify(compactSelections).indexOf("server-only") < 0,
         "the browser must resubmit the verified S1 base group together with manual S2 intent and never expose CommentId values");
+    const removeS1 = hooks.filterCompositeSelectionsByItemIds(
+        compositeSeason, compactSelections, ["episode-1", "episode-2"]);
+    const removeS2 = hooks.filterCompositeSelectionsByItemIds(
+        compositeSeason, compactSelections, ["episode-3", "episode-4"]);
+    assert(removeS1.removed.length === 1 && removeS1.removed[0].CandidateId === "frieren-s1" &&
+        removeS1.kept.length === 1 && removeS1.kept[0].CandidateId === "frieren-s2" &&
+        removeS2.removed.length === 1 && removeS2.removed[0].CandidateId === "frieren-s2" &&
+        removeS2.kept.length === 1 && removeS2.kept[0].CandidateId === "frieren-s1",
+        "mapped searched and manual selections must be removed only when their exact local Episode ItemIds overlap the clicked group");
     const directSeason = {
         SeriesId: compositeSeason.SeriesId, SeasonId: compositeSeason.SeasonId,
         SeasonNumber: compositeSeason.SeasonNumber, SeasonName: compositeSeason.SeasonName,
@@ -337,7 +358,7 @@ async function main() {
         "direct Episode provider-id mappings must be rebuilt by the server and never submitted by the browser");
     const staleSelections = {};
     staleSelections.__compositeSelections = {};
-    staleSelections.__compositeSelections["series::season-composite::1::::Composite"] = [{
+    staleSelections.__compositeSelections["series::season-composite"] = [{
         LocalStartEpisodeItemId: "episode-1", RequestedEpisodeCount: 2,
         Source: { ProviderId: "Dandan", MediaId: "obsolete" }, SourceStartEpisodeNumber: 1
     }];
@@ -361,6 +382,308 @@ async function main() {
         hooks.compositeRequestSelections({}, groupOnlySeason).length === 1 &&
         hooks.compositeRequestSelections({}, groupOnlySeason)[0].CandidateId === "s1",
         "the UI must also accept the compact CompositeGroups preview contract during controller rollout");
+
+    const draftDialog = hooks.openDialog("composite draft");
+    const directGroup = hooks.compositeVirtualGroups(directSeason, compositeSelections)
+        .find(group => group.kind === "mapped" && group.origin === "episode-provider-id");
+    assert(directGroup && directGroup.episodes.map(episode => episode.ItemId).join(",") === "episode-5",
+        "the direct Episode group fixture must represent one authoritative contiguous run");
+    hooks.excludeCompositeRun(draftDialog, directSeason, directGroup);
+    const exclusionParameters = hooks.compositeDraftParameters(draftDialog, directSeason, { compositePlan: "true" });
+    assert(exclusionParameters.excludedLocalEpisodeItemIds === '["episode-5"]' &&
+        Array.isArray(JSON.parse(exclusionParameters.excludedLocalEpisodeItemIds)) &&
+        hooks.compositeExcludedItemIds(draftDialog, directSeason).join(",") === "episode-5",
+        "dialog exclusions must be submitted as one scalar JSON field containing real Episode ItemIds");
+    hooks.restoreCompositeRun(draftDialog, directSeason, ["episode-5"]);
+    assert(hooks.compositeExcludedItemIds(draftDialog, directSeason).length === 0,
+        "Restore must remove only the selected run's real ItemIds from dialog-local exclusions");
+
+    const rangeGroup = hooks.compositeVirtualGroups(compositeSeason, {}).find(group => group.kind === "unmatched");
+    const rangeKeyword = hooks.temporaryRangeKeyword(
+        { Id: "series", Type: "Series", Name: "葬送的芙莉莲" },
+        Object.assign({}, compositeSeason, { SeriesName: "葬送的芙莉莲", Candidates: [{ Id: "stale-full-season" }] }));
+    const rangePayload = hooks.temporaryRangeSearchParameters(
+        draftDialog,
+        { Id: "series", Type: "Series", Name: "葬送的芙莉莲" },
+        compositeSeason,
+        rangeGroup,
+        {},
+        rangeKeyword);
+    assert(rangeKeyword === "葬送的芙莉莲" && rangePayload.searchScope === "temporary-range" &&
+        rangePayload.compositeStartEpisodeItemId === "episode-3" &&
+        rangePayload.compositeEpisodeCount === "3" && rangePayload.keyword === "葬送的芙莉莲" &&
+        rangePayload.mode === "rematch" && rangePayload.force === "true" &&
+        rangePayload.excludedLocalEpisodeItemIds === "[]",
+        "temporary entry must submit an immediate explicit range request with authoritative start/count and the unchanged default Series title");
+    assert(hooks.temporaryRangeKeyword(
+        { Id: "season", Type: "Season", Name: "Season fallback" },
+        { SeasonName: "Season fallback", SeriesName: "" }) === "Season fallback",
+        "a Season entry must use the same range path and fall back to its Season title only when Series title is empty");
+
+    const rangeDialog = hooks.openDialog("range search");
+    const rangeSeason = Object.assign({}, compositeSeason, {
+        SeriesName: "葬送的芙莉莲",
+        Candidates: [{ Id: "stale-full-season", Site: "Stale" }]
+    });
+    apiResponses.MatchPreview = {
+        Seasons: [Object.assign({}, rangeSeason, {
+            Candidates: [{ Id: "fresh-range", Site: "Dandan", Name: "葬送的芙莉莲 第二季", EpisodeSize: 3 }]
+        })]
+    };
+    const rangeCallCount = apiCalls.length;
+    hooks.renderCompositeGroupPicker(rangeDialog,
+        { Id: "series", Type: "Series", Name: "葬送的芙莉莲" },
+        rangeSeason, 0, [rangeSeason], {}, {}, rangeGroup);
+    assert(rangeDialog.body.querySelectorAll(".danmuBusy").length === 1 &&
+        rangeDialog.body.querySelectorAll(".danmuCandidate").length === 0,
+        "first temporary-group entry must clear stale/full-Season candidates before its immediate request completes");
+    await waitUntil(() => rangeDialog.body.querySelectorAll(".danmuCandidate").length === 1,
+        "automatic temporary-range request should settle before assertions");
+    const automaticRangeCall = apiCalls.slice(rangeCallCount).find(call => call.option === "MatchPreview");
+    assert(automaticRangeCall && automaticRangeCall.parameters.searchScope === "temporary-range" &&
+        automaticRangeCall.parameters.keyword === "葬送的芙莉莲" &&
+        rangeDialog.body.querySelectorAll(".danmuCandidate").length === 1,
+        "temporary-group entry must automatically search once and render only the returned range candidates without a user edit");
+    rangeDialog.forceClose();
+    delete apiResponses.MatchPreview;
+
+    const editableSelections = { __compositeSelections: {} };
+    editableSelections.__compositeSelections["series::season-composite"] = [{
+        LocalStartEpisodeItemId: "episode-3", RequestedEpisodeCount: 2,
+        Source: { ProviderId: "Dandan", MediaId: "frieren-s2" },
+        SourceStartEpisodeNumber: 1, Origin: "manual"
+    }];
+    hooks.renderCompositeSeasonSummary(draftDialog,
+        { Id: "series", Type: "Series", Name: "葬送的芙莉莲" },
+        directSeason, 0, [directSeason], editableSelections, {});
+    const editableActionLabels = draftDialog.body.querySelectorAll(".danmuSmartButton")
+        .map(button => button.textContent);
+    assert(editableActionLabels.filter(label => label === "重新匹配").length === 3 &&
+        editableActionLabels.filter(label => label === "移除").length === 3 &&
+        source.includes('summary.textContent = "查看逐集映射（"'),
+        "manual, searched, and direct-Episode contiguous cards must all expose view-mapping, rematch, and remove actions");
+
+    apiResponses.MatchPreview = function (request) {
+        const excluded = JSON.parse(request.url.query.excludedLocalEpisodeItemIds || "[]");
+        const remainingMappings = directSeason.CompositePlan.Mappings.filter(mapping =>
+            !excluded.includes(mapping.LocalEpisodeItemId));
+        return {
+            Seasons: [Object.assign({}, directSeason, {
+                SeasonName: "Server-renamed season",
+                Year: 2027,
+                CompositePlan: Object.assign({}, directSeason.CompositePlan, {
+                    Mappings: remainingMappings,
+                    UnmatchedRuns: [{ Episodes: directSeason.CompositePlan.OrderedEpisodes.filter(episode =>
+                        !remainingMappings.some(mapping => mapping.LocalEpisodeItemId === episode.ItemId)) }],
+                    EffectiveExcludedLocalEpisodeItemIds: excluded
+                })
+            })]
+        };
+    };
+    const directRemove = draftDialog.body.querySelectorAll(".danmuSmartButton")
+        .filter(button => button.textContent === "移除").pop();
+    await directRemove.dispatch("click");
+    const removalCall = apiCalls.filter(call => call.option === "MatchPreview").pop();
+    assert(removalCall && removalCall.parameters.excludedLocalEpisodeItemIds === '["episode-5"]',
+        "direct-group remove must submit the exact real Episode ItemId in the authoritative rebuild payload");
+    assert(hooks.compositeExcludedItemIds(draftDialog, directSeason).join(",") === "episode-5",
+        "the authoritative rebuild must retain the effective exclusion in dialog-local state");
+    assert(draftDialog.body.querySelectorAll(".danmuSmartButton").some(button =>
+        button.textContent.indexOf("恢复 ") === 0),
+        "the rebuilt overview must expose Restore without touching durable metadata");
+    const directRestore = draftDialog.body.querySelectorAll(".danmuSmartButton")
+        .find(button => button.textContent.indexOf("恢复 ") === 0);
+    await directRestore.dispatch("click");
+    const directRestoreCall = apiCalls.filter(call => call.option === "MatchPreview").pop();
+    assert(directRestoreCall && directRestoreCall.parameters.excludedLocalEpisodeItemIds === "[]" &&
+        JSON.parse(directRestoreCall.parameters.compositeSelections).every(selection =>
+            selection.CandidateId !== "direct-episode") &&
+        hooks.compositeExcludedItemIds(draftDialog, directSeason).length === 0,
+        "direct Episode groups must restore by local Episode ItemIds and server reconstruction, never by resubmitting their provider id as a selection");
+    draftDialog.forceClose();
+    assert(hooks.compositeExcludedItemIds(draftDialog, directSeason).length === 0,
+        "closing the dialog must discard its exclusion draft");
+    delete apiResponses.MatchPreview;
+
+    function authoritativeCompositeResponse(request, omitCandidateId) {
+        const query = request.url.query;
+        const excluded = JSON.parse(query.excludedLocalEpisodeItemIds || "[]");
+        const requested = JSON.parse(query.compositeSelections || "[]")
+            .filter(selection => selection.CandidateId !== omitCandidateId);
+        const ordered = directSeason.CompositePlan.OrderedEpisodes;
+        const mappings = [];
+        requested.forEach(selection => {
+            const start = ordered.findIndex(episode => episode.ItemId === selection.LocalStartEpisodeItemId);
+            for (let offset = 0; start >= 0 && offset < selection.RequestedEpisodeCount; offset++) {
+                const episode = ordered[start + offset];
+                if (!episode || excluded.includes(episode.ItemId)) break;
+                mappings.push({
+                    LocalEpisodeItemId: episode.ItemId,
+                    Source: { ProviderId: selection.Site, MediaId: selection.CandidateId },
+                    SourceEpisodeNumber: (selection.SourceStartEpisodeNumber || 1) + offset,
+                    Origin: selection.MatchOrigin || "manual"
+                });
+            }
+        });
+        if (!excluded.includes("episode-5")) {
+            mappings.push(directSeason.CompositePlan.Mappings.find(mapping =>
+                mapping.LocalEpisodeItemId === "episode-5"));
+        }
+        const unmatched = ordered.filter(episode => !mappings.some(mapping =>
+            mapping.LocalEpisodeItemId === episode.ItemId));
+        return {
+            Seasons: [Object.assign({}, directSeason, {
+                CompositePlan: {
+                    OrderedEpisodes: ordered,
+                    Mappings: mappings,
+                    UnmatchedRuns: unmatched.length ? [{ Episodes: unmatched }] : [],
+                    EffectiveExcludedLocalEpisodeItemIds: excluded
+                }
+            })]
+        };
+    }
+
+    const searchedDialog = hooks.openDialog("searched selection restore");
+    const searchedSelections = { __compositeSelections: {} };
+    searchedSelections.__compositeSelections["series::season-composite"] = [{
+        LocalStartEpisodeItemId: "episode-3", RequestedEpisodeCount: 2,
+        Source: { ProviderId: "Dandan", MediaId: "frieren-s2" },
+        SourceStartEpisodeNumber: 1, Origin: "manual"
+    }];
+    const searchedSeasons = [directSeason];
+    apiResponses.MatchPreview = request => authoritativeCompositeResponse(request);
+    hooks.renderSeriesPicker(searchedDialog,
+        { Id: "series", Type: "Series", Name: "葬送的芙莉莲" }, searchedSeasons, searchedSelections, {});
+    const searchedRemove = searchedDialog.body.querySelectorAll(".danmuSmartButton")
+        .filter(button => button.textContent === "移除")[0];
+    await searchedRemove.dispatch("click");
+    const searchedRemoveCall = apiCalls.filter(call => call.option === "MatchPreview").pop();
+    const afterRemoveSelections = JSON.parse(searchedRemoveCall.parameters.compositeSelections);
+    const removedSnapshot = hooks.compositeDraftSeasonState(
+        searchedDialog, searchedSeasons[0], false).removedRuns[0];
+    assert(afterRemoveSelections.map(selection => selection.CandidateId).join(",") === "frieren-s2" &&
+        removedSnapshot && removedSnapshot.selections.length === 1 &&
+        removedSnapshot.selections[0].CandidateId === "frieren-s1" &&
+        hooks.compositeVirtualGroups(searchedSeasons[0], {}).some(group =>
+            group.kind === "mapped" && group.source.MediaId === "frieren-s2"),
+        "removing one searched mapped group must omit its overlap, preserve other selections, and retain a dialog-local restore snapshot");
+
+    let searchedRestore = searchedDialog.body.querySelectorAll(".danmuSmartButton")
+        .find(button => button.textContent.indexOf("恢复 ") === 0);
+    await searchedRestore.dispatch("click");
+    const searchedRestoreCall = apiCalls.filter(call => call.option === "MatchPreview").pop();
+    const restoreCandidateIds = JSON.parse(searchedRestoreCall.parameters.compositeSelections)
+        .map(selection => selection.CandidateId).sort().join(",");
+    assert(restoreCandidateIds === "frieren-s1,frieren-s2" &&
+        hooks.compositeDraftSeasonState(searchedDialog, searchedSeasons[0], false).removedRuns.length === 0 &&
+        hooks.compositePlanCoversItemIds(searchedSeasons[0], ["episode-1", "episode-2"]),
+        "restoring a non-direct group must re-add its snapshot only after removing old overlap and accept it only after server revalidation");
+
+    hooks.renderSeriesPicker(searchedDialog,
+        { Id: "series", Type: "Series", Name: "葬送的芙莉莲" }, searchedSeasons, {}, {});
+    const expiredRemove = searchedDialog.body.querySelectorAll(".danmuSmartButton")
+        .filter(button => button.textContent === "移除")[0];
+    apiResponses.MatchPreview = request => authoritativeCompositeResponse(request);
+    await expiredRemove.dispatch("click");
+    apiResponses.MatchPreview = request => authoritativeCompositeResponse(request, "frieren-s1");
+    searchedRestore = searchedDialog.body.querySelectorAll(".danmuSmartButton")
+        .find(button => button.textContent.indexOf("恢复 ") === 0);
+    await searchedRestore.dispatch("click");
+    assert(hooks.compositeDraftSeasonState(searchedDialog, searchedSeasons[0], false).removedRuns.length === 1 &&
+        hooks.compositeVirtualGroups(searchedSeasons[0], {}).some(group =>
+            group.kind === "unmatched" && group.episodes.some(episode => episode.ItemId === "episode-1")),
+        "an expired restored selection must fail validation, retain its Restore snapshot, and keep the local Episodes unmatched");
+    searchedDialog.forceClose();
+    assert(hooks.compositeDraftSeasonState(searchedDialog, searchedSeasons[0], false).removedRuns.length === 0 &&
+        hooks.compositeExcludedItemIds(searchedDialog, searchedSeasons[0]).length === 0,
+        "closing the dialog must discard removed-selection snapshots and exclusions together");
+    delete apiResponses.MatchPreview;
+
+    function deferredTransport() {
+        let resolve;
+        let reject;
+        const promise = new Promise((onResolve, onReject) => {
+            resolve = onResolve;
+            reject = onReject;
+        });
+        promise.abortCount = 0;
+        promise.abort = function () {
+            promise.abortCount++;
+            reject({ name: "AbortError" });
+        };
+        return { promise, resolve, reject };
+    }
+
+    const searchDialog = hooks.openDialog("search operation fencing");
+    const firstTransport = deferredTransport();
+    const secondTransport = deferredTransport();
+    const pendingTransports = [firstTransport.promise, secondTransport.promise];
+    apiResponses.MatchPreview = function () { return pendingTransports.shift(); };
+    let restored = [];
+    const firstSearch = hooks.runDialogSearch(searchDialog, "search-item", "provider-search", {},
+        "searching first", status => restored.push("first:" + status));
+    await new Promise(resolve => setImmediate(resolve));
+    const firstOperation = apiCalls.filter(call => call.option === "MatchPreview").pop().parameters.searchOperationId;
+    const secondSearch = hooks.runDialogSearch(searchDialog, "search-item", "detail-resolution", {},
+        "resolving details", status => restored.push("second:" + status));
+    await new Promise(resolve => setImmediate(resolve));
+    const secondCall = apiCalls.filter(call => call.option === "MatchPreview").pop();
+    assert(firstTransport.promise.abortCount === 1 && secondCall.parameters.searchScope === "detail-resolution" &&
+        secondCall.parameters.searchOperationId !== firstOperation,
+        "a new detail-resolution request must abort and cancel the previous provider-search using a distinct operation id");
+    secondTransport.resolve({ result: "newest" });
+    assert(await firstSearch === null && (await secondSearch).result === "newest" && restored.length === 0,
+        "a late or aborted earlier search must not restore or overwrite the authoritative newest response");
+    assert(apiCalls.some(call => call.option === "CancelSearch" && call.parameters.searchOperationId === firstOperation),
+        "superseding a request must address CancelSearch with the exact prior client operation id");
+
+    const cancelledTransport = deferredTransport();
+    apiResponses.MatchPreview = function () { return cancelledTransport.promise; };
+    const cancelledSearch = hooks.runDialogSearch(searchDialog, "search-item", "provider-search", {},
+        "searching", status => restored.push("cancel:" + status));
+    await new Promise(resolve => setImmediate(resolve));
+    const cancelledOperation = apiCalls.filter(call => call.option === "MatchPreview").pop().parameters.searchOperationId;
+    const visibleCancel = searchDialog.footer.children.find(button => button.textContent === "取消搜索");
+    assert(visibleCancel, "a live provider-search must expose a visible cancellation control");
+    await visibleCancel.dispatch("click");
+    assert(cancelledTransport.promise.abortCount === 1,
+        "visible cancellation must abort a cancellable browser transport");
+    assert(await cancelledSearch === null && restored.includes("cancel:cancelled") &&
+        apiCalls.some(call => call.option === "CancelSearch" && call.parameters.searchOperationId === cancelledOperation) &&
+        searchDialog.activeSearch === null && !searchDialog.androidBackLocked,
+        "user cancellation must call the backend endpoint and always restore busy state");
+
+    const closeTransport = deferredTransport();
+    apiResponses.MatchPreview = function () { return closeTransport.promise; };
+    const closeSearch = hooks.runDialogSearch(searchDialog, "search-item", "provider-search", {},
+        "searching", status => restored.push("close:" + status));
+    await new Promise(resolve => setImmediate(resolve));
+    const closeOperation = apiCalls.filter(call => call.option === "MatchPreview").pop().parameters.searchOperationId;
+    assert(searchDialog.close() && closeTransport.promise.abortCount === 1 && await closeSearch === null &&
+        apiCalls.some(call => call.option === "CancelSearch" && call.parameters.searchOperationId === closeOperation),
+        "closing a dialog must cancel its live server search without allowing a late response to mutate closed UI");
+
+    const errorDialog = hooks.openDialog("search error recovery");
+    apiResponses.MatchPreview = function () { return Promise.reject(new Error("provider unavailable")); };
+    const errorResult = await hooks.runDialogSearch(errorDialog, "search-item", "provider-search", {},
+        "searching", status => {
+            restored.push("error:" + status);
+            hooks.setBusy(errorDialog, "restored controls");
+            errorDialog.androidBackLocked = false;
+        });
+    assert(errorResult === null && restored.includes("error:error") && !errorDialog.androidBackLocked &&
+        errorDialog.activeSearch === null,
+        "provider errors must run the same finally cleanup path and release dialog controls");
+    errorDialog.forceClose();
+
+    const malformedDialog = hooks.openDialog("malformed preview");
+    apiResponses.MatchPreview = {};
+    await hooks.runSmartDownload({ Id: "malformed", Type: "Movie", Name: "Malformed" }, malformedDialog);
+    assert(!malformedDialog.androidBackLocked && malformedDialog.footer.children.some(button =>
+        button.textContent === "重试搜索"),
+        "malformed preview responses must restore a retryable dialog instead of leaving busy controls stuck");
+    malformedDialog.forceClose();
+    delete apiResponses.MatchPreview;
 
     const closableDialog = hooks.openDialog("closable");
     await closableDialog.overlay.dispatch("click");
@@ -557,6 +880,62 @@ async function main() {
         fastMenu.querySelectorAll('[data-id="danmu-bulk-download"]').length === 1,
         "two rapidly opened menus should inject only into the current action sheet");
 
+    const manyCandidates = Array.from({ length: 60 }, function (_unused, index) {
+        return {
+            Site: "Fake", SiteName: "Fake", Id: "candidate-" + index,
+            Name: "Candidate " + index, Year: 2026, EpisodeSize: 12, Category: "TV"
+        };
+    });
+    const episodeTarget = {
+        ParentName: "Series", SeasonName: "Season 2", EpisodeNumber: 3, ItemName: "Episode 3",
+        ResolvedScopeType: "VirtualSeason", ResolvedScopeItemId: "virtual-season-2",
+        Candidates: manyCandidates
+    };
+    const candidateDialog = hooks.openDialog("episode candidates");
+    const detailCallsBefore = apiCalls.filter(call => call.option === "GetSelectedCandidatePreview").length;
+    hooks.renderItemCandidatePicker(candidateDialog,
+        { Id: "episode-two-stage", Type: "Episode", Name: "Episode 3" }, episodeTarget, "Series");
+    assert(candidateDialog.body.querySelectorAll(".danmuCandidate").length === 60 &&
+        apiCalls.filter(call => call.option === "GetSelectedCandidatePreview").length === detailCallsBefore,
+        "rendering 60 search candidates must use Search metadata without resolving any candidate details");
+    apiResponses.GetSelectedCandidatePreview = {
+        Status: "ready", CandidateId: "candidate-37", ResolvedScopeType: "VirtualSeason",
+        Episodes: [
+            { Id: "source-episode-a", Number: 1, Title: "Episode A" },
+            { Id: "source-episode-exact", Number: 3, Title: "Episode C" }
+        ]
+    };
+    candidateDialog.body.querySelectorAll(".danmuCandidate")[37].children[0].checked = true;
+    await candidateDialog.footer.children[0].dispatch("click");
+    await waitUntil(() => candidateDialog.body.querySelectorAll(".danmuSourceEpisodeChoice").length === 2,
+        "the selected candidate detail should become visible");
+    const selectedDetailCalls = apiCalls.filter(call => call.option === "GetSelectedCandidatePreview");
+    const selectedDetailCall = selectedDetailCalls[selectedDetailCalls.length - 1];
+    assert(selectedDetailCalls.length === detailCallsBefore + 1 &&
+        selectedDetailCall.parameters.site === "Fake" &&
+        selectedDetailCall.parameters.candidateId === "candidate-37" &&
+        selectedDetailCall.parameters.searchOperationId &&
+        candidateDialog.body.querySelectorAll(".danmuSourceEpisodeChoice").length === 2,
+        "selecting one candidate must resolve exactly that candidate once and render its source episodes");
+    assert(candidateDialog.body.children[0].textContent.includes("VirtualSeason") &&
+        candidateDialog.body.children[0].textContent.includes("virtual-season-2"),
+        "episode resolution must display the authoritative ResolvedScopeType and ResolvedScopeItemId");
+    candidateDialog.forceClose();
+
+    const failedDetailDialog = hooks.openDialog("failed detail resolution");
+    hooks.renderItemCandidatePicker(failedDetailDialog,
+        { Id: "episode-detail-failure", Type: "Episode", Name: "Episode 3" }, episodeTarget, "Series");
+    apiResponses.GetSelectedCandidatePreview = { Status: "failed", Message: "provider detail failed", Episodes: [] };
+    failedDetailDialog.body.querySelectorAll(".danmuCandidate")[8].children[0].checked = true;
+    await failedDetailDialog.footer.children[0].dispatch("click");
+    await waitUntil(() => failedDetailDialog.body.querySelectorAll(".danmuCandidate").length === 60,
+        "a failed detail request should restore candidates");
+    assert(failedDetailDialog.body.querySelectorAll(".danmuCandidate").length === 60 &&
+        !failedDetailDialog.body.querySelector(".danmuBusy"),
+        "detail-resolution failure must restore the intact candidate list and release busy controls");
+    failedDetailDialog.forceClose();
+    delete apiResponses.GetSelectedCandidatePreview;
+
     async function verifySingleTarget(type) {
         apiCalls.length = 0;
         const targetId = type === "Movie" ? "movie-target-id" : "episode-target-id";
@@ -579,7 +958,14 @@ async function main() {
             { EpisodeNumber: 3 },
             { Site: "Fake", Id: "candidate", Name: "Candidate" },
             type === "Episode" ? 4 : null,
+            type === "Episode" ? "source-episode-exact" : null,
             true);
+        const startCall = apiCalls.find(call => call.option === "StartTrackedDownload");
+        if (type === "Episode") {
+            assert(startCall.parameters.sourceEpisodeId === "source-episode-exact" &&
+                !Object.prototype.hasOwnProperty.call(startCall.parameters, "commentId"),
+                "episode confirmation must submit the exact resolved sourceEpisodeId without CommentId or positional guessing");
+        }
         let rows = dialog.body.querySelectorAll(".danmuEpisodeProgress");
         assert(rows.length === 1, type + " progress should render exactly one detailed item row");
         const retry = dialog.body.querySelector(".danmuEpisodeRetry");
@@ -604,7 +990,7 @@ async function main() {
     };
     await hooks.renderSingleTargetProgress(stopDialog,
         { Id: "running-movie", Type: "Movie", Name: "Movie" }, {},
-        { Site: "Fake", Id: "candidate", Name: "Candidate" }, null, false);
+        { Site: "Fake", Id: "candidate", Name: "Candidate" }, null, null, false);
     const stop = stopDialog.footer.children.find(button => button.textContent === "强制停止全部下载");
     await stop.dispatch("click");
     assert(stopDialog.closable && !stopDialog.footer.children.some(button => button.textContent === "关闭"),

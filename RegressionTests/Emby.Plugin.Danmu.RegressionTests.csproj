@@ -8,4 +8,10 @@
   <ItemGroup>
     <ProjectReference Include="..\Emby.Plugin.Danmu.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <Compile Remove="SearchTermPolicy\**\*.cs" />
+    <Compile Remove="BoundedSearchPolicy\**\*.cs" />
+    <Compile Remove="TemporaryRangePolicy\**\*.cs" />
+    <Compile Remove="EpisodeSelectionPolicy\**\*.cs" />
+  </ItemGroup>
 </Project>

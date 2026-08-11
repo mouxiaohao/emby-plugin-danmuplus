@@ -1,7 +1,9 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
+using Emby.Plugin.Danmu.Core;
 using Emby.Plugin.Danmu.Core.Extensions;
 using Emby.Plugin.Danmu.Model;
 using Emby.Plugin.Danmu.Scraper.Entity;
@@ -32,6 +34,16 @@ namespace Emby.Plugin.Danmu.Scraper
         public static BaseItem[] GetEpisodeScopes(Episode episode, Season season)
         {
             return new BaseItem[] { episode, season }.Where(x => x != null).ToArray();
+        }
+
+        /// <summary>
+        /// Direct evidence for a single-Episode decision must be owned by that
+        /// Episode. The containing Season is search context, not Episode-local
+        /// ProviderId evidence.
+        /// </summary>
+        public static BaseItem[] GetSingleEpisodeDirectScopes(Episode episode)
+        {
+            return episode == null ? Array.Empty<BaseItem>() : new BaseItem[] { episode };
         }
 
         public static ProviderIdDictionary GetItemLocalProviderIds(
@@ -78,7 +90,8 @@ namespace Emby.Plugin.Danmu.Scraper
             IEnumerable<AbstractScraper> scraperSource,
             IEnumerable<BaseItem> itemScopes,
             ILogger logger,
-            Series parentSeries = null)
+            Series parentSeries = null,
+            CancellationToken cancellationToken = default(CancellationToken))
         {
             var decision = new DanmuMatchDecision();
             var scrapers = (scraperSource ?? Enumerable.Empty<AbstractScraper>())
@@ -95,6 +108,7 @@ namespace Emby.Plugin.Danmu.Scraper
                 var key = scraper.ProviderId;
                 foreach (var scope in scopes)
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
                     var localProviderIds = scope is Season && parentSeries != null
                         ? GetItemLocalProviderIds(scope, parentSeries, scrapers)
                         : GetItemLocalProviderIds(scope, scrapers);
@@ -107,17 +121,24 @@ namespace Emby.Plugin.Danmu.Scraper
                     foundIdentifier = true;
                     try
                     {
-                        ScraperMedia media;
-                        if (scope is Episode)
+                        var resolution = await BoundedSearchPolicy.Shared.ExecuteAsync(
+                            scraper.ProviderId,
+                            ignored => scope is Episode
+                                ? ResolveDirectEpisodeMediaAsync(
+                                    scraper, (Episode)scope, externalId, ((Episode)scope).IndexNumber ?? 0)
+                                : scraper.GetMedia(scope, externalId),
+                            cancellationToken).ConfigureAwait(false);
+                        if (resolution.Status != BoundedSearchExecutionStatus.Completed)
                         {
-                            media = await ResolveDirectEpisodeMediaAsync(
-                                scraper, (Episode)scope, externalId, ((Episode)scope).IndexNumber ?? 0)
-                                .ConfigureAwait(false);
+                            // A caller cancellation is an operation boundary,
+                            // not a failed ProviderId lookup. Preserve it for
+                            // the interactive/automatic operation coordinator.
+                            cancellationToken.ThrowIfCancellationRequested();
+                            decision.Diagnostics.Add("provider-id-unresolved:" + scraper.ProviderId);
+                            continue;
                         }
-                        else
-                        {
-                            media = await scraper.GetMedia(scope, externalId).ConfigureAwait(false);
-                        }
+
+                        var media = resolution.Result;
                         if (!IsUsable(media))
                         {
                             decision.Diagnostics.Add("provider-id-unresolved:" + scraper.ProviderId);
@@ -154,6 +175,10 @@ namespace Emby.Plugin.Danmu.Scraper
                         };
                         ApplyResolvedUpstreamMetadata(decision.Candidate, media);
                         return decision;
+                    }
+                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                    {
+                        throw;
                     }
                     catch (Exception ex)
                     {

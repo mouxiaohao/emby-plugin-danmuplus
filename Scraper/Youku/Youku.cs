@@ -36,12 +36,18 @@ namespace Emby.Plugin.Danmu.Scraper.Youku
 
         public override string ProviderId => ScraperProviderId;
 
-        public override async Task<List<ScraperSearchInfo>> Search(BaseItem item)
+        public override Task<List<ScraperSearchInfo>> Search(BaseItem item)
         {
+            return Search(item, CancellationToken.None);
+        }
+
+        public override async Task<List<ScraperSearchInfo>> Search(BaseItem item, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
             var list = new List<ScraperSearchInfo>();
             var isMovieItemType = item is MediaBrowser.Controller.Entities.Movies.Movie;
             var searchName = this.NormalizeSearchName(item.Name);
-            var videos = await this._api.SearchAsync(searchName, CancellationToken.None).ConfigureAwait(false);
+            var videos = await this._api.SearchAsync(searchName, cancellationToken).ConfigureAwait(false);
             foreach (var video in videos)
             {
                 var videoId = video.ID;
@@ -243,10 +249,18 @@ namespace Emby.Plugin.Danmu.Scraper.Youku
         }
 
 
-        public override async Task<List<ScraperSearchInfo>> SearchForApi(string keyword)
+        public override Task<List<ScraperSearchInfo>> SearchForApi(string keyword)
         {
+            return SearchForApi(keyword, CancellationToken.None);
+        }
+
+        public override async Task<List<ScraperSearchInfo>> SearchForApi(
+            string keyword,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
             var list = new List<ScraperSearchInfo>();
-            var videos = await this._api.SearchAsync(keyword, CancellationToken.None).ConfigureAwait(false);
+            var videos = await this._api.SearchAsync(keyword, cancellationToken).ConfigureAwait(false);
             foreach (var video in videos)
             {
                 var videoId = video.ID;

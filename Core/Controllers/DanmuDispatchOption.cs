@@ -33,6 +33,17 @@ namespace Emby.Plugin.Danmu.Core.Controllers
         public static string MatchPreview = "MatchPreview";
 
         /**
+         * Resolves source episodes for one explicitly selected Episode
+         * candidate. This is read-only and never creates a binding.
+         */
+        public static string GetSelectedCandidatePreview = "GetSelectedCandidatePreview";
+
+        /**
+         * Cancels a bounded smart-match search by its browser operation id.
+         */
+        public static string CancelSearch = "CancelSearch";
+
+        /**
          * 保存选择结果并下载本季弹幕
          */
         public static string BindMatch = "BindMatch";

@@ -45,20 +45,189 @@ namespace Emby.Plugin.Danmu.Scraper
             out CompositeSeasonPlan plan,
             out string error)
         {
+            return TryCreatePlan(localEpisodes, explicitMappings, null, null, false, out plan, out error);
+        }
+
+        /// <summary>
+        /// Rebuilds an editable plan from two authoritative mapping layers.
+        /// Direct evidence is removed for accepted dialog exclusions first;
+        /// verified replacement mappings are then applied to the remaining
+        /// draft.  This order lets a replacement occupy a removed direct
+        /// range without allowing it to overwrite an unrelated mapping.
+        /// </summary>
+        public static bool TryCreatePlan(
+            IEnumerable<CompositeSeasonLocalEpisode> localEpisodes,
+            IEnumerable<CompositeSeasonEpisodeMapping> directMappings,
+            IEnumerable<CompositeSeasonEpisodeMapping> replacementMappings,
+            IEnumerable<string> excludedLocalEpisodeItemIds,
+            bool durableCompositeMarker,
+            out CompositeSeasonPlan plan,
+            out string error)
+        {
             plan = null;
+            if (!TryOrderEpisodes(localEpisodes, out var ordered, out error) ||
+                !TryNormalizeExcludedLocalEpisodeItemIds(ordered, excludedLocalEpisodeItemIds,
+                    out var exclusions, out error))
+            {
+                return false;
+            }
+
+            var direct = (directMappings ?? Enumerable.Empty<CompositeSeasonEpisodeMapping>()).ToList();
+            if (!ValidateMappings(ordered, direct, out error))
+            {
+                return false;
+            }
+
+            var replacements = (replacementMappings ?? Enumerable.Empty<CompositeSeasonEpisodeMapping>())
+                .Select(CloneMapping)
+                .ToList();
+            if (!ValidateMappings(ordered, replacements, out error))
+            {
+                return false;
+            }
+
+            // Safety evidence is the original authoritative direct plan before
+            // any dialog exclusions or replacements.  A same-source
+            // replacement can legitimately collapse the executable draft to
+            // one source, but it must never erase the fact that the durable
+            // Episode evidence described a composite Season.
+            var preExclusionPlan = BuildPlan(
+                ordered,
+                direct.Select(CloneMapping).ToList(),
+                null,
+                false);
+            var excludedSet = new HashSet<string>(exclusions, StringComparer.OrdinalIgnoreCase);
+            var finalMappings = direct
+                .Where(mapping => !excludedSet.Contains(mapping.LocalEpisodeItemId))
+                .Select(CloneMapping)
+                .ToList();
+            finalMappings.AddRange(replacements);
+            if (!ValidateMappings(ordered, finalMappings, out error))
+            {
+                return false;
+            }
+
+            var finalPlan = BuildPlan(ordered, finalMappings, exclusions, false);
+            finalPlan.CompositeSafetyRequired = durableCompositeMarker ||
+                                                preExclusionPlan.IsComposite ||
+                                                finalPlan.IsComposite;
+            plan = finalPlan;
+            return true;
+        }
+
+        /// <summary>
+        /// Validates browser exclusion intent against the exact authoritative
+        /// local Season inventory.  Duplicates are harmless and collapse to a
+        /// stable local-order list; a blank, unknown, or otherwise malformed
+        /// value rejects the whole draft.
+        /// </summary>
+        public static bool TryNormalizeExcludedLocalEpisodeItemIds(
+            IEnumerable<CompositeSeasonLocalEpisode> localEpisodes,
+            IEnumerable<string> submittedExcludedItemIds,
+            out List<string> effectiveExcludedItemIds,
+            out string error)
+        {
+            effectiveExcludedItemIds = new List<string>();
             if (!TryOrderEpisodes(localEpisodes, out var ordered, out error))
             {
                 return false;
             }
 
-            var mappings = (explicitMappings ?? Enumerable.Empty<CompositeSeasonEpisodeMapping>()).ToList();
-            if (!ValidateMappings(ordered, mappings, out error))
+            var localIds = new HashSet<string>(ordered.Select(x => x.ItemId), StringComparer.OrdinalIgnoreCase);
+            var submitted = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var itemId in submittedExcludedItemIds ?? Enumerable.Empty<string>())
+            {
+                if (string.IsNullOrWhiteSpace(itemId))
+                {
+                    error = "Every excluded Episode ItemId must be non-empty.";
+                    return false;
+                }
+                if (!localIds.Contains(itemId))
+                {
+                    error = "An excluded Episode ItemId is outside the target season.";
+                    return false;
+                }
+                submitted.Add(itemId);
+            }
+
+            // Echo in authoritative local order so repeated preview/download
+            // calls have deterministic wire output independent of input order.
+            effectiveExcludedItemIds = ordered.Where(x => submitted.Contains(x.ItemId))
+                .Select(x => x.ItemId)
+                .ToList();
+            error = string.Empty;
+            return true;
+        }
+
+        /// <summary>
+        /// Pure Restore state transition.  The browser/controller remains
+        /// responsible for discarding a replacement selection for the same
+        /// local run; this method only removes its stable local ids from the
+        /// dialog's exclusion intent.
+        /// </summary>
+        public static bool TryRestoreExcludedLocalEpisodeItemIds(
+            IEnumerable<CompositeSeasonLocalEpisode> localEpisodes,
+            IEnumerable<string> effectiveExcludedItemIds,
+            IEnumerable<string> localEpisodeItemIdsToRestore,
+            out List<string> remainingExcludedItemIds,
+            out string error)
+        {
+            remainingExcludedItemIds = new List<string>();
+            if (!TryNormalizeExcludedLocalEpisodeItemIds(localEpisodes, effectiveExcludedItemIds,
+                    out var current, out error) ||
+                !TryNormalizeExcludedLocalEpisodeItemIds(localEpisodes, localEpisodeItemIdsToRestore,
+                    out var restore, out error))
             {
                 return false;
             }
 
-            plan = BuildPlan(ordered, mappings);
+            var currentSet = new HashSet<string>(current, StringComparer.OrdinalIgnoreCase);
+            if (restore.Any(itemId => !currentSet.Contains(itemId)))
+            {
+                error = "Only currently excluded Episode ItemIds may be restored.";
+                return false;
+            }
+
+            var restoreSet = new HashSet<string>(restore, StringComparer.OrdinalIgnoreCase);
+            remainingExcludedItemIds = current.Where(itemId => !restoreSet.Contains(itemId)).ToList();
+            error = string.Empty;
             return true;
+        }
+
+        /// <summary>
+        /// The cleanup barrier exists only after a real file was persisted.
+        /// A zero-result composite download must not create a marker or clear
+        /// Season ProviderIds.
+        /// </summary>
+        public static bool ShouldApplyCompositeSafetyAfterPersist(
+            CompositeSeasonPlan plan, bool filePersisted)
+        {
+            return filePersisted && plan != null && plan.CompositeSafetyRequired;
+        }
+
+        /// <summary>Returns maximal contiguous mapped runs with one stable source.</summary>
+        public static List<CompositeSeasonMappedRun> GetEditableMappedRuns(CompositeSeasonPlan plan)
+        {
+            if (!ValidatePlan(plan, out _)) return new List<CompositeSeasonMappedRun>();
+            var byLocalId = plan.Mappings.ToDictionary(x => x.LocalEpisodeItemId,
+                StringComparer.OrdinalIgnoreCase);
+            var runs = new List<CompositeSeasonMappedRun>();
+            CompositeSeasonMappedRun current = null;
+            foreach (var local in plan.OrderedEpisodes)
+            {
+                if (!byLocalId.TryGetValue(local.ItemId, out var mapping))
+                {
+                    current = null;
+                    continue;
+                }
+                if (current == null || !current.Source.Equals(mapping.Source))
+                {
+                    current = new CompositeSeasonMappedRun { Source = CloneSource(mapping.Source) };
+                    runs.Add(current);
+                }
+                current.Mappings.Add(CloneMapping(mapping));
+            }
+            return runs;
         }
 
         /// <summary>
@@ -149,7 +318,10 @@ namespace Emby.Plugin.Danmu.Scraper
                 return false;
             }
 
-            plan = BuildPlan(currentPlan.OrderedEpisodes, mappings);
+            plan = BuildPlan(currentPlan.OrderedEpisodes, mappings,
+                currentPlan.EffectiveExcludedLocalEpisodeItemIds,
+                currentPlan.CompositeSafetyRequired);
+            plan.CompositeSafetyRequired = plan.CompositeSafetyRequired || plan.IsComposite;
             appliedEpisodeCount = count;
             return true;
         }
@@ -168,8 +340,18 @@ namespace Emby.Plugin.Danmu.Scraper
                 return false;
             }
 
-            var expected = BuildPlan(ordered, plan.Mappings);
-            if (plan.IsComposite != expected.IsComposite || !RunsEqual(plan.UnmatchedRuns, expected.UnmatchedRuns))
+            if (!TryNormalizeExcludedLocalEpisodeItemIds(ordered, plan.EffectiveExcludedLocalEpisodeItemIds,
+                    out var exclusions, out error))
+            {
+                return false;
+            }
+
+            var expected = BuildPlan(ordered, plan.Mappings, exclusions,
+                plan.CompositeSafetyRequired || plan.IsComposite);
+            if (plan.IsComposite != expected.IsComposite ||
+                plan.CompositeSafetyRequired != expected.CompositeSafetyRequired ||
+                !plan.EffectiveExcludedLocalEpisodeItemIds.SequenceEqual(exclusions, StringComparer.OrdinalIgnoreCase) ||
+                !RunsEqual(plan.UnmatchedRuns, expected.UnmatchedRuns))
             {
                 error = "The plan derived state does not match its exact mappings.";
                 return false;
@@ -285,7 +467,9 @@ namespace Emby.Plugin.Danmu.Scraper
 
         private static CompositeSeasonPlan BuildPlan(
             IEnumerable<CompositeSeasonLocalEpisode> orderedEpisodes,
-            IEnumerable<CompositeSeasonEpisodeMapping> mappings)
+            IEnumerable<CompositeSeasonEpisodeMapping> mappings,
+            IEnumerable<string> effectiveExcludedItemIds = null,
+            bool compositeSafetyRequired = false)
         {
             var ordered = orderedEpisodes.Select(CloneLocalEpisode).ToList();
             var mappingList = mappings.Select(CloneMapping).ToList();
@@ -313,6 +497,8 @@ namespace Emby.Plugin.Danmu.Scraper
                 Mappings = mappingList,
                 UnmatchedRuns = runs,
                 IsComposite = mappingList.Select(mapping => mapping.Source).Distinct().Skip(1).Any(),
+                EffectiveExcludedLocalEpisodeItemIds = (effectiveExcludedItemIds ?? Enumerable.Empty<string>()).ToList(),
+                CompositeSafetyRequired = compositeSafetyRequired,
             };
         }
 

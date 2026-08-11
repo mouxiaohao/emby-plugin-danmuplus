@@ -79,20 +79,20 @@ namespace Emby.Plugin.Danmu.Scraper.Bilibili
         /// <summary>
         /// Applies rate limiting before making a request.
         /// </summary>
-        protected override async Task LimitRequestFrequently()
+        protected override async Task LimitRequestFrequently(CancellationToken cancellationToken = default)
         {
             // 首先调用基类的通用延迟 (如果AbstractApi的延迟也需要保留的话)
             // await base.LimitRequestFrequently(); 
     
             // 然后应用针对B站API的更严格的控制
-            await _biliApiRateLimiter.WaitAsync().ConfigureAwait(false);
+            await _biliApiRateLimiter.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {
                 var now = DateTime.UtcNow;
                 var timeSinceLastRequest = now - _lastBiliApiRequestTime;
                 if (timeSinceLastRequest < _biliApiMinInterval)
                 {
-                    await Task.Delay(_biliApiMinInterval - timeSinceLastRequest).ConfigureAwait(false);
+                    await Task.Delay(_biliApiMinInterval - timeSinceLastRequest, cancellationToken).ConfigureAwait(false);
                 }
                 _lastBiliApiRequestTime = DateTime.UtcNow; // 更新最后请求时间
             }
@@ -104,6 +104,7 @@ namespace Emby.Plugin.Danmu.Scraper.Bilibili
 
         public async Task<SearchResult> SearchAsync(string keyword, CancellationToken cancellationToken)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             if (string.IsNullOrEmpty(keyword))
             {
                 return new SearchResult();
@@ -117,7 +118,7 @@ namespace Emby.Plugin.Danmu.Scraper.Bilibili
                 return searchResult!; // Nullable reference type fix
             }
 
-            await this.LimitRequestFrequently();
+            await this.LimitRequestFrequently(cancellationToken).ConfigureAwait(false);
             bool sessionEnsured = await this.EnsureSessionCookie(cancellationToken).ConfigureAwait(false);
             if (!sessionEnsured)
             {
@@ -683,6 +684,10 @@ namespace Emby.Plugin.Danmu.Scraper.Bilibili
                     videoInfo = videoJson.FromJson<BiliplusVideo>();
                 }
             }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
             catch (Exception ex)
             {
                 // Log the error but don't re-throw, just return null
@@ -879,6 +884,10 @@ namespace Emby.Plugin.Danmu.Scraper.Bilibili
                     }
                 }
             }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
             catch (Exception ex)
             {
                 _logger.Warn("尝试通过请求B站首页获取 buvid3 时发生错误，将继续尝试后备方案。");
@@ -928,6 +937,10 @@ namespace Emby.Plugin.Danmu.Scraper.Bilibili
                     _logger.Warn($"/x/web-frontend/getbuvid API 返回异常或数据缺失: Code={buvidResult?.Code}");
                     return false;
                 }
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
             }
             catch (HttpRequestException ex)
             {

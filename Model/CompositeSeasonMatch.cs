@@ -82,6 +82,35 @@ namespace Emby.Plugin.Danmu.Model
         public List<CompositeSeasonUnmatchedRun> UnmatchedRuns { get; set; } =
             new List<CompositeSeasonUnmatchedRun>();
         public bool IsComposite { get; set; }
+
+        /// <summary>
+        /// The effective dialog-local exclusions accepted by the authoritative
+        /// season plan.  They are intent only: they never change Emby's
+        /// Episode metadata and may coexist with a verified replacement
+        /// mapping for the same local ItemId.
+        /// </summary>
+        public List<string> EffectiveExcludedLocalEpisodeItemIds { get; set; } =
+            new List<string>();
+
+        /// <summary>
+        /// Whether this executable plan must retain the composite write
+        /// barrier.  Unlike <see cref="IsComposite"/>, this remains true when
+        /// a session exclusion leaves one visible source after the durable
+        /// marker or the pre-exclusion authoritative plan proved composition.
+        /// </summary>
+        public bool CompositeSafetyRequired { get; set; }
+    }
+
+    /// <summary>
+    /// One editable mapped card.  The planner creates these from stable local
+    /// order, never by globally grouping a source, so an interrupted source
+    /// correctly appears as separate cards.
+    /// </summary>
+    public sealed class CompositeSeasonMappedRun
+    {
+        public CompositeSeasonSourceIdentity Source { get; set; } = new CompositeSeasonSourceIdentity();
+        public List<CompositeSeasonEpisodeMapping> Mappings { get; set; } =
+            new List<CompositeSeasonEpisodeMapping>();
     }
 
     /// <summary>

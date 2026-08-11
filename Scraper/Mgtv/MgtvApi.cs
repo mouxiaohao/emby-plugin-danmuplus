@@ -56,6 +56,7 @@ namespace Emby.Plugin.Danmu.Scrapers.Mgtv
 
         public async Task<List<MgtvSearchItem>> SearchAsync(string keyword, CancellationToken cancellationToken)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             if (string.IsNullOrEmpty(keyword))
             {
                 return new List<MgtvSearchItem>();
@@ -68,7 +69,7 @@ namespace Emby.Plugin.Danmu.Scrapers.Mgtv
                 return cacheValue;
             }
 
-            await this.LimitRequestFrequently();
+            await this.LimitRequestFrequently(cancellationToken).ConfigureAwait(false);
 
             keyword = HttpUtility.UrlEncode(keyword);
             var url = $"https://mobileso.bz.mgtv.com/msite/search/v2?q={keyword}&pc=30&pn=1&sort=-99&ty=0&du=0&pt=0&corr=1&abroad=0&_support=10000000000000000";
@@ -297,16 +298,16 @@ namespace Emby.Plugin.Danmu.Scrapers.Mgtv
             }
         }
 
-        protected async Task LimitRequestFrequently()
+        protected override async Task LimitRequestFrequently(CancellationToken cancellationToken = default)
         {
-            await _mgtvApiRateLimiter.WaitAsync().ConfigureAwait(false);
+            await _mgtvApiRateLimiter.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {
                 var now = DateTime.UtcNow;
                 var timeSinceLastRequest = now - _lastMgtvApiRequestTime;
                 if (timeSinceLastRequest < _mgtvApiMinInterval)
                 {
-                    await Task.Delay(_mgtvApiMinInterval - timeSinceLastRequest).ConfigureAwait(false);
+                    await Task.Delay(_mgtvApiMinInterval - timeSinceLastRequest, cancellationToken).ConfigureAwait(false);
                 }
                 _lastMgtvApiRequestTime = DateTime.UtcNow; // 更新最后请求时间
             }

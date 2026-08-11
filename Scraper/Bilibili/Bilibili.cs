@@ -47,14 +47,14 @@ namespace Emby.Plugin.Danmu.Scraper.Bilibili
             return episodePubTime > 0 ? UnixTimeStampToYear(episodePubTime.Value) : (int?)null;
         }
 
-        private async Task<string> ResolveMoviePgcEpisodeIdAsync(long seasonId)
+        private async Task<string> ResolveMoviePgcEpisodeIdAsync(long seasonId, CancellationToken cancellationToken)
         {
             if (seasonId <= 0)
             {
                 return string.Empty;
             }
 
-            var season = await _api.GetSeasonAsync(seasonId, CancellationToken.None).ConfigureAwait(false);
+            var season = await _api.GetSeasonAsync(seasonId, cancellationToken).ConfigureAwait(false);
             var episode = season?.Episodes?.FirstOrDefault(x =>
                 x != null && x.Id > 0 && x.CId > 0 &&
                 !EpisodeContentClassifier.IsExplicitNonMain(
@@ -69,14 +69,20 @@ namespace Emby.Plugin.Danmu.Scraper.Bilibili
         public override string ProviderId => ScraperProviderId;
 
 
-        public override async Task<List<ScraperSearchInfo>> Search(BaseItem item)
+        public override Task<List<ScraperSearchInfo>> Search(BaseItem item)
         {
+            return Search(item, CancellationToken.None);
+        }
+
+        public override async Task<List<ScraperSearchInfo>> Search(BaseItem item, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
             var list = new List<ScraperSearchInfo>();
             log.Info($"Bilibili.Search - 开始为 Emby 项目搜索: '{item.Name}', 类型: {item.GetType().Name}, 路径: '{item.Path}'");
             var isMovieItemType = item is MediaBrowser.Controller.Entities.Movies.Movie;
             var searchName = this.NormalizeSearchName(item.Name);
             log.Info($"Bilibili.Search - Emby 项目 '{item.Name}' 的标准化搜索名称: '{searchName}'");
-            var searchResult = await this._api.SearchAsync(searchName, CancellationToken.None).ConfigureAwait(false);
+            var searchResult = await this._api.SearchAsync(searchName, cancellationToken).ConfigureAwait(false);
             try
             {
                 if (searchResult == null || searchResult.Result == null)
@@ -140,7 +146,7 @@ namespace Emby.Plugin.Danmu.Scraper.Bilibili
                         var seasonId = mediaItem.SeasonId > 0
                             ? mediaItem.SeasonId
                             : mediaItem.PgcSeasonId;
-                        id = await ResolveMoviePgcEpisodeIdAsync(seasonId).ConfigureAwait(false);
+                        id = await ResolveMoviePgcEpisodeIdAsync(seasonId, cancellationToken).ConfigureAwait(false);
                         if (string.IsNullOrWhiteSpace(id))
                         {
                             log.Info("Bilibili.Search - 电影候选没有可验证的 PGC 正片 ep_id，跳过: {0}", title);
@@ -159,6 +165,10 @@ namespace Emby.Plugin.Danmu.Scraper.Bilibili
                     });
                 }
             }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
             catch (Exception ex)
             {
                 log.LogError(ex, "Bilibili.Search - 处理 Emby 项目 '{0}' (标准化名称: '{1}') 时发生错误", item.Name, searchName);
@@ -168,8 +178,16 @@ namespace Emby.Plugin.Danmu.Scraper.Bilibili
             return list;
         }
 
-        public override async Task<List<ScraperSearchInfo>> SearchForApi(string keyword)
+        public override Task<List<ScraperSearchInfo>> SearchForApi(string keyword)
         {
+            return SearchForApi(keyword, CancellationToken.None);
+        }
+
+        public override async Task<List<ScraperSearchInfo>> SearchForApi(
+            string keyword,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
             var candidates = new List<ScraperSearchInfo>();
             if (string.IsNullOrWhiteSpace(keyword))
             {
@@ -178,7 +196,7 @@ namespace Emby.Plugin.Danmu.Scraper.Bilibili
 
             keyword = keyword.Trim();
             log.Info("Bilibili.SearchForApi - searching keyword '{0}'.", keyword);
-            var searchResult = await _api.SearchAsync(keyword, CancellationToken.None).ConfigureAwait(false);
+            var searchResult = await _api.SearchAsync(keyword, cancellationToken).ConfigureAwait(false);
             var mediaItems = searchResult?.Result ??
                 new List<Emby.Plugin.Danmu.Scraper.Bilibili.Entity.Media>();
             var skipped = 0;

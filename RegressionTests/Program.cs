@@ -62,8 +62,8 @@ namespace Emby.Plugin.Danmu.RegressionTests
             PreservesSameSiteHighestScoreTieAmbiguity();
             SelectsCloseHighConfidenceCandidatesBySitePriority();
             ScoresMoviesAndFiltersTelevisionCandidates();
-            ScoresAliasCandidatesWithStructuralEvidence();
-            DiscoversMovieAliasesAndPreservesStandardProvenance();
+            ScoresStandardCandidatesWithoutDynamicAliasMode();
+            UsesOneMovieSearchTermAndPreservesStandardProvenance();
             IsolatesMovieProviderFailures();
             ResolvesProviderIdsBySiteThenHierarchy();
             EnforcesItemLocalProviderScopes();
@@ -99,6 +99,7 @@ namespace Emby.Plugin.Danmu.RegressionTests
             EmbedsDandanCredentialSettings();
             VerifiesVersionedConfigurationPageResources();
             VerifiesSingleTargetSmartMatchReliabilityContracts();
+            PreservesStrmIndependentSeasonResolutionContract();
             PreservesValidUnicodeWhileRemovingInvalidXmlScalars();
             RemovesInvalidXmlCharacterReferences();
             PreservesCharacterReferenceTextInsideCdata();
@@ -357,31 +358,22 @@ namespace Emby.Plugin.Danmu.RegressionTests
                 "identifiable television candidates must be rejected for movies");
         }
 
-        private static void ScoresAliasCandidatesWithStructuralEvidence()
+        private static void ScoresStandardCandidatesWithoutDynamicAliasMode()
         {
             var source = new ScraperSearchInfo
             {
-                Id = "alias-season",
+                Id = "standard-season",
                 Name = "abcdefzzzz",
                 Year = 2024,
                 EpisodeSize = 12,
             };
             var standard = DanmuMatchScorer.Score(
                 source, "AliasID", "Alias", 0, "abcdefghij", "abcdefghij", 2024, 12);
-            var alias = DanmuMatchScorer.Score(
-                source, "AliasID", "Alias", 0, "abcdefghij", "abcdefghij", 2024, 12, true);
-            var expectedAlias = Math.Round(
-                alias.TitleScore * 0.35 + alias.YearScore * 0.20 + alias.EpisodeScore * 0.45,
-                4,
-                MidpointRounding.AwayFromZero);
-
-            Assert(alias.TitleScore >= 0.72 && alias.Score == expectedAlias && alias.Score >= 0.90,
-                "an alias-only season with related title and exact year/count must use 35/20/45 and reach confidence");
             Assert(Math.Abs(standard.Score - Math.Round(
                        standard.TitleScore * 0.55 + standard.YearScore * 0.15 + standard.EpisodeScore * 0.30,
                        4,
                        MidpointRounding.AwayFromZero)) < 0.0001,
-                "standard discovery must retain the existing no-keyword season weights");
+                "fixed-term discovery must retain the standard no-keyword season weights");
 
             var unrelated = DanmuMatchScorer.Score(
                 new ScraperSearchInfo
@@ -391,27 +383,27 @@ namespace Emby.Plugin.Danmu.RegressionTests
                     Year = 2024,
                     EpisodeSize = 12,
                 },
-                "AliasID", "Alias", 0, "abcdefghij", "abcdefghij", 2024, 12, true);
+                "AliasID", "Alias", 0, "abcdefghij", "abcdefghij", 2024, 12);
             Assert(unrelated.TitleScore < 0.72 && unrelated.Score < 0.90,
-                "exact year/count must not rescue an alias below the 0.72 title floor");
+                "exact year/count must not rescue an unrelated fixed-term candidate");
 
-            var movieAlias = DanmuMatchScorer.ScoreMovie(
+            var movie = DanmuMatchScorer.ScoreMovie(
                 new ScraperSearchInfo
                 {
-                    Id = "alias-movie",
+                    Id = "standard-movie",
                     Name = "abcdefzzzz",
                     Category = "movie",
                     Year = 2024,
                 },
-                "AliasID", "Alias", 0, "abcdefghij", 2024, true);
-            Assert(movieAlias.Score == Math.Round(
-                       movieAlias.TitleScore * 0.70 + movieAlias.YearScore * 0.30,
+                "AliasID", "Alias", 0, "abcdefghij", 2024);
+            Assert(movie.Score == Math.Round(
+                       movie.TitleScore * 0.82 + movie.YearScore * 0.18,
                        4,
                        MidpointRounding.AwayFromZero),
-                "alias-only movies must use 70/30 title/year scoring");
+                "fixed-term movies must use the standard title/year scoring");
         }
 
-        private static void DiscoversMovieAliasesAndPreservesStandardProvenance()
+        private static void UsesOneMovieSearchTermAndPreservesStandardProvenance()
         {
             const string movieName = "Alpha Adventure：Hidden Alias";
             var provider = new FakeScraper(
@@ -442,9 +434,9 @@ namespace Emby.Plugin.Danmu.RegressionTests
                     null)
                 .GetAwaiter().GetResult();
 
-            Assert(provider.SearchNames.Contains("Hidden Alias") &&
-                   result.Candidates.Any(x => x.Id == "movie-alias" && x.Score >= 0.90),
-                "Movie search must apply bounded local clauses through the Movie-specific provider path");
+            Assert(provider.SearchNames.SequenceEqual(new[] { movieName }) &&
+                   !result.Candidates.Any(x => x.Id == "movie-alias"),
+                "Movie search must issue only its standard metadata term and never follow a title-clause alias");
 
             var duplicateProvider = new FakeScraper(
                 "MovieDuplicateID",
@@ -465,16 +457,6 @@ namespace Emby.Plugin.Danmu.RegressionTests
                             Year = 2000,
                         },
                     },
-                    ["Hidden Alias"] = new List<ScraperSearchInfo>
-                    {
-                        new ScraperSearchInfo
-                        {
-                            Id = "same",
-                            Name = movieName,
-                            Category = "movie",
-                            Year = 2024,
-                        },
-                    },
                 });
             var duplicate = DanmuMatchSearchEngine.SearchMovieAsync(
                     new[] { duplicateProvider },
@@ -483,8 +465,9 @@ namespace Emby.Plugin.Danmu.RegressionTests
                     null)
                 .GetAwaiter().GetResult();
             Assert(duplicate.Candidates.Count(x => x.Id == "same") == 1 &&
-                   duplicate.Candidates.Single(x => x.Id == "same").Year == 2000,
-                "a standard-first candidate must retain standard provenance and metadata when an alias round repeats it");
+                   duplicate.Candidates.Single(x => x.Id == "same").Year == 2000 &&
+                   duplicateProvider.SearchNames.SequenceEqual(new[] { movieName }),
+                "Movie default search must retain its sole standard candidate and never add an alias round");
         }
 
         private static void ReplacesOnlyRegisteredOrdinaryProviderIds()
@@ -705,9 +688,22 @@ namespace Emby.Plugin.Danmu.RegressionTests
                 "Movie exact matching must inspect only the Movie");
             Assert(DanmuProviderIdResolver.GetSeasonScopes(season).SequenceEqual(new BaseItem[] { season }),
                 "Season exact matching must inspect only the Season");
-            Assert(DanmuProviderIdResolver.GetEpisodeScopes(episode, season)
-                    .SequenceEqual(new BaseItem[] { episode, season }),
-                "Episode exact matching must inspect Episode before its Season");
+            Assert(DanmuProviderIdResolver.GetSingleEpisodeDirectScopes(episode)
+                    .SequenceEqual(new BaseItem[] { episode }),
+                "single Episode direct matching must inspect only the Episode");
+
+            season.ProviderIds["SeasonOnlyID"] = "season-only";
+            var seasonOnlyScraper = new FakeScraper("SeasonOnlyID", null, false,
+                new Dictionary<string, ScraperMedia>
+                {
+                    ["season-only"] = new ScraperMedia { Id = "season-only" },
+                });
+            var seasonOnlyDecision = DanmuProviderIdResolver.ResolveAsync(
+                    new[] { seasonOnlyScraper },
+                    DanmuProviderIdResolver.GetSingleEpisodeDirectScopes(episode), null)
+                .GetAwaiter().GetResult();
+            Assert(seasonOnlyDecision.Candidate == null && seasonOnlyScraper.MediaCalls == 0,
+                "a Season-only ProviderId must not be reported as Episode-local direct evidence");
 
             series.ProviderIds["ScopedID"] = "series-value";
             var scraper = new FakeScraper("ScopedID", null, false,
@@ -760,7 +756,8 @@ namespace Emby.Plugin.Danmu.RegressionTests
                 repositoryRoot, "Core", "Controllers", "DanmuController.cs"));
             var library = File.ReadAllText(Path.Combine(repositoryRoot, "LibraryManagerEventsHelper.cs"));
             Assert(controller.Contains("latest, authoritativeParentSeries, scrapers") &&
-                   controller.Contains("authoritativeSeries).ConfigureAwait(false)") &&
+                   Regex.IsMatch(controller,
+                       @"GetSingleEpisodeDirectScopes\(latest\)[\s\S]{0,300}authoritativeSeries,[\s\S]{0,100}cancellationToken\)\.ConfigureAwait\(false\)") &&
                    controller.Contains("_libraryManagerEventsHelper.SaveProviderId(item, providerId, providerValue, true)") &&
                    library.Contains("currentItem ?? season, authoritativeSeries, scrapers") &&
                    library.Contains("updateItem.ProviderIds = DanmuProviderIdResolver.GetItemLocalProviderIds("),
@@ -769,95 +766,35 @@ namespace Emby.Plugin.Danmu.RegressionTests
 
         private static void DiscoversCandidatesWithBoundedTitleClauses()
         {
-            const string title = "爱书的下克上：为了成为图书管理员不择手段！";
-            var clauses = DanmuTitleClauseExtractor.Extract(title, new[] { title });
-            Assert(clauses.SequenceEqual(new[] { "爱书的下克上", "为了成为图书管理员不择手段" }),
-                "explicit Chinese punctuation should yield bounded meaningful clauses");
-            Assert(DanmuTitleClauseExtractor.Extract("动画：A：正片：有效标题", null)
-                    .SequenceEqual(new[] { "有效标题" }),
-                "short and generic fragments must not create search rounds");
-            Assert(DanmuTitleClauseExtractor.ExtractProviderAliases(
-                    new[] { "小书痴的下克上 〜为了成为图书管理员而不择手段〜 第三季" },
-                    new[] { title })
-                    .SequenceEqual(new[] { "小书痴的下克上", "为了成为图书管理员而不择手段" }),
-                "a related provider title should yield bounded season-suffix-free aliases without a static dictionary");
+            var repositoryRoot = Path.GetFullPath(Path.Combine(
+                AppContext.BaseDirectory, "..", "..", "..", ".."));
+            var engine = File.ReadAllText(Path.Combine(repositoryRoot, "Scraper", "DanmuMatchSearchEngine.cs"))
+                .Replace("\r\n", "\n");
+            var controller = File.ReadAllText(Path.Combine(
+                repositoryRoot, "Core", "Controllers", "DanmuController.cs")).Replace("\r\n", "\n");
+            var resolver = File.ReadAllText(Path.Combine(
+                repositoryRoot, "Scraper", "DanmuProviderIdResolver.cs")).Replace("\r\n", "\n");
 
-            var preferred = new FakeScraper("PreferredID", null, false, null, null,
-                new Dictionary<string, List<ScraperSearchInfo>>(StringComparer.OrdinalIgnoreCase)
-                {
-                    ["为了成为图书管理员不择手段"] = new List<ScraperSearchInfo>
-                    {
-                        new ScraperSearchInfo
-                        {
-                            Id = "preferred-clause",
-                            Name = title,
-                            Year = 2022,
-                            EpisodeSize = 12,
-                        },
-                    },
-                });
-            var alreadyConfident = new FakeScraper("LaterID", null, false, null, null,
-                new Dictionary<string, List<ScraperSearchInfo>>(StringComparer.OrdinalIgnoreCase)
-                {
-                    [title] = new List<ScraperSearchInfo>
-                    {
-                        new ScraperSearchInfo
-                        {
-                            Id = "later-standard",
-                            Name = title,
-                            Year = 2022,
-                            EpisodeSize = 12,
-                        },
-                    },
-                });
-            var search = DanmuMatchSearchEngine.SearchSeasonAsync(
-                    new AbstractScraper[] { preferred, alreadyConfident },
-                    title, title, 2022, 12, null, null)
-                .GetAwaiter().GetResult();
-            Assert(search.Candidates.Any(x => x.Id == "preferred-clause") &&
-                   DanmuMatchScorer.SelectAutoCandidate(search.Candidates)?.Id == "preferred-clause",
-                "a confident clause result from the earlier configured provider must participate in normal scoring");
-            Assert(!alreadyConfident.ApiKeywords.Contains("为了成为图书管理员不择手段"),
-                "a provider with a confident standard result should not receive clause fallback");
-
-            var aliasProvider = new FakeScraper("AliasID", null, false, null, null,
-                new Dictionary<string, List<ScraperSearchInfo>>(StringComparer.OrdinalIgnoreCase)
-                {
-                    [title] = new List<ScraperSearchInfo>
-                    {
-                        new ScraperSearchInfo
-                        {
-                            Id = "15634",
-                            Name = "小书痴的下克上 〜为了成为图书管理员而不择手段〜 第三季",
-                            Year = 2022,
-                            EpisodeSize = 10,
-                        },
-                    },
-                    ["小书痴的下克上"] = new List<ScraperSearchInfo>
-                    {
-                        new ScraperSearchInfo
-                        {
-                            Id = "15293",
-                            Name = "小书痴的下克上 〜为了成为图书管理员而不择手段〜 第二季",
-                            Year = 2020,
-                            EpisodeSize = 12,
-                        },
-                    },
-                });
-            var aliasSearch = DanmuMatchSearchEngine.SearchSeasonAsync(
-                    new[] { aliasProvider }, title, "第 2 季", 2026, 12, null, null)
-                .GetAwaiter().GetResult();
-            Assert(aliasProvider.ApiKeywords.Contains("小书痴的下克上") &&
-                   aliasSearch.Candidates.Any(x => x.Id == "15293"),
-                "provider-local second-hop aliases must discover otherwise hidden seasons without changing full-title scoring");
-
-            var custom = new FakeScraper("CustomID", null, false, null, null,
-                new Dictionary<string, List<ScraperSearchInfo>>());
-            DanmuMatchSearchEngine.SearchSeasonAsync(
-                    new[] { custom }, title, title, 2022, 12, "只搜索这个词", null)
-                .GetAwaiter().GetResult();
-            Assert(custom.ApiKeywords.SequenceEqual(new[] { "只搜索这个词" }),
-                "an explicit custom keyword must remain isolated from derived clauses");
+            Assert(engine.Contains(".Take(string.IsNullOrWhiteSpace(keywordOverride) ? 2 : 1)") &&
+                   !engine.Contains("DanmuTitleClauseExtractor") &&
+                   !engine.Contains("ExtractProviderAliases"),
+                "Season search must use only bounded standard metadata terms and must not derive punctuation or provider-result aliases");
+            Assert(engine.Contains("// Movies intentionally have one standard metadata term.") &&
+                   !engine.Contains("var clauses = DanmuTitleClauseExtractor.Extract(movieName"),
+                "Movie search must issue exactly one standard or explicit metadata term without a second hop");
+            Assert(resolver.Contains("GetSingleEpisodeDirectScopes(Episode episode)") &&
+                   resolver.Contains("new BaseItem[] { episode }") &&
+                   controller.Contains("DanmuProviderIdResolver.GetSingleEpisodeDirectScopes(latest)"),
+                "the single Episode direct path must never include a Season scope");
+            Assert(controller.Contains("InitializeDecision(result, episodeScrapers, forceSearch);") &&
+                   controller.Contains("if (!forceSearch)\n            {\n                var providerDecision = await DanmuProviderIdResolver.ResolveAsync(\n                    episodeScrapers,") &&
+                   controller.Contains("var rematch = IsRematch(request);"),
+                "force/rematch must bypass Episode direct lookup before search fallback");
+            Assert(CountOccurrences(controller, "result.ResolvedScopeType = decision.ResolvedScopeType;") == 2 &&
+                   CountOccurrences(controller, "result.ResolvedScopeItemId = decision.ResolvedScopeItemId;") == 2 &&
+                   CountOccurrences(controller, "target.ResolvedScopeType = source.ResolvedScopeType;") == 3 &&
+                   CountOccurrences(controller, "target.ResolvedScopeItemId = source.ResolvedScopeItemId;") == 3,
+                "every ApplyProviderDecision and CopyDecision path must preserve resolved scope provenance");
         }
 
         private static void NormalizesDandanStandaloneSeasonOrdinals()
@@ -1787,6 +1724,26 @@ namespace Emby.Plugin.Danmu.RegressionTests
                 Assert(cancelled,
                     "cancellation must win when the cancellation signal and provider result are both already complete");
             }
+        }
+
+        private static void PreservesStrmIndependentSeasonResolutionContract()
+        {
+            var controllerSource = File.ReadAllText(Path.GetFullPath(Path.Combine(
+                AppContext.BaseDirectory, "..", "..", "..", "..", "Core", "Controllers", "DanmuController.cs")));
+            var start = controllerSource.IndexOf(
+                "private Season ResolveSeason(DanmuParams request)", StringComparison.Ordinal);
+            var end = controllerSource.IndexOf(
+                "private static Season SelectSeasonByContext", start, StringComparison.Ordinal);
+            Assert(start >= 0 && end > start,
+                "the Season context resolver must remain available to direct and fallback matching entry points");
+            var resolver = controllerSource.Substring(start, end - start);
+            Assert(resolver.Contains("_libraryManager.GetItemById(request.Id) as Season") &&
+                   resolver.Contains("_libraryManager.GetItemById(request.SeriesId) as Series") &&
+                   resolver.Contains("SelectSeasonByContext(seasons, request)") &&
+                   !resolver.Contains(".Path") &&
+                   !resolver.Contains("ContainingFolderPath") &&
+                   !resolver.Contains("FileNameWithoutExtension"),
+                "Season resolution must use Emby ItemId/Series context and remain independent of STRM or physical media paths");
         }
 
         private static int CountOccurrences(string text, string value)

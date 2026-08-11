@@ -35,12 +35,18 @@ namespace Emby.Plugin.Danmu.Scraper.Dandan
 
         public override string ProviderId => ScraperProviderId;
 
-        public override async Task<List<ScraperSearchInfo>> Search(BaseItem item)
+        public override Task<List<ScraperSearchInfo>> Search(BaseItem item)
         {
+            return Search(item, CancellationToken.None);
+        }
+
+        public override async Task<List<ScraperSearchInfo>> Search(BaseItem item, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
             var list = new List<ScraperSearchInfo>();
             var isMovieItemType = item is MediaBrowser.Controller.Entities.Movies.Movie;
             var searchName = this.NormalizeSearchName(item.Name);
-            var animes = await this._api.SearchAsync(searchName, CancellationToken.None).ConfigureAwait(false);
+            var animes = await this._api.SearchAsync(searchName, cancellationToken).ConfigureAwait(false);
             foreach (var anime in animes)
             {
                 var animeId = anime.AnimeId;
@@ -226,11 +232,19 @@ namespace Emby.Plugin.Danmu.Scraper.Dandan
             return danmaku;
         }
 
-        public override async Task<List<ScraperSearchInfo>> SearchForApi(string keyword)
+        public override Task<List<ScraperSearchInfo>> SearchForApi(string keyword)
         {
+            return SearchForApi(keyword, CancellationToken.None);
+        }
+
+        public override async Task<List<ScraperSearchInfo>> SearchForApi(
+            string keyword,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
             var list = new List<ScraperSearchInfo>();
             log.Info("SearchForApi={0}", keyword);
-            var animes = await this._api.SearchAsync(keyword, CancellationToken.None).ConfigureAwait(false);
+            var animes = await this._api.SearchAsync(keyword, cancellationToken).ConfigureAwait(false);
             foreach (var anime in animes)
             {
                 

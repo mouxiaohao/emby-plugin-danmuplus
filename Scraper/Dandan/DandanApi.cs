@@ -62,6 +62,7 @@ namespace Emby.Plugin.Danmu.Scraper.Dandan
 
         public async Task<List<Anime>> SearchAsync(string keyword, CancellationToken cancellationToken)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             if (string.IsNullOrEmpty(keyword))
             {
                 return new List<Anime>();
@@ -75,7 +76,7 @@ namespace Emby.Plugin.Danmu.Scraper.Dandan
                 return searchResult;
             }
 
-            this.LimitRequestFrequently();
+            await this.LimitRequestFrequentlyAsync(cancellationToken).ConfigureAwait(false);
 
             var encodedKeyword = HttpUtility.UrlEncode(keyword);
             var officialUrl = $"{OfficialApiBaseUrl}search/anime?keyword={encodedKeyword}";
@@ -89,6 +90,7 @@ namespace Emby.Plugin.Danmu.Scraper.Dandan
                 UserAgent = $"{HTTP_USER_AGENT}",
                 TimeoutMs = 30000,
                 AcceptHeader = "application/json",
+                CancellationToken = cancellationToken,
             };
             AddAuthenticationIfRequired(httpRequestOptions, officialUrl, useProxyApi);
             var response = await httpClient.GetResponse(httpRequestOptions).ConfigureAwait(false);
@@ -220,7 +222,7 @@ namespace Emby.Plugin.Danmu.Scraper.Dandan
             throw new Exception($"Request fail. epId={epId}");
         }
 
-        protected void LimitRequestFrequently(double intervalMilliseconds = 1000)
+        protected async Task LimitRequestFrequentlyAsync(CancellationToken cancellationToken, double intervalMilliseconds = 1000)
         {
             var diff = 0;
             lock (_lock)
@@ -233,7 +235,7 @@ namespace Emby.Plugin.Danmu.Scraper.Dandan
             if (diff > 0)
             {
                 this._logger.Debug("请求太频繁，等待{0}毫秒后继续执行...", diff);
-                Thread.Sleep(diff);
+                await Task.Delay(diff, cancellationToken).ConfigureAwait(false);
             }
         }
 

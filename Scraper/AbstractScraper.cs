@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using System.Text.RegularExpressions;
+using System.Threading;
 using System.Threading.Tasks;
 using Emby.Plugin.Danmu.Scraper.Entity;
 using MediaBrowser.Controller.Entities;
@@ -41,6 +42,17 @@ namespace Emby.Plugin.Danmu.Scraper
         public abstract Task<List<ScraperSearchInfo>> Search(BaseItem item);
 
         /// <summary>
+        /// Searches a provider with caller-controlled cancellation. Existing integrations can
+        /// continue using <see cref="Search(BaseItem)"/>; providers opt in by overriding this
+        /// overload and must not turn cancellation into an empty result.
+        /// </summary>
+        public virtual Task<List<ScraperSearchInfo>> Search(BaseItem item, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return Search(item);
+        }
+
+        /// <summary>
         /// 搜索匹配的影片id
         /// </summary>
         /// <param name="item">元数据item</param>
@@ -78,6 +90,18 @@ namespace Emby.Plugin.Danmu.Scraper
         public virtual async Task<List<ScraperSearchInfo>> SearchForApi(string keyword)
         {
             return new List<ScraperSearchInfo>();
+        }
+
+        /// <summary>
+        /// Cancellation-aware API-keyword search entry point. Existing
+        /// providers remain compatible through the legacy overload, while the
+        /// bounded search coordinator can consistently pass its operation
+        /// token into every provider call.
+        /// </summary>
+        public virtual Task<List<ScraperSearchInfo>> SearchForApi(string keyword, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return SearchForApi(keyword);
         }
 
         /// <summary>

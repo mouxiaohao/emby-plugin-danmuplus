@@ -80,8 +80,7 @@ namespace Emby.Plugin.Danmu.Scraper
             string seriesName,
             string seasonName,
             int? expectedYear,
-            int expectedEpisodes,
-            bool aliasDiscovered = false)
+            int expectedEpisodes)
         {
             var title = Normalize(source.Name);
             var parent = Normalize(seriesName);
@@ -111,22 +110,13 @@ namespace Emby.Plugin.Danmu.Scraper
 
             var yearScore = GetYearScore(expectedYear, source.Year);
             var episodeScore = GetEpisodeScore(expectedEpisodes, source.EpisodeSize);
-            var score = aliasDiscovered
-                ? titleScore * 0.35 + yearScore * 0.20 + episodeScore * 0.45
-                : !string.IsNullOrEmpty(seasonKeyword)
-                    ? titleScore * 0.45 + yearScore * 0.15 + episodeScore * 0.40
-                    : titleScore * 0.55 + yearScore * 0.15 + episodeScore * 0.30;
+            var score = !string.IsNullOrEmpty(seasonKeyword)
+                ? titleScore * 0.45 + yearScore * 0.15 + episodeScore * 0.40
+                : titleScore * 0.55 + yearScore * 0.15 + episodeScore * 0.30;
 
-            if (!aliasDiscovered && !string.IsNullOrEmpty(seasonKeyword) && keywordScore < 0.72)
+            if (!string.IsNullOrEmpty(seasonKeyword) && keywordScore < 0.72)
             {
                 score *= 0.72;
-            }
-
-            // Structural evidence may rescue an alternate title, but year/count
-            // alone must never make an unrelated candidate automatic.
-            if (aliasDiscovered && titleScore < 0.72)
-            {
-                score = Math.Min(score, 0.899);
             }
 
             if (!string.IsNullOrWhiteSpace(source.Category) && source.Category.Contains("电影"))
@@ -161,18 +151,11 @@ namespace Emby.Plugin.Danmu.Scraper
             string siteName,
             int sourceOrder,
             string movieName,
-            int? expectedYear,
-            bool aliasDiscovered = false)
+            int? expectedYear)
         {
             var titleScore = SimilarityAgainstTitle(Normalize(movieName), Normalize(source.Name));
             var yearScore = GetYearScore(expectedYear, source.Year);
-            var score = aliasDiscovered
-                ? titleScore * 0.70 + yearScore * 0.30
-                : titleScore * 0.82 + yearScore * 0.18;
-            if (aliasDiscovered && titleScore < 0.72)
-            {
-                score = Math.Min(score, 0.899);
-            }
+            var score = titleScore * 0.82 + yearScore * 0.18;
             if (IsIdentifiableNonMovie(source.Category))
             {
                 score = 0;
