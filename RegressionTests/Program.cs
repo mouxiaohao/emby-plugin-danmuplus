@@ -308,9 +308,9 @@ namespace Emby.Plugin.Danmu.RegressionTests
                 Candidate("second", "MiddleSite", 2, 0.99),
                 Candidate("preferred", "PrioritySite", 0, 0.98)
             });
-            Assert(preferredThirdScore.Select(x => x.Id).SequenceEqual(new[] { "preferred", "full", "second" }) &&
+            Assert(preferredThirdScore.Select(x => x.Id).SequenceEqual(new[] { "preferred", "second", "full" }) &&
                    DanmuMatchScorer.SelectAutoCandidate(preferredThirdScore)?.Id == "preferred",
-                "the earliest confident site wins over all later scores");
+                "display stays in provider order while the earliest confident site wins over later scores");
 
             Assert(DanmuMatchScorer.SelectAutoCandidate(preferredRunnerUp, false)?.Id == "preferred" &&
                    DanmuMatchScorer.SelectAutoCandidate(outsideGap, false)?.Id == "outside",
@@ -882,9 +882,10 @@ namespace Emby.Plugin.Danmu.RegressionTests
                    controller.Contains("PersistSeasonProviderIdAfterAcceptedOutcome(") &&
                    controller.Contains("task.SeasonProviderWriteGeneration") &&
                    controller.Contains("task.SeasonProviderCommitted") &&
-                   controller.Contains("if (request.Manual)") &&
-                   controller.Contains("SaveManualBindingAsync(season"),
-                "tracked Season downloads must write each successful Episode and commit the Season only from accepted file success");
+                   controller.Contains("CanPersistCompleteSeasonBinding") &&
+                   controller.Contains("ErrorCode = \"mapping_required\"") &&
+                   controller.Contains("ErrorCode = \"partial_confirmation_required\""),
+                "mapped Season downloads must write each successful Episode, persist a Season binding only for a complete single-source plan, and reject positional or unconfirmed partial downloads");
             Assert(library.Contains("persisted = true") &&
                    library.Contains("SaveAutomaticSeasonProviderId(") &&
                    library.Contains("MarkStarted(GetProviderWriteKey(item, providerId), generation)") &&
@@ -910,11 +911,13 @@ namespace Emby.Plugin.Danmu.RegressionTests
                    seriesPreview.Contains("Recursive = false") &&
                    !seriesPreview.Contains("DtoOptions"),
                 "Series match preview must enumerate direct, non-projected library Seasons with ProviderIds intact");
-            Assert(controller.Contains("item is Series,\n                    item as Series,") &&
+            Assert(controller.Contains("item is Series,") &&
+                   controller.Contains("item as Series,") &&
                    controller.Contains("bool preserveProvidedSeason = false") &&
                    controller.Contains("Series explicitParentSeries = null") &&
                    controller.Contains("_libraryManager.GetItemById(parentSeries.InternalId)") &&
-                   controller.Contains("? season\n                : _libraryManager.GetItemById(season.Id)"),
+                   controller.Contains("var latest = preserveProvidedSeason") &&
+                   controller.Contains(": _libraryManager.GetItemById(season.Id) as Season ?? season"),
                 "Series preview must pass its entry Series explicitly while direct Season/Episode paths refresh the parent by InternalId");
 
             var scraper = new FakeScraper("SeriesSeasonID", null, false, new Dictionary<string, ScraperMedia>

@@ -5,6 +5,13 @@ using System.Text.Json;
 
 namespace Emby.Plugin.Danmu.Model
 {
+    public static class DanmuMatchScoreOrigin
+    {
+        public const string SearchConfidence = "search-confidence";
+        public const string ExactEpisodeId = "exact-episode-id";
+        public const string ExactBinding = "exact-binding";
+    }
+
     public class DanmuMatchPreviewResult
     {
         public string ItemId { get; set; } = string.Empty;
@@ -118,6 +125,9 @@ namespace Emby.Plugin.Danmu.Model
         public string SourceStartEpisodeId { get; set; } = string.Empty;
         public int? SourceStartEpisodeNumber { get; set; }
         public string MatchOrigin { get; set; } = string.Empty;
+        public double MatchScore { get; set; }
+        public string ScoreOrigin { get; set; } = string.Empty;
+        public string SelectionEvidenceToken { get; set; } = string.Empty;
         public List<DanmuCompositeEpisode> Episodes { get; set; } = new List<DanmuCompositeEpisode>();
     }
 
@@ -141,6 +151,7 @@ namespace Emby.Plugin.Danmu.Model
         public string SourceStartEpisodeId { get; set; } = string.Empty;
         public int? SourceStartEpisodeNumber { get; set; }
         public string MatchOrigin { get; set; } = "manual";
+        public string SelectionEvidenceToken { get; set; } = string.Empty;
     }
 
     /// <summary>
@@ -305,6 +316,9 @@ namespace Emby.Plugin.Danmu.Model
         public int? Year { get; set; }
         public int EpisodeSize { get; set; }
         public double Score { get; set; }
+        public double MatchScore { get; set; }
+        public string ScoreOrigin { get; set; } = DanmuMatchScoreOrigin.SearchConfidence;
+        public string SelectionEvidenceToken { get; set; } = string.Empty;
         public double TitleScore { get; set; }
         public double ParentTitleScore { get; set; }
         public double KeywordScore { get; set; }
@@ -328,6 +342,9 @@ namespace Emby.Plugin.Danmu.Model
         public string SiteName { get; set; } = string.Empty;
         public string Name { get; set; } = string.Empty;
         public double Score { get; set; }
+        public double MatchScore { get; set; }
+        public string ScoreOrigin { get; set; } = string.Empty;
+        public string SelectionEvidenceToken { get; set; } = string.Empty;
         public int SourceOrder { get; set; }
         public string MatchOrigin { get; set; } = string.Empty;
         public string DecisionReason { get; set; } = string.Empty;
@@ -382,6 +399,7 @@ namespace Emby.Plugin.Danmu.Model
         public string CandidateId { get; set; } = string.Empty;
         public bool Manual { get; set; }
         public string Message { get; set; } = string.Empty;
+        public string ErrorCode { get; set; } = string.Empty;
     }
 
     public class DanmuDownloadTaskResult
@@ -408,6 +426,7 @@ namespace Emby.Plugin.Danmu.Model
         public bool SeasonProviderCommitted { get; set; }
         public string Status { get; set; } = "pending";
         public string Message { get; set; } = string.Empty;
+        public string ErrorCode { get; set; } = string.Empty;
         public int Total { get; set; }
         public int Completed { get; set; }
         public int Succeeded { get; set; }

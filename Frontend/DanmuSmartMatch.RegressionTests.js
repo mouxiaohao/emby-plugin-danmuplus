@@ -216,12 +216,28 @@ async function waitUntil(predicate, message) {
 }
 
 async function main() {
-    assert((source.match(/__embyDanmuSmartMenuV18/g) || []).length === 1 &&
-        !source.includes("__embyDanmuSmartMenuV17"),
-        "the r2 frontend installation flag should be V18 exactly once");
+    assert((source.match(/__embyDanmuSmartMenuV19/g) || []).length === 1 &&
+        !source.includes("__embyDanmuSmartMenuV18"),
+        "the r3 frontend installation flag should be V19 exactly once");
+    /* r2 intentionally hid all scores; r3 replaces that contract below.
     assert(!/\bScore\b|综合评分|评分：/.test(source),
         "the frontend must not calculate or display candidate scores");
     assert(!/textContent\s*=\s*["'](?:取消|关闭)["']/.test(source),
+    */
+    assert(hooks.matchScoreLine({ MatchScore: 0.934, ScoreOrigin: "search-confidence" }) ===
+        "匹配分：93.4（标题匹配）",
+        "searched candidates must display the server-authored score and provenance");
+    assert(hooks.matchScoreLine({ MatchScore: 1, ScoreOrigin: "exact-episode-id" }) ===
+        "匹配分：100（精确标识符）",
+        "exact evidence must display identifier provenance, not title similarity");
+    assert(hooks.matchScoreLine({ MatchScore: 1, ScoreOrigin: "exact-binding" }) ===
+        "匹配分：100（精确标识符）" &&
+        hooks.matchScoreLine({ MatchScore: 1, ScoreOrigin: "verified-binding" }) ===
+        "匹配分：100（精确标识符）",
+        "exact bindings must use the closed provenance label while legacy persisted values remain readable");
+    assert(source.includes("matchScoreLine(candidate)") && source.includes("matchScoreLine(mapping)"),
+        "candidate rows and confirmed mapping details must both retain visible server scores");
+    assert(!/textContent\s*=\s*["'](?:鍙栨秷|鍏抽棴)["']/.test(source),
         "smart-match footers must expose only the top-right close button and Escape for ordinary dismissal");
     assert(source.includes("env(safe-area-inset-top,0px)") &&
         source.includes(".danmuSmartHeader{padding-top:calc(1.75rem"),

@@ -31,6 +31,8 @@ namespace Emby.Plugin.Danmu.RegressionTests
             ParsesCompositeSelectionsFromScalarQueryJson();
             SupportsCompositeMappingForAnyLocalSeason();
             DoesNotClassifySingleSourcePartialCoverageAsComposite();
+            MapsTwentyFiveEpisodePartSourcesWithBindingSafety();
+            CoordinatesSingletonAndSeriesTargetSetsIdentically();
             MapsMultipleSpecialRunsWithoutChangingLocalSeasonMembership();
             SeparatesCanonicalMediaIdentityFromLookupToken();
             RejectsOverlapsAndUnverifiedMappings();
@@ -46,6 +48,7 @@ namespace Emby.Plugin.Danmu.RegressionTests
             RetainsCompositeSafetyWhenReplacementCollapsesToOneSource();
             RejectsForeignAndStaleTemporaryRangesWithoutMutatingThePlan();
             VerifiesControllerParityMetadataAndDialogResetContracts();
+            PreservesExactBindingScoreIntoSelectedCandidate();
         }
 
         private static void PreservesExplicitEvidenceAndBuildsRemainingRuns()
@@ -338,8 +341,56 @@ namespace Emby.Plugin.Danmu.RegressionTests
                 Segment("local-1", "DandanID", "one-source", "one-1",
                     Enumerable.Range(1, 8).Select(number => Source("one-" + number, "one-comment-" + number, number))),
                 out plan, out var applied, out error), error);
-            Assert(applied == 8 && !plan.IsComposite && RunIds(plan.UnmatchedRuns.Single()) == "local-9,local-10,local-11,local-12",
-                "a partial download from one upstream media must retain a temporary group but must not clear the Season binding");
+            Assert(applied == 8 && !plan.IsComposite && plan.SeasonBindingUnsafe &&
+                   !plan.CanPersistCompleteSeasonBinding &&
+                   RunIds(plan.UnmatchedRuns.Single()) == "local-9,local-10,local-11,local-12",
+                "a partial one-source plan is not composite, but must still block and clear a stale complete Season binding after persistence");
+        }
+
+        private static void MapsTwentyFiveEpisodePartSourcesWithBindingSafety()
+        {
+            Assert(CompositeSeasonPlanner.TryCreatePlan(LocalEpisodes(1, 25), null,
+                out var plan, out var error), error);
+            Assert(CompositeSeasonPlanner.TryApplySegment(plan,
+                Segment("local-1", "DandanID", "spy-family-part-1", "part1-1",
+                    Enumerable.Range(1, 12).Select(number =>
+                        Source("part1-" + number, "part1-comment-" + number, number))),
+                out plan, out var applied, out error), error);
+            Assert(applied == 12 && plan.Mappings.Count == 12 &&
+                   RunIds(plan.UnmatchedRuns.Single()) == string.Join(",",
+                       Enumerable.Range(13, 13).Select(number => "local-" + number)) &&
+                   plan.SeasonBindingUnsafe && !plan.CanPersistCompleteSeasonBinding,
+                "Spy x Family Part 1 must map 12/25 and leave one maximal 13-Episode temporary run");
+
+            Assert(CompositeSeasonPlanner.TryApplySegment(plan,
+                Segment("local-13", "DandanID", "spy-family-part-2", "part2-1",
+                    Enumerable.Range(1, 13).Select(number =>
+                        Source("part2-" + number, "part2-comment-" + number, number))),
+                out plan, out applied, out error), error);
+            Assert(applied == 13 && plan.Mappings.Count == 25 && plan.UnmatchedRuns.Count == 0 &&
+                   plan.IsComposite && plan.SeasonBindingUnsafe && !plan.CanPersistCompleteSeasonBinding,
+                "supplemental Part 2 must reach full Episode coverage while remaining binding-unsafe because it has two sources");
+        }
+
+        private static void CoordinatesSingletonAndSeriesTargetSetsIdentically()
+        {
+            Func<string, CompositeSeasonTargetRequest> target = seasonId =>
+                new CompositeSeasonTargetRequest
+                {
+                    SeasonId = seasonId,
+                    BuildPreviewAsync = (ignored, parent) => Task.FromResult(new DanmuSeasonMatchResult
+                    {
+                        SeasonId = seasonId,
+                        Status = "matched",
+                    }),
+                };
+            var singleton = CompositeSeasonTargetSetCoordinator.BuildAsync(
+                new[] { target("season-1") }, default).GetAwaiter().GetResult();
+            var series = CompositeSeasonTargetSetCoordinator.BuildAsync(
+                new[] { target("season-1"), target("season-2") }, default).GetAwaiter().GetResult();
+            Assert(singleton.Count == 1 && singleton[0].SeasonId == series[0].SeasonId &&
+                   series.Select(result => result.SeasonId).SequenceEqual(new[] { "season-1", "season-2" }),
+                "single-Season and whole-Series entry points must use the same stable target-set coordinator contract");
         }
 
         private static void MapsMultipleSpecialRunsWithoutChangingLocalSeasonMembership()
@@ -571,14 +622,14 @@ namespace Emby.Plugin.Danmu.RegressionTests
             Assert(controller.Contains("TryCreatePlan(local, mappings, null,\n                    excludedLocalEpisodeItemIds, durableCompositeMarker") &&
                    controller.Contains("TryCreatePlan(local, mappings, replacementMappings,\n                    excludedLocalEpisodeItemIds, durableCompositeMarker"),
                 "the controller must validate exclusions before direct evidence and then rebuild confirmed replacements");
-            Assert(controller.Contains("IsCompositePlan = build.Plan.CompositeSafetyRequired") &&
-                   controller.Contains("!build.Plan.CompositeSafetyRequired") &&
+            Assert(controller.Contains("IsCompositePlan = build.Plan.SeasonBindingUnsafe") &&
+                   controller.Contains("CanPersistCompleteSeasonBinding") &&
                    controller.Contains("task.IsCompositePlan && outcome.FilePersisted"),
-                "subset downloads must retain the composite barrier, while zero persisted files cannot trigger cleanup");
+                "subset and incomplete downloads must retain the Season-binding barrier, while only complete safe plans may persist a Season binding");
             var automatic = File.ReadAllText(Path.Combine(repositoryRoot, "LibraryManagerEventsHelper.cs"))
                 .Replace("\r\n", "\n");
             Assert(automatic.Contains("null, null, IsCompositeSeason(season), out var plan") &&
-                   automatic.Contains("!plan.CompositeSafetyRequired") &&
+                   automatic.Contains("plan.CanPersistCompleteSeasonBinding") &&
                    automatic.Contains("BeginCompositeSeasonWrite(season, plan.CompositeSafetyRequired)") &&
                    automatic.Contains("if (plan.CompositeSafetyRequired) await OnCompositeSeasonFilePersistedAsync"),
                 "automatic composite downloads must preserve the same durable safety barrier as tracked downloads");
@@ -626,7 +677,7 @@ namespace Emby.Plugin.Danmu.RegressionTests
                 "if (!IsCompleteAutomaticSearch(search))\n                            {\n                                LogIncompleteAutomaticSearch(originalSeasonName, \"season\", search);\n                                continue;",
                 StringComparison.Ordinal);
             var initialSelection = automatic.IndexOf(
-                "selectedCandidate = DanmuMatchScorer.SelectAutoCandidate(search.Candidates);",
+                "selectedCandidate = DanmuMatchScorer.SelectAutoCandidate(search.CanonicalCandidates);",
                 StringComparison.Ordinal);
             var residualGuard = automatic.IndexOf(
                 "LogIncompleteAutomaticSearch(season.Name, \"residual-range\", search);",
@@ -641,7 +692,7 @@ namespace Emby.Plugin.Danmu.RegressionTests
                 "if (!IsCompleteAutomaticSearch(movieSearch))",
                 StringComparison.Ordinal);
             var movieSelection = automatic.IndexOf(
-                "selectedMovieCandidate = DanmuMatchScorer.SelectAutoCandidate(movieSearch.Candidates);",
+                "selectedMovieCandidate = DanmuMatchScorer.SelectAutoCandidate(movieSearch.CanonicalCandidates);",
                 StringComparison.Ordinal);
             Assert(initialGuard >= 0 && initialGuard < initialSelection,
                 "initial automatic Season search must reject incomplete coverage before selecting a candidate");
@@ -811,6 +862,30 @@ namespace Emby.Plugin.Danmu.RegressionTests
                    restoreHandler.Contains("cloneCompositeSelections(removed.selections)") &&
                    restoreHandler.Contains("currentSelections.concat(restoreSelections)"),
                 "Restore must filter replacements by the run's real ItemIds, restore only its saved snapshot, and do both before rebuilding direct evidence");
+        }
+
+        private static void PreservesExactBindingScoreIntoSelectedCandidate()
+        {
+            var repositoryRoot = Path.GetFullPath(Path.Combine(
+                AppContext.BaseDirectory, "..", "..", "..", ".."));
+            var controller = File.ReadAllText(Path.Combine(
+                repositoryRoot, "Core", "Controllers", "DanmuController.cs")).Replace("\r\n", "\n");
+            var savedBinding = SliceSource(controller,
+                "if (DanmuMatchBindingHelper.TryGetSavedManualBinding(\n                    effectiveForceSearch",
+                "var search = await DanmuMatchSearchEngine.SearchSeasonAsync(");
+            Assert(savedBinding.Contains("MatchScore = 1") &&
+                   savedBinding.Contains("ScoreOrigin = DanmuMatchScoreOrigin.ExactBinding") &&
+                   savedBinding.IndexOf("StampSeasonCandidateEvidence", StringComparison.Ordinal) >
+                   savedBinding.IndexOf("ScoreOrigin = DanmuMatchScoreOrigin.ExactBinding", StringComparison.Ordinal),
+                "a saved manual Season binding must be stamped as exact binding before evidence registration");
+
+            var selectedMapper = SliceSource(controller,
+                "private static DanmuSelectedCandidatePreview ToSelectedCandidate(",
+                "private static void StampSeasonCandidateEvidence(");
+            Assert(selectedMapper.Contains("MatchScore = candidate.MatchScore") &&
+                   selectedMapper.Contains("ScoreOrigin = candidate.ScoreOrigin") &&
+                   selectedMapper.Contains("SelectionEvidenceToken = candidate.SelectionEvidenceToken"),
+                "the selected card must retain the server score, closed provenance, and opaque evidence token");
         }
 
         private static string MappingSnapshot(CompositeSeasonEpisodeMapping mapping)

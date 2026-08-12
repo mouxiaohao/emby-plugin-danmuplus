@@ -64,6 +64,9 @@ namespace Emby.Plugin.Danmu.Model
         public string CommentId { get; set; } = string.Empty;
         public int? SourceEpisodeNumber { get; set; }
         public string Origin { get; set; } = string.Empty;
+        public double MatchScore { get; set; }
+        public string ScoreOrigin { get; set; } = string.Empty;
+        public string SelectionEvidenceToken { get; set; } = string.Empty;
     }
 
     /// <summary>A contiguous gap in stable local order, presented as a temporary season.</summary>
@@ -99,6 +102,12 @@ namespace Emby.Plugin.Danmu.Model
         /// marker or the pre-exclusion authoritative plan proved composition.
         /// </summary>
         public bool CompositeSafetyRequired { get; set; }
+
+        /// <summary>Whether a Season-level binding would overstate this plan's coverage.</summary>
+        public bool SeasonBindingUnsafe { get; set; }
+
+        /// <summary>Whether one complete stable source may be persisted on the Season.</summary>
+        public bool CanPersistCompleteSeasonBinding { get; set; }
     }
 
     /// <summary>
@@ -126,5 +135,8 @@ namespace Emby.Plugin.Danmu.Model
             new List<CompositeSeasonSourceEpisode>();
         public string SourceStartEpisodeId { get; set; } = string.Empty;
         public string Origin { get; set; } = "manual";
+        public double MatchScore { get; set; }
+        public string ScoreOrigin { get; set; } = string.Empty;
+        public string SelectionEvidenceToken { get; set; } = string.Empty;
     }
 }

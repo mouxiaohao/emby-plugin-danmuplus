@@ -67,6 +67,9 @@ namespace Emby.Plugin.Danmu.Scraper
                 CommentId = mapping.CommentId,
                 SourceEpisodeNumber = mapping.SourceEpisodeNumber,
                 Origin = mapping.Origin,
+                MatchScore = mapping.MatchScore,
+                ScoreOrigin = mapping.ScoreOrigin,
+                SelectionEvidenceToken = mapping.SelectionEvidenceToken,
             }).ToList();
             foreach (var mapping in normalizedMappings.Where(mapping =>
                          string.Equals(mapping.Origin, "episode-provider-id", StringComparison.OrdinalIgnoreCase) &&
@@ -202,6 +205,8 @@ namespace Emby.Plugin.Danmu.Scraper
                 CommentId = sourceEpisode.CommentId,
                 SourceEpisodeNumber = sourceEpisode.EpisodeNumber,
                 Origin = "episode-provider-id",
+                MatchScore = 1,
+                ScoreOrigin = "exact-episode-id",
             };
         }
 
@@ -262,6 +267,9 @@ namespace Emby.Plugin.Danmu.Scraper
                 SourceStartEpisodeId = first.SourceEpisodeId ?? string.Empty,
                 SourceStartEpisodeNumber = first.SourceEpisodeNumber,
                 MatchOrigin = origins.Count == 1 ? origins[0] : "mixed",
+                MatchScore = first.MatchScore,
+                ScoreOrigin = first.ScoreOrigin ?? string.Empty,
+                SelectionEvidenceToken = first.SelectionEvidenceToken ?? string.Empty,
                 Episodes = mappings.Select(mapping => new DanmuCompositeEpisode
                 {
                     ItemId = mapping.LocalEpisodeItemId,

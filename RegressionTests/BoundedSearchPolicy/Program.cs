@@ -220,7 +220,7 @@ namespace Emby.Plugin.Danmu.BoundedSearchPolicyRegression
                 var result = DanmuMatchSearchEngine.SearchSeasonAsync(
                     new AbstractScraper[] { fast, slow },
                     "Series Alpha",
-                    "Season 1",
+                    "Series Alpha Part 2",
                     2024,
                     12,
                     null,
@@ -436,7 +436,7 @@ namespace Emby.Plugin.Danmu.BoundedSearchPolicyRegression
 
             var residual = Slice(helper,
                 "while (plan.UnmatchedRuns.Count > 0)",
-                "if (plan.Mappings.Count == 0) return false;");
+                "if (plan.Mappings.Count == 0 || plan.UnmatchedRuns.Count > 0) return false;");
             var residualGuard = residual.IndexOf("if (!IsCompleteAutomaticSearch(search))", StringComparison.Ordinal);
             var residualAbort = residual.IndexOf("return false;", residualGuard, StringComparison.Ordinal);
             var residualSelect = residual.IndexOf("SelectSupplementalCandidate", StringComparison.Ordinal);

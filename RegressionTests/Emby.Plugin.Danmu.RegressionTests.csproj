@@ -13,5 +13,6 @@
     <Compile Remove="BoundedSearchPolicy\**\*.cs" />
     <Compile Remove="TemporaryRangePolicy\**\*.cs" />
     <Compile Remove="EpisodeSelectionPolicy\**\*.cs" />
+    <Compile Remove="R3SearchQuality\**\*.cs" />
   </ItemGroup>
 </Project>

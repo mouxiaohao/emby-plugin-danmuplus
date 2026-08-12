@@ -111,6 +111,7 @@ namespace Emby.Plugin.Danmu.Scraper
             finalPlan.CompositeSafetyRequired = durableCompositeMarker ||
                                                 preExclusionPlan.IsComposite ||
                                                 finalPlan.IsComposite;
+            ApplyBindingSafety(finalPlan);
             plan = finalPlan;
             return true;
         }
@@ -220,7 +221,11 @@ namespace Emby.Plugin.Danmu.Scraper
                     current = null;
                     continue;
                 }
-                if (current == null || !current.Source.Equals(mapping.Source))
+                if (current == null || !current.Source.Equals(mapping.Source) ||
+                    current.Mappings.Count == 0 ||
+                    Math.Abs(current.Mappings[0].MatchScore - mapping.MatchScore) > 0.0000001 ||
+                    !string.Equals(current.Mappings[0].ScoreOrigin, mapping.ScoreOrigin,
+                        StringComparison.OrdinalIgnoreCase))
                 {
                     current = new CompositeSeasonMappedRun { Source = CloneSource(mapping.Source) };
                     runs.Add(current);
@@ -310,6 +315,9 @@ namespace Emby.Plugin.Danmu.Scraper
                     CommentId = source.CommentId,
                     SourceEpisodeNumber = source.EpisodeNumber,
                     Origin = request.Origin ?? string.Empty,
+                    MatchScore = request.MatchScore,
+                    ScoreOrigin = request.ScoreOrigin ?? string.Empty,
+                    SelectionEvidenceToken = request.SelectionEvidenceToken ?? string.Empty,
                 });
             }
 
@@ -322,6 +330,7 @@ namespace Emby.Plugin.Danmu.Scraper
                 currentPlan.EffectiveExcludedLocalEpisodeItemIds,
                 currentPlan.CompositeSafetyRequired);
             plan.CompositeSafetyRequired = plan.CompositeSafetyRequired || plan.IsComposite;
+            ApplyBindingSafety(plan);
             appliedEpisodeCount = count;
             return true;
         }
@@ -350,6 +359,8 @@ namespace Emby.Plugin.Danmu.Scraper
                 plan.CompositeSafetyRequired || plan.IsComposite);
             if (plan.IsComposite != expected.IsComposite ||
                 plan.CompositeSafetyRequired != expected.CompositeSafetyRequired ||
+                plan.SeasonBindingUnsafe != expected.SeasonBindingUnsafe ||
+                plan.CanPersistCompleteSeasonBinding != expected.CanPersistCompleteSeasonBinding ||
                 !plan.EffectiveExcludedLocalEpisodeItemIds.SequenceEqual(exclusions, StringComparer.OrdinalIgnoreCase) ||
                 !RunsEqual(plan.UnmatchedRuns, expected.UnmatchedRuns))
             {
@@ -491,7 +502,7 @@ namespace Emby.Plugin.Danmu.Scraper
                 run.Episodes.Add(CloneLocalEpisode(episode));
             }
 
-            return new CompositeSeasonPlan
+            var plan = new CompositeSeasonPlan
             {
                 OrderedEpisodes = ordered,
                 Mappings = mappingList,
@@ -500,6 +511,22 @@ namespace Emby.Plugin.Danmu.Scraper
                 EffectiveExcludedLocalEpisodeItemIds = (effectiveExcludedItemIds ?? Enumerable.Empty<string>()).ToList(),
                 CompositeSafetyRequired = compositeSafetyRequired,
             };
+            ApplyBindingSafety(plan);
+            return plan;
+        }
+
+        private static void ApplyBindingSafety(CompositeSeasonPlan plan)
+        {
+            if (plan == null) return;
+            var sources = plan.Mappings.Select(mapping => mapping.Source).Distinct().ToList();
+            var hasDirectEvidence = plan.Mappings.Any(mapping => string.Equals(
+                mapping.Origin, "episode-provider-id", StringComparison.OrdinalIgnoreCase));
+            plan.SeasonBindingUnsafe = plan.CompositeSafetyRequired || plan.IsComposite ||
+                                       plan.UnmatchedRuns.Count > 0;
+            plan.CanPersistCompleteSeasonBinding = !plan.SeasonBindingUnsafe &&
+                                                   sources.Count == 1 &&
+                                                   !hasDirectEvidence &&
+                                                   plan.Mappings.Count == plan.OrderedEpisodes.Count;
         }
 
         private static bool RunsEqual(IList<CompositeSeasonUnmatchedRun> first, IList<CompositeSeasonUnmatchedRun> second)
@@ -538,6 +565,8 @@ namespace Emby.Plugin.Danmu.Scraper
                 LocalEpisodeItemId = mapping.LocalEpisodeItemId, Source = CloneSource(mapping.Source),
                 SourceEpisodeId = mapping.SourceEpisodeId, CommentId = mapping.CommentId,
                 SourceEpisodeNumber = mapping.SourceEpisodeNumber, Origin = mapping.Origin,
+                MatchScore = mapping.MatchScore, ScoreOrigin = mapping.ScoreOrigin,
+                SelectionEvidenceToken = mapping.SelectionEvidenceToken,
             };
         }
 

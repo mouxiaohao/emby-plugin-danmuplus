@@ -132,8 +132,8 @@ namespace Emby.Plugin.Danmu.SearchTermPolicyRegression
 
             Assert(scraper.MaximumConcurrentCalls == 1,
                 "default, interactive, and automatic searches must share the one-call-per-provider gate");
-            Assert(scraper.ApiKeywords.Count == 4,
-                "two concurrent default Season plans must issue exactly two prebuilt terms each, with no second hop");
+            Assert(scraper.ApiKeywords.Count == 2,
+                "two concurrent generic-Season plans must issue only the parent identity once each");
         }
 
         private static void VerifiesControllerIntentRoutingContract()

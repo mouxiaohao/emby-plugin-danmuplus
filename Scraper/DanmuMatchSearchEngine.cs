@@ -56,6 +56,36 @@ namespace Emby.Plugin.Danmu.Scraper
             BoundedSearchPolicy policy,
             CancellationToken cancellationToken)
         {
+            return await SearchSeasonAsync(
+                scraperSource,
+                seriesName,
+                seasonName,
+                expectedYear,
+                expectedEpisodes,
+                keywordOverride,
+                logger,
+                policy,
+                cancellationToken,
+                cancellationToken).ConfigureAwait(false);
+        }
+
+        /// <summary>
+        /// Separates the bounded child execution token from the parent/user
+        /// cancellation token.  Child budget exhaustion remains an actionable
+        /// partial result; parent cancellation invalidates the whole result.
+        /// </summary>
+        public static async Task<DanmuMatchSearchResult> SearchSeasonAsync(
+            IEnumerable<AbstractScraper> scraperSource,
+            string seriesName,
+            string seasonName,
+            int? expectedYear,
+            int expectedEpisodes,
+            string keywordOverride,
+            ILogger logger,
+            BoundedSearchPolicy policy,
+            CancellationToken executionCancellationToken,
+            CancellationToken parentCancellationToken)
+        {
             var scrapers = (scraperSource ?? Enumerable.Empty<AbstractScraper>()).ToList();
             var keywords = DanmuMatchScorer.BuildSearchKeywords(seriesName, seasonName, keywordOverride)
                 .Take(string.IsNullOrWhiteSpace(keywordOverride) ? 2 : 1)
@@ -66,21 +96,33 @@ namespace Emby.Plugin.Danmu.Scraper
                 scrapers,
                 keywords,
                 (scraper, keyword, cancellationToken) => scraper.SearchForApi(keyword, cancellationToken),
-                searchInfo => searchInfo != null &&
-                              !string.IsNullOrWhiteSpace(searchInfo.Id) &&
-                              !string.IsNullOrWhiteSpace(searchInfo.Name),
+                searchInfo => DanmuMatchScorer.IsEligibleSeasonCandidate(
+                    searchInfo, seriesName, seasonName, keywordOverride),
                 policy,
-                cancellationToken,
+                executionCancellationToken,
                 logger,
                 "season").ConfigureAwait(false);
-            var result = ToResult(outcomes, scrapers);
-            result.Candidates = ScoreCandidates(
+            var result = ToResult(outcomes, parentCancellationToken);
+            if (keywords.Count == 0)
+            {
+                result.IsComplete = false;
+                result.CompletionDiagnostics.Add(new DanmuSearchCompletionDiagnostic
+                {
+                    Status = "invalid_metadata",
+                    Message = "An identity-bearing Series title is required for Season search.",
+                });
+                result.SearchErrors.Add("An identity-bearing Series title is required for Season search.");
+            }
+
+            result.CanonicalCandidates = ScoreCandidates(
                 MergeSources(outcomes),
                 scrapers,
                 seriesName,
                 seasonName,
                 expectedYear,
                 expectedEpisodes);
+            result.Candidates = OrderCandidates(result.CanonicalCandidates);
+            ClassifyResult(result);
             return result;
         }
 
@@ -134,8 +176,10 @@ namespace Emby.Plugin.Danmu.Scraper
                 cancellationToken,
                 logger,
                 "movie").ConfigureAwait(false);
-            var result = ToResult(outcomes, scrapers);
-            result.Candidates = ScoreMovieCandidates(MergeSources(outcomes), scrapers, movieName, expectedYear);
+            var result = ToResult(outcomes, cancellationToken);
+            result.CanonicalCandidates = ScoreMovieCandidates(MergeSources(outcomes), scrapers, movieName, expectedYear);
+            result.Candidates = OrderCandidates(result.CanonicalCandidates);
+            ClassifyResult(result);
             return result;
         }
 
@@ -254,9 +298,12 @@ namespace Emby.Plugin.Danmu.Scraper
 
         private static DanmuMatchSearchResult ToResult(
             IEnumerable<ProviderSearchOutcome> outcomes,
-            IEnumerable<AbstractScraper> scrapers)
+            CancellationToken cancellationToken)
         {
-            var result = new DanmuMatchSearchResult();
+            var result = new DanmuMatchSearchResult
+            {
+                WasCancelled = cancellationToken.IsCancellationRequested,
+            };
             foreach (var outcome in outcomes ?? Enumerable.Empty<ProviderSearchOutcome>())
             {
                 result.CompletionDiagnostics.AddRange(outcome.Diagnostics);
@@ -321,7 +368,7 @@ namespace Emby.Plugin.Danmu.Scraper
                         expectedYear)));
             }
 
-            return OrderCandidates(candidates.Where(candidate => candidate.Score > 0));
+            return OrderCanonicalCandidates(candidates.Where(candidate => candidate.Score > 0));
         }
 
         private static List<DanmuMatchCandidate> ScoreCandidates(
@@ -355,14 +402,62 @@ namespace Emby.Plugin.Danmu.Scraper
                         expectedEpisodes)));
             }
 
-            return OrderCandidates(candidates);
+            return OrderCanonicalCandidates(candidates);
         }
 
         public static List<DanmuMatchCandidate> OrderCandidates(IEnumerable<DanmuMatchCandidate> candidates)
         {
-            var ordered = (candidates ?? Enumerable.Empty<DanmuMatchCandidate>())
-                .OrderByDescending(candidate => candidate.Score)
-                .ThenBy(candidate => candidate.SourceOrder)
+            const int visibleLimit = 60;
+            var groups = OrderCanonicalCandidates(candidates)
+                .GroupBy(candidate => candidate.SourceOrder)
+                .OrderBy(group => group.Key)
+                .Select(group => group.ToList())
+                .ToList();
+            var allocated = new int[groups.Count];
+            var count = 0;
+            for (var groupIndex = 0; groupIndex < groups.Count && count < visibleLimit; groupIndex++)
+            {
+                allocated[groupIndex] = 1;
+                count++;
+            }
+
+            while (count < visibleLimit)
+            {
+                var added = false;
+                for (var groupIndex = 0; groupIndex < groups.Count && count < visibleLimit; groupIndex++)
+                {
+                    if (allocated[groupIndex] >= groups[groupIndex].Count)
+                    {
+                        continue;
+                    }
+
+                    allocated[groupIndex]++;
+                    count++;
+                    added = true;
+                }
+
+                if (!added)
+                {
+                    break;
+                }
+            }
+
+            var projected = new List<DanmuMatchCandidate>(count);
+            for (var groupIndex = 0; groupIndex < groups.Count; groupIndex++)
+            {
+                projected.AddRange(groups[groupIndex].Take(allocated[groupIndex]));
+            }
+
+            return projected;
+        }
+
+        public static List<DanmuMatchCandidate> OrderCanonicalCandidates(
+            IEnumerable<DanmuMatchCandidate> candidates)
+        {
+            return (candidates ?? Enumerable.Empty<DanmuMatchCandidate>())
+                .Where(candidate => candidate != null)
+                .OrderBy(candidate => candidate.SourceOrder)
+                .ThenByDescending(candidate => candidate.Score)
                 .ThenByDescending(candidate => candidate.TitleScore)
                 .ThenByDescending(candidate => candidate.ParentTitleScore)
                 .ThenByDescending(candidate => candidate.KeywordScore)
@@ -372,22 +467,36 @@ namespace Emby.Plugin.Danmu.Scraper
                 .ThenBy(candidate => candidate.Name, StringComparer.OrdinalIgnoreCase)
                 .ThenBy(candidate => candidate.Id, StringComparer.OrdinalIgnoreCase)
                 .ToList();
-            var selected = DanmuMatchScorer.SelectAutoCandidate(ordered);
-            if (selected == null)
+        }
+
+        private static void ClassifyResult(DanmuMatchSearchResult result)
+        {
+            if (result.WasCancelled)
             {
-                return ordered.Take(60).ToList();
+                result.Decision = "cancelled";
+                result.SelectedCandidate = null;
+                return;
             }
 
-            return ordered
-                .OrderByDescending(candidate => candidate.SourceOrder == selected.SourceOrder)
-                .ThenByDescending(candidate => candidate.SourceOrder == selected.SourceOrder ? candidate.Score : 0)
-                .ThenByDescending(candidate => candidate.Score)
-                .ThenBy(candidate => candidate.SourceOrder)
-                .ThenBy(candidate => candidate.SiteName, StringComparer.OrdinalIgnoreCase)
-                .ThenBy(candidate => candidate.Name, StringComparer.OrdinalIgnoreCase)
-                .ThenBy(candidate => candidate.Id, StringComparer.OrdinalIgnoreCase)
-                .Take(60)
-                .ToList();
+            var selected = DanmuMatchScorer.SelectAutoCandidate(result.CanonicalCandidates);
+            if (result.IsComplete)
+            {
+                result.Decision = selected != null
+                    ? "confident"
+                    : result.CanonicalCandidates.Count > 0 ? "manual" : "no_match";
+                result.SelectedCandidate = selected;
+                return;
+            }
+
+            if (result.CanonicalCandidates.Count == 0)
+            {
+                result.Decision = "retryable-incomplete";
+                result.SelectedCandidate = null;
+                return;
+            }
+
+            result.Decision = selected != null ? "partial-confident" : "partial-manual";
+            result.SelectedCandidate = selected;
         }
 
         private static string BuildKey(string providerId, string id)
@@ -450,10 +559,14 @@ namespace Emby.Plugin.Danmu.Scraper
 
     public sealed class DanmuMatchSearchResult
     {
+        public List<DanmuMatchCandidate> CanonicalCandidates { get; set; } = new List<DanmuMatchCandidate>();
         public List<DanmuMatchCandidate> Candidates { get; set; } = new List<DanmuMatchCandidate>();
+        public DanmuMatchCandidate SelectedCandidate { get; set; }
+        public string Decision { get; set; } = string.Empty;
         public List<string> SearchErrors { get; set; } = new List<string>();
         public List<DanmuSearchCompletionDiagnostic> CompletionDiagnostics { get; set; } =
             new List<DanmuSearchCompletionDiagnostic>();
         public bool IsComplete { get; set; } = true;
+        public bool WasCancelled { get; set; }
     }
 }

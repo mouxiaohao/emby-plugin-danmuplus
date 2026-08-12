@@ -665,7 +665,7 @@ namespace Emby.Plugin.Danmu
                                     }
                                     else
                                     {
-                                        selectedMovieCandidate = DanmuMatchScorer.SelectAutoCandidate(movieSearch.Candidates);
+                                        selectedMovieCandidate = DanmuMatchScorer.SelectAutoCandidate(movieSearch.CanonicalCandidates);
                                     }
                                 }
                                 movieMatchSearched = true;
@@ -1081,7 +1081,7 @@ namespace Emby.Plugin.Danmu
                                 continue;
                             }
 
-                            selectedCandidate = DanmuMatchScorer.SelectAutoCandidate(search.Candidates);
+                            selectedCandidate = DanmuMatchScorer.SelectAutoCandidate(search.CanonicalCandidates);
                             if (selectedCandidate == null)
                             {
                                 var top = search.Candidates.FirstOrDefault();
@@ -1400,7 +1400,7 @@ namespace Emby.Plugin.Danmu
                 // every exhausted source (not only the primary) cannot mask a
                 // unique supplemental candidate on a later temporary group.
                 var candidate = CompositeSeasonMatchService.SelectSupplementalCandidate(
-                    search.Candidates, exhaustedSources);
+                    search.CanonicalCandidates, exhaustedSources);
                 var sourceScraper = candidate == null ? null : _scraperManager.All().FirstOrDefault(x =>
                     string.Equals(x.ProviderId, candidate.Site, StringComparison.OrdinalIgnoreCase));
                 if (sourceScraper == null) break;
@@ -1425,11 +1425,12 @@ namespace Emby.Plugin.Danmu
                 }
             }
 
-            if (plan.Mappings.Count == 0) return false;
+            // Automatic matching is fail-closed until every local Episode has
+            // an authoritative source mapping.
+            if (plan.Mappings.Count == 0 || plan.UnmatchedRuns.Count > 0) return false;
             var byId = episodes.ToDictionary(x => x.Id.ToString(), StringComparer.OrdinalIgnoreCase);
             var sources = plan.Mappings.Select(x => x.Source).Distinct().ToList();
-            var canSaveSeason = !plan.CompositeSafetyRequired && sources.Count == 1 &&
-                plan.Mappings.All(x => !string.Equals(x.Origin, "episode-provider-id", StringComparison.OrdinalIgnoreCase));
+            var canSaveSeason = plan.CanPersistCompleteSeasonBinding;
             var savedSeason = false;
             var persisted = false;
             var lease = BeginCompositeSeasonWrite(season, plan.CompositeSafetyRequired);
