@@ -215,10 +215,73 @@ async function waitUntil(predicate, message) {
     throw new Error(message);
 }
 
+function allVisibleText(node) {
+    return [node.textContent || ""].concat((node.children || []).map(allVisibleText)).join(" ");
+}
+
+function fakeResponse(status, statusText, body, contentType) {
+    let reads = 0;
+    return {
+        status: status,
+        statusText: statusText || "",
+        ok: status >= 200 && status < 300,
+        headers: { get: function () { return contentType || "application/json"; } },
+        text: async function () { reads++; return body; },
+        readCount: function () { return reads; }
+    };
+}
+
 async function main() {
-    assert((source.match(/__embyDanmuSmartMenuV19/g) || []).length === 1 &&
-        !source.includes("__embyDanmuSmartMenuV18"),
-        "the r3 frontend installation flag should be V19 exactly once");
+    assert((source.match(/__embyDanmuSmartMenuV20/g) || []).length === 1 &&
+        !source.includes("__embyDanmuSmartMenuV19") && !source.includes("__embyDanmuSmartMenuV18"),
+        "the r4 frontend installation flag should be V20 exactly once");
+    assert(!source.includes("MAPPING_PROTOCOL_GENERATION") && source.includes("var MAPPING_PROTOCOL_VERSION = 20"),
+        "V20 must use the backend numeric protocol and must not invent a browser-only generation string");
+    const decodedResponse = fakeResponse(200, "OK", '{"Seasons":[{"SeasonId":"s1"}]}');
+    const decodedJson = await hooks.decodeApiResult(decodedResponse);
+    assert(decodedJson.Seasons[0].SeasonId === "s1" && decodedResponse.readCount() === 1,
+        "the asynchronous decoder must consume a successful Fetch Response body exactly once");
+    assert((await hooks.decodeApiResult('{"Message":"decoded string"}')).Message === "decoded string" &&
+        (await hooks.decodeApiResult({ Message: "decoded object" })).Message === "decoded object" &&
+        (await hooks.decodeApiResult({ data: '{"Message":"jquery data"}' })).Message === "jquery data",
+        "decoded objects, JSON strings, and compatible jQuery data shapes must share the decoder");
+    const largeJson = JSON.stringify({ Seasons: [{ Payload: "x".repeat(2000) }] });
+    assert((await hooks.decodeApiResult(fakeResponse(200, "OK", largeJson))).Seasons[0].Payload.length === 2000,
+        "bounded plain-text diagnostics must not truncate a valid large whole-Series JSON response");
+    const errorCases = [
+        [fakeResponse(422, "Unprocessable", '{"code":"plan-invalid","message":"mapping rejected","retryable":false}'), "http", "plan-invalid", "mapping rejected"],
+        [fakeResponse(503, "Unavailable", "provider temporarily unavailable", "text/plain"), "http", "server-error", "provider temporarily unavailable"],
+        [fakeResponse(500, "Internal Server Error", ""), "http", "server-error", "HTTP 500 Internal Server Error"]
+    ];
+    for (const entry of errorCases) {
+        let caught;
+        try { await hooks.decodeApiResult(entry[0]); } catch (error) { caught = error; }
+        assert(caught && caught.category === entry[1] && caught.code === entry[2] &&
+            caught.message.includes(entry[3]) && !caught.message.includes("[object Response]") && entry[0].readCount() === 1,
+            "HTTP JSON/text/empty errors must be structured, bounded, and never stringify a Response");
+    }
+    const networkError = await hooks.normalizeRejectedApiError(new Error("connection refused"));
+    const timeoutError = await hooks.normalizeRejectedApiError({ statusText: "timeout" });
+    const cancelError = await hooks.normalizeRejectedApiError({ name: "AbortError" });
+    assert(networkError.category === "network" && timeoutError.category === "timeout" &&
+        cancelError.category === "cancelled" && !cancelError.retryable,
+        "network, timeout, and explicit cancellation must remain distinct normalized categories");
+    const partialSeriesDialog = hooks.openDialog("partial Series");
+    apiResponses.MatchPreview = fakeResponse(503, "Unavailable", JSON.stringify({
+        code: "season-search-partial", message: "one sibling failed", retryable: true,
+        Seasons: [{ SeasonId: "completed-season", SeasonName: "Season 1", EpisodeCount: 12,
+            Status: "matched", MatchOrigin: "scored", DecisionReason: "partial-confident" }]
+    }));
+    const partialCallStart = apiCalls.length;
+    await hooks.runSmartDownload({ Id: "series-partial", Type: "Series", Name: "Series" }, partialSeriesDialog);
+    const partialCall = apiCalls.slice(partialCallStart).find(call => call.option === "MatchPreview");
+    assert(allVisibleText(partialSeriesDialog.body).includes("Season 1") &&
+        !allVisibleText(partialSeriesDialog.body).includes("[object Response]") &&
+        partialCall.parameters.mappingProtocolVersion === 20 &&
+        partialCall.parameters.mappingProtocolGeneration === undefined,
+        "a whole-Series partial HTTP failure must retain completed sibling Seasons and every API call must carry the V20 fence");
+    partialSeriesDialog.forceClose();
+    delete apiResponses.MatchPreview;
     /* r2 intentionally hid all scores; r3 replaces that contract below.
     assert(!/\bScore\b|综合评分|评分：/.test(source),
         "the frontend must not calculate or display candidate scores");
@@ -235,8 +298,24 @@ async function main() {
         hooks.matchScoreLine({ MatchScore: 1, ScoreOrigin: "verified-binding" }) ===
         "匹配分：100（精确标识符）",
         "exact bindings must use the closed provenance label while legacy persisted values remain readable");
-    assert(source.includes("matchScoreLine(candidate)") && source.includes("matchScoreLine(mapping)"),
-        "candidate rows and confirmed mapping details must both retain visible server scores");
+    assert(hooks.matchScoreLine({}) === "" && hooks.matchScoreLine(null) === "" &&
+        hooks.matchScoreLine({ MatchScore: null, Score: null }) === "" &&
+        hooks.matchScoreLine({ MatchScore: "   " }) === "" &&
+        hooks.matchScoreLine({ MatchScore: "not-a-number" }) === "",
+        "missing, blank, null, and invalid score fields must never be coerced into a visible zero");
+    /* Superseded encoding-damaged assertion retained inert below.
+    assert(hooks.matchScoreLine({ MatchScore: 0 }) === "鍖归厤鍒嗭細0锛堟湇鍔＄璇勫垎锛? &&
+        hooks.matchScoreLine({ Score: "0", ScoreOrigin: "search-confidence" }) ===
+            "鍖归厤鍒嗭細0锛堟爣棰樺尮閰嶏級",
+        "an explicit finite server score of zero must remain displayable for a verified result");
+    */
+    assert(hooks.matchScoreLine({ MatchScore: 0 }) ===
+            "\u5339\u914d\u5206\uff1a0\uff08\u670d\u52a1\u7aef\u8bc4\u5206\uff09" &&
+        hooks.matchScoreLine({ Score: "0", ScoreOrigin: "search-confidence" }) ===
+            "\u5339\u914d\u5206\uff1a0\uff08\u6807\u9898\u5339\u914d\uff09",
+        "an explicit finite server score of zero must remain displayable for a verified result");
+    assert(source.includes("matchScoreLine(candidate)") && source.includes("matchScoreLine(group.mappings[0])"),
+        "candidate rows and confirmed mapping summaries must retain visible server scores");
     assert(!/textContent\s*=\s*["'](?:鍙栨秷|鍏抽棴)["']/.test(source),
         "smart-match footers must expose only the top-right close button and Escape for ordinary dismissal");
     assert(source.includes("env(safe-area-inset-top,0px)") &&
@@ -307,18 +386,23 @@ async function main() {
     const compositeSeason = {
         SeriesId: "series", SeasonId: "season-composite", SeasonNumber: 1,
         SeasonName: "Composite", EpisodeCount: 5,
+        MappingProtocolVersion: 20, PlanGeneration: 7341,
         CompositePlan: {
             OrderedEpisodes: [1, 2, 3, 4, 5].map(number => ({
-                ItemId: "episode-" + number, EpisodeNumber: number, SortOrder: number
+                ItemId: "episode-" + number, EpisodeNumber: number, SortOrder: number,
+                ParentSeasonNumber: number === 5 ? 0 : 1,
+                LocalDisplayLabel: number === 5 ? "S00E01" : "S01E" + String(number).padStart(2, "0")
             })),
             Mappings: [1, 2].map(number => ({
                 LocalEpisodeItemId: "episode-" + number,
                 Source: { ProviderId: "Dandan", MediaId: "frieren-s1" },
                 SourceEpisodeId: "source-" + number, CommentId: "server-only-" + number,
-                SourceEpisodeNumber: number, Origin: "provider-id"
+                SourceEpisodeNumber: number, Origin: "scored"
             })),
             UnmatchedRuns: [{ Episodes: [3, 4, 5].map(number => ({
-                ItemId: "episode-" + number, EpisodeNumber: number, SortOrder: number
+                ItemId: "episode-" + number, EpisodeNumber: number, SortOrder: number,
+                ParentSeasonNumber: number === 5 ? 0 : 1,
+                LocalDisplayLabel: number === 5 ? "S00E01" : "S01E" + String(number).padStart(2, "0")
             })) }]
         }
     };
@@ -338,11 +422,22 @@ async function main() {
     assert(hooks.compositeHasDownloadableMappings(compositeSeason, compositeSelections),
         "exact mappings or a manual virtual season must permit downloading the confirmed subset");
     const compactSelections = hooks.compositeRequestSelections(compositeSelections, compositeSeason);
+    const currentSeasonRequest = hooks.seasonRequestParameters(compositeSeason);
+    assert(currentSeasonRequest.mappingProtocolVersion === 20 &&
+        currentSeasonRequest.planGeneration === compositeSeason.PlanGeneration &&
+        currentSeasonRequest.mappingProtocolGeneration === undefined,
+        "every Season rebuild/rematch/download request must echo the server-authored numeric V20 plan generation");
     assert(compactSelections.length === 2 && compactSelections[0].CandidateId === "frieren-s1" &&
         compactSelections[0].LocalStartEpisodeItemId === "episode-1" && compactSelections[0].RequestedEpisodeCount === 2 &&
         compactSelections[1].CandidateId === "frieren-s2" && compactSelections[1].SourceStartEpisodeNumber === 1 &&
         JSON.stringify(compactSelections).indexOf("server-only") < 0,
         "the browser must resubmit the verified S1 base group together with manual S2 intent and never expose CommentId values");
+    const cachedV19Season = Object.assign({}, compositeSeason, {
+        MappingProtocolVersion: 19, PlanGeneration: null
+    });
+    assert(!hooks.hasCurrentMappingContract(cachedV19Season) && !hooks.hasCompositePlan(cachedV19Season) &&
+        hooks.compositeRequestSelections(compositeSelections, cachedV19Season).length === 0,
+        "a cached V19 or generation-less Season draft must be discarded and cannot be submitted or restored");
     const removeS1 = hooks.filterCompositeSelectionsByItemIds(
         compositeSeason, compactSelections, ["episode-1", "episode-2"]);
     const removeS2 = hooks.filterCompositeSelectionsByItemIds(
@@ -355,11 +450,13 @@ async function main() {
     const directSeason = {
         SeriesId: compositeSeason.SeriesId, SeasonId: compositeSeason.SeasonId,
         SeasonNumber: compositeSeason.SeasonNumber, SeasonName: compositeSeason.SeasonName,
+        MappingProtocolVersion: compositeSeason.MappingProtocolVersion,
+        PlanGeneration: compositeSeason.PlanGeneration,
         CompositePlan: {
             OrderedEpisodes: compositeSeason.CompositePlan.OrderedEpisodes,
             Mappings: compositeSeason.CompositePlan.Mappings.concat([{
                 LocalEpisodeItemId: "episode-5",
-                Source: { ProviderId: "Dandan", MediaId: "direct-episode" },
+                Source: { ProviderId: "YoukuID", MediaId: "2a5659587f87497d9aab" },
                 SourceEpisodeId: "direct-source", CommentId: "direct-server-only",
                 SourceEpisodeNumber: 5, Origin: "episode-provider-id"
             }]),
@@ -372,6 +469,9 @@ async function main() {
         JSON.stringify(directCompactSelections).indexOf("direct-episode") < 0 &&
         JSON.stringify(directCompactSelections).indexOf("CommentId") < 0,
         "direct Episode provider-id mappings must be rebuilt by the server and never submitted by the browser");
+    assert(hooks.isForbiddenBatchOrigin("direct-episode-provider-id") &&
+        hooks.isForbiddenBatchOrigin("exact-binding") && hooks.isForbiddenBatchOrigin("provider-id"),
+        "V20 must discard all cached V19 local-identifier-derived batch origins");
     const staleSelections = {};
     staleSelections.__compositeSelections = {};
     staleSelections.__compositeSelections["series::season-composite"] = [{
@@ -388,9 +488,12 @@ async function main() {
         "a virtual season can be removed and the original unmatched run is restored for re-match");
     const groupOnlySeason = {
         SeriesId: "series", SeasonId: "group-only", SeasonNumber: 2, SeasonName: "Group only",
+        MappingProtocolVersion: 20, PlanGeneration: 7342,
         RequiresCompositeMapping: true,
-        CompositeGroups: [{ IsTemporary: false, Site: "Dandan", CandidateId: "s1", Episodes: [{ ItemId: "a", EpisodeNumber: 1 }] },
-            { IsTemporary: true, Episodes: [{ ItemId: "b", EpisodeNumber: 2 }] }]
+        CompositeGroups: [{ IsTemporary: false, Site: "Dandan", CandidateId: "s1",
+            MatchScore: 0, Episodes: [{ ItemId: "a", EpisodeNumber: 1 }] },
+            { IsTemporary: true, MatchScore: 0, ScoreOrigin: "search-confidence",
+                Episodes: [{ ItemId: "b", EpisodeNumber: 2 }] }]
     };
     assert(hooks.hasCompositePlan(groupOnlySeason) &&
         hooks.compositeVirtualGroups(groupOnlySeason, {}).map(group => group.kind).join(",") === "mapped,unmatched" &&
@@ -398,6 +501,86 @@ async function main() {
         hooks.compositeRequestSelections({}, groupOnlySeason).length === 1 &&
         hooks.compositeRequestSelections({}, groupOnlySeason)[0].CandidateId === "s1",
         "the UI must also accept the compact CompositeGroups preview contract during controller rollout");
+    const unmatchedScoreDialog = hooks.openDialog("unmatched score visibility");
+    hooks.renderCompositeSeasonSummary(unmatchedScoreDialog,
+        { Id: "series", Type: "Series", Name: "score fixture" },
+        groupOnlySeason, 0, [groupOnlySeason], {}, {});
+    const scoreCards = unmatchedScoreDialog.body.querySelectorAll(".danmuVirtualSeason");
+    const mappedZeroCard = scoreCards.find(card => card.className.includes("matched") &&
+        !card.className.includes("unmatched"));
+    const unmatchedZeroCard = scoreCards.find(card => card.className.includes("unmatched"));
+    /* Superseded encoding-damaged assertion retained inert below.
+    assert(mappedZeroCard && allVisibleText(mappedZeroCard).includes("鍖归厤鍒嗭細0锛堟湇鍔＄璇勫垎锛?) &&
+        unmatchedZeroCard && !allVisibleText(unmatchedZeroCard).includes("鍖归厤鍒?"),
+        "an explicit mapped zero score may render, but an unmatched temporary season must never render a score");
+    */
+    assert(mappedZeroCard && allVisibleText(mappedZeroCard).includes(
+            "\u5339\u914d\u5206\uff1a0\uff08\u670d\u52a1\u7aef\u8bc4\u5206\uff09") &&
+        unmatchedZeroCard && !allVisibleText(unmatchedZeroCard).includes("\u5339\u914d\u5206"),
+        "an explicit mapped zero score may render, but an unmatched temporary season must never render a score");
+    unmatchedScoreDialog.forceClose();
+
+    const liveCompositeGroupsSeason = {
+        SeriesId: "one-punch", SeasonId: "one-punch-s1", SeasonNumber: 1,
+        SeasonName: "一拳超人 第一季", EpisodeCount: 2,
+        MappingProtocolVersion: 20, PlanGeneration: 202034,
+        RequiresCompositeMapping: true,
+        CompositePlan: {
+            OrderedEpisodes: [{ ItemId: "local-dandan-secret", ParentSeasonNumber: 1,
+                EpisodeNumber: 1, LocalDisplayLabel: "S01E01" },
+                { ItemId: "local-youku-secret", ParentSeasonNumber: 0,
+                    EpisodeNumber: 1, LocalDisplayLabel: "S00E01" }],
+            Mappings: [{ LocalEpisodeItemId: "local-dandan-secret",
+                Source: { ProviderId: "DandanID", MediaId: "11123" },
+                SourceEpisodeId: "111230001", SourceEpisodeNumber: 1, Origin: "scored" },
+                { LocalEpisodeItemId: "local-youku-secret",
+                    Source: { ProviderId: "YoukuID", MediaId: "cfd9e3748c8a4d52b10f" },
+                    SourceEpisodeId: "youku-source-secret", SourceEpisodeNumber: 5, Origin: "scored" }],
+            UnmatchedRuns: []
+        },
+        CompositeGroups: [{
+            IsTemporary: false, Site: "DandanID", CandidateId: "11123",
+            SourceStartEpisodeId: "111230001", SourceStartEpisodeNumber: 1,
+            MatchOrigin: "scored", MatchScore: 0.934, ScoreOrigin: "search-confidence",
+            Episodes: [{ ItemId: "local-dandan-secret", ParentSeasonNumber: 1,
+                EpisodeNumber: 1, LocalDisplayLabel: "S01E01", SourceEpisodeNumber: 1 }]
+        }, {
+            IsTemporary: false, Site: "YoukuID", CandidateId: "cfd9e3748c8a4d52b10f",
+            SourceStartEpisodeId: "youku-source-secret", SourceStartEpisodeNumber: 5,
+            MatchOrigin: "scored", MatchScore: 0.887, ScoreOrigin: "search-confidence",
+            Episodes: [{ ItemId: "local-youku-secret", ParentSeasonNumber: 0,
+                EpisodeNumber: 1, LocalDisplayLabel: "S00E01", SourceEpisodeNumber: 5 }]
+        }]
+    };
+    const liveCompositeDialog = hooks.openDialog("live CompositeGroups visibility");
+    hooks.renderCompositeSeasonSummary(liveCompositeDialog,
+        { Id: "one-punch", Type: "Series", Name: "一拳超人" },
+        liveCompositeGroupsSeason, 0, [liveCompositeGroupsSeason], {}, {});
+    const liveCompositeVisibleText = allVisibleText(liveCompositeDialog.body);
+    assert(liveCompositeVisibleText.includes("精确集映射 · 弹弹Play · 匹配分：93.4（标题匹配）") &&
+        liveCompositeVisibleText.includes("精确集映射 · 优酷 · 匹配分：88.7（标题匹配）") &&
+        !liveCompositeVisibleText.includes("DandanID") && !liveCompositeVisibleText.includes("YoukuID") &&
+        !liveCompositeVisibleText.includes("11123") &&
+        !liveCompositeVisibleText.includes("cfd9e3748c8a4d52b10f") &&
+        !liveCompositeVisibleText.includes("direct-episode-provider") &&
+        !liveCompositeVisibleText.includes("来源从第"),
+        "the actual CompositeGroups card path must expose only localized providers and scores in summaries");
+    const liveMappingText = liveCompositeDialog.body.querySelectorAll(".danmuVirtualSeasonMappings")
+        .map(allVisibleText).join(" ");
+    assert(liveMappingText.includes("本地 S01E01 → 来源第 1 集") &&
+        liveMappingText.includes("本地 S00E01 → 来源第 5 集") &&
+        !liveMappingText.includes("DandanID") && !liveMappingText.includes("YoukuID") &&
+        !liveMappingText.includes("111230001") && !liveMappingText.includes("youku-source-secret") &&
+        !liveMappingText.includes("匹配分"),
+        "actual CompositeGroups mapping rows must contain only local and source episode coordinates");
+    const liveWireSelections = hooks.compositeRequestSelections({}, liveCompositeGroupsSeason);
+    assert(liveWireSelections.length === 2 && liveWireSelections[0].Site === "DandanID" &&
+        liveWireSelections[0].CandidateId === "11123" && liveWireSelections[0].SourceStartEpisodeId === "111230001" &&
+        liveWireSelections[1].Site === "YoukuID" &&
+        liveWireSelections[1].CandidateId === "cfd9e3748c8a4d52b10f" &&
+        liveWireSelections[1].SourceStartEpisodeId === "youku-source-secret",
+        "visible-text sanitization must not delete trusted CompositeGroups wire identities");
+    liveCompositeDialog.forceClose();
 
     const draftDialog = hooks.openDialog("composite draft");
     const directGroup = hooks.compositeVirtualGroups(directSeason, compositeSelections)
@@ -472,6 +655,28 @@ async function main() {
     hooks.renderCompositeSeasonSummary(draftDialog,
         { Id: "series", Type: "Series", Name: "葬送的芙莉莲" },
         directSeason, 0, [directSeason], editableSelections, {});
+    const sanitizedText = allVisibleText(draftDialog.body);
+    assert(sanitizedText.includes("优酷") && sanitizedText.includes("精确集映射") &&
+        !sanitizedText.includes("YoukuID") && !sanitizedText.includes("2a5659587f87497d9aab") &&
+        !sanitizedText.includes("direct-source") && !sanitizedText.includes("direct-episode-provider") &&
+        !sanitizedText.includes("ItemId") && !sanitizedText.includes("server-only"),
+        "virtual-season visible text must localize the provider and hide every internal identity/origin token");
+    const mappingDetails = draftDialog.body.querySelectorAll(".danmuVirtualSeasonMappings");
+    assert(mappingDetails.length === 3 && source.includes(".danmuVirtualSeasonMappings{grid-column:1 / -1;min-width:0") &&
+        source.includes("@media(max-width:520px)") && source.includes(".danmuVirtualSeasonMappings{grid-column:1 / -1;width:100%}"),
+        "native mapping details must occupy the full card width on desktop and narrow/mobile layouts");
+    assert(mappingDetails.every(details => allVisibleText(details).split(" ").every(fragment =>
+        !fragment.includes("ItemId") && !fragment.includes("source-") && !fragment.includes("frieren-") &&
+        !fragment.includes("匹配分"))),
+        "expanded rows must contain only local/source episode coordinates, never IDs, provider, score, or provenance");
+    assert(mappingDetails.some(details => allVisibleText(details).includes("本地 S00E01 → 来源第 5 集")),
+        "a placed special must use its server-authored local SxxExx coordinate in the compact mapping row");
+    assert(compactSelections.every(selection => selection.MappingProtocolVersion === 20 &&
+        selection.PlanGeneration === compositeSeason.PlanGeneration &&
+        selection.MappingProtocolGeneration === undefined) &&
+        compactSelections[1].LocalStartEpisodeItemId === "episode-3" &&
+        compactSelections[1].CandidateId === "frieren-s2",
+        "sanitizing visible text must preserve compact wire identity and add the V20 generation fence");
     const editableActionLabels = draftDialog.body.querySelectorAll(".danmuSmartButton")
         .map(button => button.textContent);
     assert(editableActionLabels.filter(label => label === "重新匹配").length === 3 &&

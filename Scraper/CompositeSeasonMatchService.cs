@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
 using Emby.Plugin.Danmu.Model;
 using Emby.Plugin.Danmu.Scraper.Entity;
 using MediaBrowser.Controller.Entities.TV;
@@ -14,6 +15,9 @@ namespace Emby.Plugin.Danmu.Scraper
     /// </summary>
     public static class CompositeSeasonMatchService
     {
+        private static readonly object PlacementPropertyLock = new object();
+        private static readonly Dictionary<string, PropertyInfo> PlacementProperties =
+            new Dictionary<string, PropertyInfo>(StringComparer.Ordinal);
         public static bool AreSourceEpisodesExhausted(CompositeSeasonPlan plan,
             CompositeSeasonSourceIdentity source, IEnumerable<string> sourceEpisodeIds)
         {
@@ -38,6 +42,22 @@ namespace Emby.Plugin.Danmu.Scraper
             CompositeSeasonSourceIdentity source,
             IEnumerable<CompositeSeasonSourceEpisode> sourceEpisodes,
             string origin,
+            out CompositeSeasonPlan plan,
+            out bool exhausted,
+            out string error)
+        {
+            return TryNormalizeAndContinueSource(currentPlan, source, sourceEpisodes, origin,
+                0, string.Empty, string.Empty, out plan, out exhausted, out error);
+        }
+
+        public static bool TryNormalizeAndContinueSource(
+            CompositeSeasonPlan currentPlan,
+            CompositeSeasonSourceIdentity source,
+            IEnumerable<CompositeSeasonSourceEpisode> sourceEpisodes,
+            string origin,
+            double matchScore,
+            string scoreOrigin,
+            string selectionEvidenceToken,
             out CompositeSeasonPlan plan,
             out bool exhausted,
             out string error)
@@ -92,7 +112,8 @@ namespace Emby.Plugin.Danmu.Scraper
                 .Select(mapping => mapping.SourceEpisodeId), StringComparer.OrdinalIgnoreCase);
             var available = verifiedEpisodes.Where(episode => !consumedIds.Contains(episode.EpisodeId)).ToList();
             if (available.Count > 0 && plan.UnmatchedRuns.Count > 0 &&
-                !CompositeSeasonPlanner.TryApplyRemainingSourceEpisodes(plan, source, available, origin, out plan, out error))
+                !CompositeSeasonPlanner.TryApplyRemainingSourceEpisodes(plan, source, available, origin,
+                    matchScore, scoreOrigin, selectionEvidenceToken, out plan, out error))
             {
                 return false;
             }
@@ -137,17 +158,98 @@ namespace Emby.Plugin.Danmu.Scraper
         }
         public static List<CompositeSeasonLocalEpisode> GetLocalEpisodes(IEnumerable<Episode> episodes)
         {
-            return (episodes ?? Enumerable.Empty<Episode>())
+            return GetLocalEpisodes(episodes, null);
+        }
+
+        /// <summary>
+        /// Creates local planning records from Episode metadata.  With a target
+        /// context it returns the complete placed/display inventory while
+        /// marking owning, supplemental, and unknown logical ownership.  Only
+        /// callers asking for the ownership set may use it as primary evidence.
+        /// </summary>
+        public static List<CompositeSeasonLocalEpisode> GetLocalEpisodes(
+            IEnumerable<Episode> episodes, CompositeSeasonTargetContext targetContext)
+        {
+            // Preserve Emby's enumeration ordinal first. IndexNumber alone is
+            // not a placement key: a displayed S00E01 may coexist with S01E01.
+            var translated = (episodes ?? Enumerable.Empty<Episode>())
                 .Where(x => x != null)
-                .OrderBy(x => x.IndexNumber ?? int.MaxValue)
-                .ThenBy(x => x.Id)
                 .Select((episode, index) => new CompositeSeasonLocalEpisode
                 {
                     ItemId = episode.Id.ToString(),
                     EpisodeNumber = episode.IndexNumber,
+                    OriginalEpisodeNumber = episode.IndexNumber,
+                    ParentSeasonNumber = episode.ParentIndexNumber,
+                    PlacementOrder = index,
+                    PlacementRelation = 0,
+                    // These placement properties exist on newer Emby runtimes
+                    // but not on the 4.8.5 compile reference used by the plugin.
+                    // Read them compatibly and fail back to enumeration order.
+                    AirsBeforeSeasonNumber = GetNullableIntProperty(episode, "AirsBeforeSeasonNumber"),
+                    AirsBeforeEpisodeNumber = GetNullableIntProperty(episode, "AirsBeforeEpisodeNumber"),
+                    AirsAfterSeasonNumber = GetNullableIntProperty(episode, "AirsAfterSeasonNumber"),
+                    LogicalSeasonLabel = episode.ParentIndexNumber.HasValue
+                        ? "S" + episode.ParentIndexNumber.Value.ToString("00") : string.Empty,
                     SortOrder = index,
                 })
                 .ToList();
+            ApplyPlacementMetadata(translated, targetContext);
+            if (targetContext == null) return translated;
+            return CompositeSeasonOwnership.TryGetDisplayEpisodes(targetContext, translated, out var display)
+                ? display
+                : new List<CompositeSeasonLocalEpisode>();
+        }
+
+        private static void ApplyPlacementMetadata(
+            IList<CompositeSeasonLocalEpisode> episodes, CompositeSeasonTargetContext context)
+        {
+            if (episodes == null || context == null || !context.IsKnown) return;
+            var owning = episodes.Where(episode => episode.ParentSeasonNumber == context.TargetSeasonNumber)
+                .ToList();
+            var lastOwningOrder = owning.Select(episode => episode.SortOrder ?? 0).DefaultIfEmpty(0).Max();
+            foreach (var episode in episodes)
+            {
+                if (episode.AirsBeforeSeasonNumber == context.TargetSeasonNumber &&
+                    episode.AirsBeforeEpisodeNumber.GetValueOrDefault() > 0)
+                {
+                    var anchor = owning.FirstOrDefault(candidate =>
+                        candidate.OriginalEpisodeNumber == episode.AirsBeforeEpisodeNumber);
+                    episode.PlacementOrder = anchor?.SortOrder ?? lastOwningOrder + 1;
+                    episode.PlacementRelation = -1;
+                }
+                else if (episode.AirsAfterSeasonNumber == context.TargetSeasonNumber)
+                {
+                    episode.PlacementOrder = lastOwningOrder + 1;
+                    episode.PlacementRelation = 1;
+                }
+            }
+        }
+
+        private static int? GetNullableIntProperty(object instance, string propertyName)
+        {
+            if (instance == null || string.IsNullOrWhiteSpace(propertyName)) return null;
+            var cacheKey = instance.GetType().AssemblyQualifiedName + "\u001f" + propertyName;
+            PropertyInfo property;
+            lock (PlacementPropertyLock)
+            {
+                if (!PlacementProperties.TryGetValue(cacheKey, out property))
+                {
+                    property = instance.GetType().GetProperty(propertyName);
+                    // Cache missing properties too by retaining a null value.
+                    PlacementProperties[cacheKey] = property;
+                }
+            }
+            if (property == null || !property.CanRead) return null;
+            try
+            {
+                var value = property.GetValue(instance, null);
+                if (value == null) return null;
+                return value is int number ? number : Convert.ToInt32(value);
+            }
+            catch
+            {
+                return null;
+            }
         }
 
         public static CompositeSeasonSourceIdentity GetSource(string providerId, ScraperMedia media, string fallbackMediaId)

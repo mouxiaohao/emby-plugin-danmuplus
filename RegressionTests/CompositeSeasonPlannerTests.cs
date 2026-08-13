@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Runtime.Serialization;
+using System.Text.Json;
 using System.Threading.Tasks;
 using Emby.Plugin.Danmu.Core.Controllers;
 using Emby.Plugin.Danmu.Model;
@@ -48,6 +49,7 @@ namespace Emby.Plugin.Danmu.RegressionTests
             RetainsCompositeSafetyWhenReplacementCollapsesToOneSource();
             RejectsForeignAndStaleTemporaryRangesWithoutMutatingThePlan();
             VerifiesControllerParityMetadataAndDialogResetContracts();
+            PreservesServerCandidateScoreAcrossOwningPlansAndGroups();
             PreservesExactBindingScoreIntoSelectedCandidate();
         }
 
@@ -204,17 +206,10 @@ namespace Emby.Plugin.Danmu.RegressionTests
                 AppContext.BaseDirectory, "..", "..", "..", ".."));
             var controller = File.ReadAllText(Path.Combine(
                 repositoryRoot, "Core", "Controllers", "DanmuController.cs")).Replace("\r\n", "\n");
-            var markedBranch = controller.IndexOf("if (compositeMarked && !metadataOnly)\n", StringComparison.Ordinal);
-            var forceSearch = controller.IndexOf(
-                "var effectiveForceSearch = forceSearch || compositeMarked || metadataOnly;",
-                StringComparison.Ordinal);
-            var directPlan = controller.IndexOf("BuildCompositePlanAsync(latest, null, true", StringComparison.Ordinal);
-            Assert(markedBranch >= 0 && directPlan > markedBranch && forceSearch > directPlan,
-                "a marked Season preview must rebuild direct Episode evidence before it begins fresh Season searching");
-            var directBlock = controller.Substring(markedBranch, forceSearch - markedBranch);
-            Assert(directBlock.Contains("result.CompositePlan = direct.Plan;") &&
-                   directBlock.Contains("result.CompositeGroups = CompositeSeasonMatchService.ToGroups"),
-                "a marked preview must retain its direct plan/groups even when later candidate search is absent or ambiguous");
+            Assert(!controller.Contains("compositeMarked") &&
+                    !controller.Contains("BuildCompositePlanAsync(latest, null, true") &&
+                    controller.Contains("InitializeDecision(result, scrapers, true);"),
+                "r4 Season preview must ignore durable markers and local Episode IDs and begin from a fresh explicit plan");
         }
 
         private static void SupportsCompositeMappingForAnyLocalSeason()
@@ -616,23 +611,26 @@ namespace Emby.Plugin.Danmu.RegressionTests
                    controller.Contains("ParsedExcludedLocalEpisodeItemIds") &&
                    controller.Contains("DanmuExcludedLocalEpisodeItemIdsJson.TryParse"),
                 "the scalar GET exclusion contract must be parsed before preview/download dispatch");
-            Assert(controller.Contains("BuildCompositePlanAsync(latest, request.ParsedCompositeSelections, true,\n                    request.ParsedExcludedLocalEpisodeItemIds") &&
-                   controller.Contains("BuildCompositePlanAsync(season, request.ParsedCompositeSelections, true,\n                request.ParsedExcludedLocalEpisodeItemIds)"),
+            Assert(controller.Contains("BuildCompositePlanAsync(latest, request.ParsedCompositeSelections, false,") &&
+                    controller.Contains("BuildCompositePlanAsync(season, request.ParsedCompositeSelections, false,") &&
+                    controller.Contains("MergeEpisodeExclusions") &&
+                    controller.Contains("TryGetTargetOwnershipExclusions"),
                 "composite preview and tracked download must rebuild from the same parsed exclusions");
-            Assert(controller.Contains("TryCreatePlan(local, mappings, null,\n                    excludedLocalEpisodeItemIds, durableCompositeMarker") &&
-                   controller.Contains("TryCreatePlan(local, mappings, replacementMappings,\n                    excludedLocalEpisodeItemIds, durableCompositeMarker"),
+            Assert(controller.Contains("TryCreatePlan(local, mappings, null,\n                    effectiveExclusions, durableCompositeMarker") &&
+                    controller.Contains("TryCreatePlan(local, mappings, replacementMappings,\n                    effectiveExclusions, durableCompositeMarker"),
                 "the controller must validate exclusions before direct evidence and then rebuild confirmed replacements");
             Assert(controller.Contains("IsCompositePlan = build.Plan.SeasonBindingUnsafe") &&
                    controller.Contains("CanPersistCompleteSeasonBinding") &&
-                   controller.Contains("task.IsCompositePlan && outcome.FilePersisted"),
+                    controller.Contains("CommitSeasonDisplayMirrorAfterTerminalAsync"),
                 "subset and incomplete downloads must retain the Season-binding barrier, while only complete safe plans may persist a Season binding");
             var automatic = File.ReadAllText(Path.Combine(repositoryRoot, "LibraryManagerEventsHelper.cs"))
                 .Replace("\r\n", "\n");
-            Assert(automatic.Contains("null, null, IsCompositeSeason(season), out var plan") &&
-                   automatic.Contains("plan.CanPersistCompleteSeasonBinding") &&
-                   automatic.Contains("BeginCompositeSeasonWrite(season, plan.CompositeSafetyRequired)") &&
-                   automatic.Contains("if (plan.CompositeSafetyRequired) await OnCompositeSeasonFilePersistedAsync"),
-                "automatic composite downloads must preserve the same durable safety barrier as tracked downloads");
+            Assert(automatic.Contains("null, null, false, out var plan") &&
+                    automatic.Contains("plan.CanPersistCompleteSeasonBinding") &&
+                    automatic.Contains("BeginCompositeSeasonWrite(season, plan.CompositeSafetyRequired)") &&
+                    automatic.Contains("SeasonDisplayMirrorPolicy.CanCommit") &&
+                    !automatic.Contains("OnCompositeSeasonFilePersistedAsync"),
+                "automatic downloads must preserve the lease and defer Season mirrors until terminal success");
         }
 
         private static void RejectsIncompleteAutomaticSeasonAndResidualSearches()
@@ -824,11 +822,13 @@ namespace Emby.Plugin.Danmu.RegressionTests
                 "private async Task<CompositePlanBuild> BuildCompositePlanAsync",
                 "private async Task<DanmuDownloadTaskResult> StartTrackedCompositeSeasonDownload");
 
-            Assert(preview.Contains("request.ParsedCompositeSelections, true,\n                    request.ParsedExcludedLocalEpisodeItemIds") &&
-                   download.Contains("request.ParsedCompositeSelections, true,\n                request.ParsedExcludedLocalEpisodeItemIds"),
+            Assert(preview.Contains("request.ParsedCompositeSelections, false,") &&
+                    preview.Contains("effectiveExclusions") &&
+                    download.Contains("request.ParsedCompositeSelections, false,\n                request.ParsedExcludedLocalEpisodeItemIds"),
                 "preview and download must pass the identical exclusion and selection collections into the authoritative builder");
-            Assert(builder.Contains("TryCreatePlan(local, mappings, null,\n                    excludedLocalEpisodeItemIds, durableCompositeMarker") &&
-                   builder.Contains("TryCreatePlan(local, mappings, replacementMappings,\n                    excludedLocalEpisodeItemIds, durableCompositeMarker"),
+            Assert(builder.Contains("TryCreatePlan(local, mappings, null,\n                    effectiveExclusions, durableCompositeMarker") &&
+                    builder.Contains("TryCreatePlan(local, mappings, replacementMappings,\n                    effectiveExclusions, durableCompositeMarker") &&
+                    builder.Contains("TryBuildOwnedPlanningContext"),
                 "the shared builder must apply exclusions to direct evidence before replaying verified replacement selections");
             Assert(!preview.Contains("SaveProviderId", StringComparison.Ordinal) &&
                    !preview.Contains("UpdateItem", StringComparison.Ordinal) &&
@@ -870,14 +870,13 @@ namespace Emby.Plugin.Danmu.RegressionTests
                 AppContext.BaseDirectory, "..", "..", "..", ".."));
             var controller = File.ReadAllText(Path.Combine(
                 repositoryRoot, "Core", "Controllers", "DanmuController.cs")).Replace("\r\n", "\n");
-            var savedBinding = SliceSource(controller,
-                "if (DanmuMatchBindingHelper.TryGetSavedManualBinding(\n                    effectiveForceSearch",
-                "var search = await DanmuMatchSearchEngine.SearchSeasonAsync(");
-            Assert(savedBinding.Contains("MatchScore = 1") &&
-                   savedBinding.Contains("ScoreOrigin = DanmuMatchScoreOrigin.ExactBinding") &&
-                   savedBinding.IndexOf("StampSeasonCandidateEvidence", StringComparison.Ordinal) >
-                   savedBinding.IndexOf("ScoreOrigin = DanmuMatchScoreOrigin.ExactBinding", StringComparison.Ordinal),
-                "a saved manual Season binding must be stamped as exact binding before evidence registration");
+            var seasonPreview = SliceSource(controller,
+                "private async Task<DanmuSeasonMatchResult> GetSeasonMatchPreview(",
+                "private async Task<DanmuSeasonMatchResult> GetCompositeSeasonPlanPreview(");
+            Assert(!seasonPreview.Contains("TryGetSavedManualBinding") &&
+                    !seasonPreview.Contains("GetSeasonScopes(latest)") &&
+                    seasonPreview.Contains("DanmuMatchSearchEngine.SearchSeasonAsync("),
+                "r4 Season discovery must ignore saved identifiers and register evidence only from fresh search");
 
             var selectedMapper = SliceSource(controller,
                 "private static DanmuSelectedCandidatePreview ToSelectedCandidate(",
@@ -886,6 +885,106 @@ namespace Emby.Plugin.Danmu.RegressionTests
                    selectedMapper.Contains("ScoreOrigin = candidate.ScoreOrigin") &&
                    selectedMapper.Contains("SelectionEvidenceToken = candidate.SelectionEvidenceToken"),
                 "the selected card must retain the server score, closed provenance, and opaque evidence token");
+        }
+
+        private static void PreservesServerCandidateScoreAcrossOwningPlansAndGroups()
+        {
+            var local = Enumerable.Range(1, 3).Select(number => new CompositeSeasonLocalEpisode
+            {
+                ItemId = "score-local-" + number,
+                EpisodeNumber = number,
+                ParentSeasonNumber = number < 3 ? 1 : 0,
+                OriginalEpisodeNumber = number,
+                SortOrder = number,
+                Ownership = number < 3
+                    ? CompositeSeasonOwnershipKind.Owning
+                    : CompositeSeasonOwnershipKind.Supplemental,
+            }).ToList();
+            Assert(CompositeSeasonPlanner.TryCreatePlan(local, null, out var plan, out var error), error);
+            var source = new CompositeSeasonSourceIdentity
+            {
+                ProviderId = "DandanID",
+                MediaId = "score-season",
+                MediaLookupId = "score-candidate",
+            };
+            var episodes = new[]
+            {
+                Source("score-source-1", "score-comment-1", 1),
+                Source("score-source-2", "score-comment-2", 2),
+            };
+            Assert(CompositeSeasonPlanner.TryApplyRemainingOwningSourceEpisodes(
+                    plan, source, episodes, "scored", 0.93, DanmuMatchScoreOrigin.SearchConfidence,
+                    "opaque-evidence", out plan, out error), error);
+            Assert(plan.Mappings.Count == 2 && plan.Mappings.All(mapping =>
+                       Math.Abs(mapping.MatchScore - 0.93) < 0.0000001 &&
+                       mapping.ScoreOrigin == DanmuMatchScoreOrigin.SearchConfidence &&
+                       mapping.SelectionEvidenceToken == "opaque-evidence"),
+                "the initial owning candidate must retain its server score and closed evidence on every mapping: " +
+                string.Join(";", plan.Mappings.Select(mapping => mapping.LocalEpisodeItemId + ":" +
+                    mapping.MatchScore + ":" + mapping.ScoreOrigin + ":" + mapping.SelectionEvidenceToken)));
+
+            var groups = CompositeSeasonMatchService.ToGroups(plan, Enumerable.Empty<Episode>());
+            var mapped = groups.Single(group => !group.IsTemporary);
+            var unmatched = groups.Single(group => group.IsTemporary);
+            Assert(mapped.MatchScore.HasValue && Math.Abs(mapped.MatchScore.Value - 0.93) < 0.0000001 &&
+                   mapped.ScoreOrigin == DanmuMatchScoreOrigin.SearchConfidence &&
+                   mapped.SelectionEvidenceToken == "opaque-evidence",
+                "mapped virtual groups must expose the actual server candidate score and origin");
+            var mappedJson = JsonSerializer.Serialize(mapped);
+            Assert(mappedJson.Contains("\"MatchScore\":0.93", StringComparison.Ordinal) &&
+                   mappedJson.Contains("\"ScoreOrigin\":\"search-confidence\"", StringComparison.Ordinal),
+                "the mapped-group wire response must include the real score and its closed origin");
+            mapped.MatchScore = 0;
+            Assert(JsonSerializer.Serialize(mapped).Contains("\"MatchScore\":0", StringComparison.Ordinal),
+                "an explicit server score of zero on a mapped group must remain distinguishable from unmatched");
+            Assert(!unmatched.MatchScore.HasValue,
+                "unmatched temporary groups must omit a score instead of serializing a fabricated zero");
+            Assert(JsonSerializer.Serialize(unmatched).Contains("\"MatchScore\":null", StringComparison.Ordinal) &&
+                   !JsonSerializer.Serialize(unmatched).Contains("\"MatchScore\":0", StringComparison.Ordinal),
+                "a serializer that emits nulls must still distinguish an unmatched group from score zero");
+
+            Assert(CompositeSeasonPlanner.TryCreatePlan(plan.OrderedEpisodes, plan.Mappings,
+                    out var rebuilt, out error), error);
+            Assert(rebuilt.Mappings.All(mapping => Math.Abs(mapping.MatchScore - 0.93) < 0.0000001 &&
+                       mapping.ScoreOrigin == DanmuMatchScoreOrigin.SearchConfidence &&
+                       mapping.SelectionEvidenceToken == "opaque-evidence"),
+                "authoritative preview/download reconstruction must preserve candidate evidence");
+
+            var exact = CompositeSeasonMatchService.CreateDirectMapping("exact-local", "DandanID",
+                new ScraperMedia
+                {
+                    Id = "exact-parent",
+                    Episodes = new List<ScraperEpisode>
+                    {
+                        new ScraperEpisode
+                        {
+                            Id = "exact-episode",
+                            CommentId = "exact-comment",
+                            EpisodeNumber = 1,
+                        },
+                    },
+                }, "exact-token");
+            Assert(exact != null && Math.Abs(exact.MatchScore - 1) < 0.0000001 &&
+                   exact.ScoreOrigin == DanmuMatchScoreOrigin.ExactEpisodeId &&
+                   exact.Origin == "episode-provider-id",
+                "an exact single-Episode identifier must remain closed exact evidence, not a browser score");
+
+            var repositoryRoot = Path.GetFullPath(Path.Combine(
+                AppContext.BaseDirectory, "..", "..", "..", ".."));
+            var controller = File.ReadAllText(Path.Combine(
+                repositoryRoot, "Core", "Controllers", "DanmuController.cs")).Replace("\r\n", "\n");
+            Assert(controller.Contains(
+                    "request.MatchScore, request.ScoreOrigin, request.SelectionEvidenceToken,"),
+                "the controller must pass resolved server evidence into the initial owning plan");
+            var model = File.ReadAllText(Path.Combine(
+                repositoryRoot, "Model", "DanmuMatchResult.cs")).Replace("\r\n", "\n");
+            var groupModel = SliceSource(model,
+                "public class DanmuCompositeSeasonGroup",
+                "public class DanmuCompositeEpisode");
+            Assert(!groupModel.Contains("JsonIgnore") && !groupModel.Contains("IgnoreDataMember") &&
+                   !groupModel.Contains("EmitDefaultValue") &&
+                   groupModel.Contains("public double? MatchScore { get; set; }"),
+                "Emby/ServiceStack must see a plain nullable score: mapped values serialize, temporary nulls use its default omission policy");
         }
 
         private static string MappingSnapshot(CompositeSeasonEpisodeMapping mapping)

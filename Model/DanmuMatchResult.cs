@@ -14,6 +14,8 @@ namespace Emby.Plugin.Danmu.Model
 
     public class DanmuMatchPreviewResult
     {
+        public int MappingProtocolVersion { get; set; } = Core.DanmuMappingProtocol.CurrentVersion;
+        public long PlanGeneration { get; set; }
         public string ItemId { get; set; } = string.Empty;
         public string ItemName { get; set; } = string.Empty;
         public string ItemType { get; set; } = string.Empty;
@@ -31,6 +33,7 @@ namespace Emby.Plugin.Danmu.Model
         public string SearchOperationId { get; set; } = string.Empty;
         public List<DanmuSearchCompletionDiagnostic> SearchCompletionDiagnostics { get; set; } =
             new List<DanmuSearchCompletionDiagnostic>();
+        public List<string> SearchErrors { get; set; } = new List<string>();
         public DanmuSelectedCandidatePreview SelectedCandidate { get; set; }
         public Dictionary<string, string> EnabledProviderIdKeys { get; set; } =
             new Dictionary<string, string>(System.StringComparer.OrdinalIgnoreCase);
@@ -76,6 +79,8 @@ namespace Emby.Plugin.Danmu.Model
 
     public class DanmuSeasonMatchResult
     {
+        public int MappingProtocolVersion { get; set; } = Core.DanmuMappingProtocol.CurrentVersion;
+        public long PlanGeneration { get; set; }
         public string SeasonId { get; set; } = string.Empty;
         public string SeriesId { get; set; } = string.Empty;
         public string SeasonName { get; set; } = string.Empty;
@@ -125,7 +130,7 @@ namespace Emby.Plugin.Danmu.Model
         public string SourceStartEpisodeId { get; set; } = string.Empty;
         public int? SourceStartEpisodeNumber { get; set; }
         public string MatchOrigin { get; set; } = string.Empty;
-        public double MatchScore { get; set; }
+        public double? MatchScore { get; set; }
         public string ScoreOrigin { get; set; } = string.Empty;
         public string SelectionEvidenceToken { get; set; } = string.Empty;
         public List<DanmuCompositeEpisode> Episodes { get; set; } = new List<DanmuCompositeEpisode>();
@@ -144,6 +149,8 @@ namespace Emby.Plugin.Danmu.Model
     // upstream media and derives each exact mapping itself.
     public class DanmuCompositeSeasonSelection
     {
+        public int MappingProtocolVersion { get; set; } = Core.DanmuMappingProtocol.CurrentVersion;
+        public long PlanGeneration { get; set; }
         public string LocalStartEpisodeItemId { get; set; } = string.Empty;
         public int RequestedEpisodeCount { get; set; }
         public string Site { get; set; } = string.Empty;
@@ -422,6 +429,12 @@ namespace Emby.Plugin.Danmu.Model
         // true after direct identities normalize to one upstream source, so the
         // Season binding is protected until the composite route has settled.
         public bool IsCompositePlan { get; set; }
+        public int MappingProtocolVersion { get; set; } = Core.DanmuMappingProtocol.CurrentVersion;
+        public long PlanGeneration { get; set; }
+        public string SeasonProviderValue { get; set; } = string.Empty;
+        public string SeasonStructureFingerprint { get; set; } = string.Empty;
+        public bool SeasonMirrorEligible { get; set; }
+        public string SeasonMirrorWarning { get; set; } = string.Empty;
         public long SeasonProviderWriteGeneration { get; set; }
         public bool SeasonProviderCommitted { get; set; }
         public string Status { get; set; } = "pending";

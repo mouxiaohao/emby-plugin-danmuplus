@@ -3,6 +3,13 @@ using System.Collections.Generic;
 
 namespace Emby.Plugin.Danmu.Model
 {
+    public enum CompositeSeasonOwnershipKind
+    {
+        Unknown = 0,
+        Owning = 1,
+        Supplemental = 2,
+    }
+
     /// <summary>
     /// A local episode as seen by the composite-season planner. The Emby ItemId,
     /// rather than a display number, is its identity.
@@ -11,6 +18,29 @@ namespace Emby.Plugin.Danmu.Model
     {
         public string ItemId { get; set; } = string.Empty;
         public int? EpisodeNumber { get; set; }
+
+        /// <summary>The logical Emby season carried by the Episode itself.</summary>
+        public int? ParentSeasonNumber { get; set; }
+
+        /// <summary>
+        /// The original episode ordinal, retained separately from a placement
+        /// order so S00E01 and S01E01 never become the same local identity.
+        /// </summary>
+        public int? OriginalEpisodeNumber { get; set; }
+
+        /// <summary>Stable placement within the owning logical season.</summary>
+        public int? PlacementOrder { get; set; }
+
+        /// <summary>Stable tie-break within one placement anchor (-1 before, 0 normal, 1 after).</summary>
+        public int PlacementRelation { get; set; }
+
+        public int? AirsBeforeSeasonNumber { get; set; }
+        public int? AirsBeforeEpisodeNumber { get; set; }
+        public int? AirsAfterSeasonNumber { get; set; }
+
+        /// <summary>Display-only logical season label. It is never an identity.</summary>
+        public string LogicalSeasonLabel { get; set; } = string.Empty;
+        public CompositeSeasonOwnershipKind Ownership { get; set; }
 
         /// <summary>Stable library order supplied by the Emby-facing adapter.</summary>
         public int? SortOrder { get; set; }

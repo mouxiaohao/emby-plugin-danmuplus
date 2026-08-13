@@ -12,9 +12,78 @@ namespace Emby.Plugin.Danmu.Scraper
     /// </summary>
     public static class CompositeSeasonPlanner
     {
+        /// <summary>
+        /// Continues one primary source only across unmatched runs owned by the
+        /// same logical season. Supplemental/unknown runs remain visible and
+        /// do not consume a source offset.
+        /// </summary>
+        public static bool TryApplyRemainingOwningSourceEpisodes(
+            CompositeSeasonPlan currentPlan, CompositeSeasonSourceIdentity source,
+            IEnumerable<CompositeSeasonSourceEpisode> availableSourceEpisodes, string origin,
+            out CompositeSeasonPlan plan, out string error)
+        {
+            return TryApplyRemainingOwningSourceEpisodes(currentPlan, source, availableSourceEpisodes,
+                origin, 0, string.Empty, string.Empty, out plan, out error);
+        }
+
+        public static bool TryApplyRemainingOwningSourceEpisodes(
+            CompositeSeasonPlan currentPlan, CompositeSeasonSourceIdentity source,
+            IEnumerable<CompositeSeasonSourceEpisode> availableSourceEpisodes, string origin,
+            double matchScore, string scoreOrigin, string selectionEvidenceToken,
+            out CompositeSeasonPlan plan, out string error)
+        {
+            plan = currentPlan;
+            error = string.Empty;
+            var available = (availableSourceEpisodes ?? Enumerable.Empty<CompositeSeasonSourceEpisode>()).ToList();
+            var owningKey = plan?.UnmatchedRuns
+                .SelectMany(run => run.Episodes)
+                .FirstOrDefault(episode => episode.Ownership == CompositeSeasonOwnershipKind.Owning)
+                ?.ParentSeasonNumber;
+            if (plan == null || !owningKey.HasValue)
+            {
+                error = "A valid plan with known owning Episode context is required.";
+                return false;
+            }
+
+            var offset = 0;
+            while (offset < available.Count)
+            {
+                var run = plan.UnmatchedRuns.FirstOrDefault(candidate => candidate.Episodes.Count > 0 &&
+                    candidate.Episodes.All(episode => episode.Ownership == CompositeSeasonOwnershipKind.Owning &&
+                        episode.ParentSeasonNumber == owningKey));
+                if (run == null) break;
+                var remaining = available.Skip(offset).ToList();
+                var request = new CompositeSeasonSegmentRequest
+                {
+                    LocalStartEpisodeItemId = run.Episodes[0].ItemId,
+                    RequestedEpisodeCount = Math.Min(run.Episodes.Count, remaining.Count),
+                    Source = source,
+                    SourceEpisodes = remaining,
+                    SourceStartEpisodeId = remaining[0].EpisodeId,
+                    Origin = origin ?? string.Empty,
+                    MatchScore = matchScore,
+                    ScoreOrigin = scoreOrigin ?? string.Empty,
+                    SelectionEvidenceToken = selectionEvidenceToken ?? string.Empty,
+                };
+                if (!TryApplySegment(plan, request, out plan, out var applied, out error)) return false;
+                offset += applied;
+            }
+            return true;
+        }
+
         public static bool TryApplyRemainingSourceEpisodes(
             CompositeSeasonPlan currentPlan, CompositeSeasonSourceIdentity source,
             IEnumerable<CompositeSeasonSourceEpisode> availableSourceEpisodes, string origin,
+            out CompositeSeasonPlan plan, out string error)
+        {
+            return TryApplyRemainingSourceEpisodes(currentPlan, source, availableSourceEpisodes,
+                origin, 0, string.Empty, string.Empty, out plan, out error);
+        }
+
+        public static bool TryApplyRemainingSourceEpisodes(
+            CompositeSeasonPlan currentPlan, CompositeSeasonSourceIdentity source,
+            IEnumerable<CompositeSeasonSourceEpisode> availableSourceEpisodes, string origin,
+            double matchScore, string scoreOrigin, string selectionEvidenceToken,
             out CompositeSeasonPlan plan, out string error)
         {
             plan = currentPlan;
@@ -33,6 +102,9 @@ namespace Emby.Plugin.Danmu.Scraper
                     SourceEpisodes = remaining,
                     SourceStartEpisodeId = remaining[0].EpisodeId,
                     Origin = origin ?? string.Empty,
+                    MatchScore = matchScore,
+                    ScoreOrigin = scoreOrigin ?? string.Empty,
+                    SelectionEvidenceToken = selectionEvidenceToken ?? string.Empty,
                 };
                 if (!TryApplySegment(plan, request, out plan, out var applied, out error)) return false;
                 offset += applied;
@@ -222,6 +294,9 @@ namespace Emby.Plugin.Danmu.Scraper
                     continue;
                 }
                 if (current == null || !current.Source.Equals(mapping.Source) ||
+                    !CompositeSeasonOwnership.IsSameLogicalRun(
+                        plan.OrderedEpisodes.FirstOrDefault(x => string.Equals(x.ItemId,
+                            current.Mappings.Last().LocalEpisodeItemId, StringComparison.OrdinalIgnoreCase)), local) ||
                     current.Mappings.Count == 0 ||
                     Math.Abs(current.Mappings[0].MatchScore - mapping.MatchScore) > 0.0000001 ||
                     !string.Equals(current.Mappings[0].ScoreOrigin, mapping.ScoreOrigin,
@@ -379,7 +454,8 @@ namespace Emby.Plugin.Danmu.Scraper
             error = string.Empty;
             ordered = (episodes ?? Enumerable.Empty<CompositeSeasonLocalEpisode>())
                 .Select((episode, index) => new { Episode = episode, Index = index })
-                .OrderBy(entry => entry.Episode?.SortOrder ?? int.MaxValue)
+                .OrderBy(entry => entry.Episode?.PlacementOrder ?? entry.Episode?.SortOrder ?? int.MaxValue)
+                .ThenBy(entry => entry.Episode?.PlacementRelation ?? 0)
                 .ThenBy(entry => IsPositive(entry.Episode?.EpisodeNumber) ? 0 : 1)
                 .ThenBy(entry => IsPositive(entry.Episode?.EpisodeNumber) ? entry.Episode.EpisodeNumber.Value : int.MaxValue)
                 .ThenBy(entry => entry.Episode?.ItemId ?? string.Empty, StringComparer.OrdinalIgnoreCase)
@@ -487,11 +563,17 @@ namespace Emby.Plugin.Danmu.Scraper
             var mapped = new HashSet<string>(mappingList.Select(mapping => mapping.LocalEpisodeItemId), StringComparer.OrdinalIgnoreCase);
             var runs = new List<CompositeSeasonUnmatchedRun>();
             CompositeSeasonUnmatchedRun run = null;
+            CompositeSeasonLocalEpisode previous = null;
             foreach (var episode in ordered)
             {
+                if (previous != null && !CompositeSeasonOwnership.IsSameLogicalRun(previous, episode))
+                {
+                    run = null;
+                }
                 if (mapped.Contains(episode.ItemId))
                 {
                     run = null;
+                    previous = episode;
                     continue;
                 }
                 if (run == null)
@@ -500,6 +582,7 @@ namespace Emby.Plugin.Danmu.Scraper
                     runs.Add(run);
                 }
                 run.Episodes.Add(CloneLocalEpisode(episode));
+                previous = episode;
             }
 
             var plan = new CompositeSeasonPlan
@@ -555,7 +638,21 @@ namespace Emby.Plugin.Danmu.Scraper
 
         private static CompositeSeasonLocalEpisode CloneLocalEpisode(CompositeSeasonLocalEpisode episode)
         {
-            return new CompositeSeasonLocalEpisode { ItemId = episode?.ItemId ?? string.Empty, EpisodeNumber = episode?.EpisodeNumber, SortOrder = episode?.SortOrder };
+            return new CompositeSeasonLocalEpisode
+            {
+                ItemId = episode?.ItemId ?? string.Empty,
+                EpisodeNumber = episode?.EpisodeNumber,
+                ParentSeasonNumber = episode?.ParentSeasonNumber,
+                OriginalEpisodeNumber = episode?.OriginalEpisodeNumber,
+                PlacementOrder = episode?.PlacementOrder,
+                PlacementRelation = episode?.PlacementRelation ?? 0,
+                AirsBeforeSeasonNumber = episode?.AirsBeforeSeasonNumber,
+                AirsBeforeEpisodeNumber = episode?.AirsBeforeEpisodeNumber,
+                AirsAfterSeasonNumber = episode?.AirsAfterSeasonNumber,
+                LogicalSeasonLabel = episode?.LogicalSeasonLabel ?? string.Empty,
+                Ownership = episode?.Ownership ?? CompositeSeasonOwnershipKind.Unknown,
+                SortOrder = episode?.SortOrder,
+            };
         }
 
         private static CompositeSeasonEpisodeMapping CloneMapping(CompositeSeasonEpisodeMapping mapping)

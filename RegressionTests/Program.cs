@@ -81,6 +81,7 @@ namespace Emby.Plugin.Danmu.RegressionTests
             AppliesDuplicateAndForceRefreshPolicy();
             PreservesSingleEpisodeIsolationAndLegacyTaskShape();
             PreservesProviderWriteGenerationOrdering();
+            R4GenerationPolicyTests.Run();
             CompositeSeasonStateTests.Run();
             ReplacesOnlyRegisteredOrdinaryProviderIds();
             MapsEpisodeSourceNumbersSafely();
@@ -755,13 +756,15 @@ namespace Emby.Plugin.Danmu.RegressionTests
             var controller = File.ReadAllText(Path.Combine(
                 repositoryRoot, "Core", "Controllers", "DanmuController.cs"));
             var library = File.ReadAllText(Path.Combine(repositoryRoot, "LibraryManagerEventsHelper.cs"));
-            Assert(controller.Contains("latest, authoritativeParentSeries, scrapers") &&
-                   Regex.IsMatch(controller,
-                       @"GetSingleEpisodeDirectScopes\(latest\)[\s\S]{0,300}authoritativeSeries,[\s\S]{0,100}cancellationToken\)\.ConfigureAwait\(false\)") &&
-                   controller.Contains("_libraryManagerEventsHelper.SaveProviderId(item, providerId, providerValue, true)") &&
-                   library.Contains("currentItem ?? season, authoritativeSeries, scrapers") &&
-                   library.Contains("updateItem.ProviderIds = DanmuProviderIdResolver.GetItemLocalProviderIds("),
-                "Season manual binding, automatic import, and metadata writes must use the guarded item-local persistence path");
+            Assert(!controller.Contains("GetSeasonScopes(latest)") &&
+                    !controller.Contains("TryGetSavedManualBinding(\n                    true,\n                    scrapers") &&
+                    Regex.IsMatch(controller,
+                        @"GetSingleEpisodeDirectScopes\(latest\)[\s\S]{0,300}authoritativeSeries,[\s\S]{0,100}cancellationToken\)\.ConfigureAwait\(false\)") &&
+                    controller.Contains("_libraryManagerEventsHelper.SaveProviderId(item, providerId, providerValue, true)") &&
+                    controller.Contains("CommitSeasonDisplayMirrorAfterTerminalAsync") &&
+                    library.Contains("UpsertSeasonDisplayMirrorAsync") &&
+                    !library.Contains("SaveAutomaticSeasonProviderId"),
+                "r4 must retain item-local Movie/Episode paths while Season matching is fresh-plan only and mirrors only at terminal completion");
         }
 
         private static void DiscoversCandidatesWithBoundedTitleClauses()
@@ -879,20 +882,19 @@ namespace Emby.Plugin.Danmu.RegressionTests
             var controller = File.ReadAllText(Path.Combine(repositoryRoot, "Core", "Controllers", "DanmuController.cs"));
             var library = File.ReadAllText(Path.Combine(repositoryRoot, "LibraryManagerEventsHelper.cs"));
             Assert(controller.Contains("PersistProviderIdAfterAcceptedOutcome(episode, outcome)") &&
-                   controller.Contains("PersistSeasonProviderIdAfterAcceptedOutcome(") &&
-                   controller.Contains("task.SeasonProviderWriteGeneration") &&
-                   controller.Contains("task.SeasonProviderCommitted") &&
-                   controller.Contains("CanPersistCompleteSeasonBinding") &&
+                    !controller.Contains("PersistSeasonProviderIdAfterAcceptedOutcome(") &&
+                    controller.Contains("CommitSeasonDisplayMirrorAfterTerminalAsync") &&
+                    controller.Contains("CanPersistCompleteSeasonBinding") &&
                    controller.Contains("ErrorCode = \"mapping_required\"") &&
                    controller.Contains("ErrorCode = \"partial_confirmation_required\""),
                 "mapped Season downloads must write each successful Episode, persist a Season binding only for a complete single-source plan, and reject positional or unconfirmed partial downloads");
             Assert(library.Contains("persisted = true") &&
-                   library.Contains("SaveAutomaticSeasonProviderId(") &&
-                   library.Contains("MarkStarted(GetProviderWriteKey(item, providerId), generation)") &&
-                   library.Contains("_scraperManager.AllWithNoEnabled()") &&
-                   library.Contains("DanmuProviderIdWritePolicy.BuildSuccessfulWrite(") &&
-                   library.Contains("updateItem is Season || updateItem is Episode"),
-                "automatic import, latest-started protection, and all-registered ordinary-ID cleanup must share the success-gated persistence path");
+                    !library.Contains("SaveAutomaticSeasonProviderId(") &&
+                    library.Contains("SeasonDisplayMirrorPolicy.CanCommit") &&
+                    library.Contains("acceptedCount") && library.Contains("anyFailed") &&
+                    library.Contains("MarkStarted(GetProviderWriteKey(item, providerId), generation)") &&
+                    library.Contains("UpsertSeasonDisplayMirrorAsync"),
+                "automatic import must write a Season display mirror only after complete accepted terminal success");
         }
 
         private static void PreservesSeriesPreviewProviderIdContract()

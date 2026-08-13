@@ -14,5 +14,7 @@
     <Compile Remove="TemporaryRangePolicy\**\*.cs" />
     <Compile Remove="EpisodeSelectionPolicy\**\*.cs" />
     <Compile Remove="R3SearchQuality\**\*.cs" />
+    <Compile Remove="R4ParentSeasonContext\**\*.cs" />
+    <Compile Remove="R4IdentifierMetamorphic\**\*.cs" />
   </ItemGroup>
 </Project>
