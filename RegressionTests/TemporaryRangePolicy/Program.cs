@@ -104,9 +104,10 @@ namespace Emby.Plugin.Danmu.TemporaryRangePolicyRegression
             Assert(controller.Contains("GetMovieMatchPreview(\n                    movie,\n                    request.Keyword,\n                    rematch", StringComparison.Ordinal) &&
                    controller.Contains("GetEpisodeMatchPreview(\n                    episode,\n                    request.Keyword,\n                    rematch", StringComparison.Ordinal) &&
                    controller.Contains("if (!forceSearch)", StringComparison.Ordinal) &&
-                   controller.Contains("if (!effectiveForceSearch)", StringComparison.Ordinal) &&
-                   controller.Contains("TryGetSavedManualBinding(\n                    effectiveForceSearch", StringComparison.Ordinal),
-                "forced Movie, Episode, and Season previews must bypass provider identifiers and saved bindings while ordinary previews retain precedence");
+                   controller.Contains("TryGetSavedManualBinding(\n                    forceSearch", StringComparison.Ordinal) &&
+                   controller.Contains("SeasonTargetPlanningCoordinator.TryBuild", StringComparison.Ordinal) &&
+                   !controller.Contains("TryGetSavedManualBinding(\n                    effectiveForceSearch", StringComparison.Ordinal),
+                "forced Movie and Episode previews must preserve their exact-identifier bypass while r5 Season planning stays identifier-free behind the shared target coordinator");
         }
 
         private static string FindRepositoryRoot(string startDirectory)

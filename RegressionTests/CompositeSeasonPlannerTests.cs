@@ -6,6 +6,7 @@ using System.Reflection;
 using System.Runtime.Serialization;
 using System.Text.Json;
 using System.Threading.Tasks;
+using Emby.Plugin.Danmu.Core;
 using Emby.Plugin.Danmu.Core.Controllers;
 using Emby.Plugin.Danmu.Model;
 using Emby.Plugin.Danmu.Scraper;
@@ -50,6 +51,7 @@ namespace Emby.Plugin.Danmu.RegressionTests
             RejectsForeignAndStaleTemporaryRangesWithoutMutatingThePlan();
             VerifiesControllerParityMetadataAndDialogResetContracts();
             PreservesServerCandidateScoreAcrossOwningPlansAndGroups();
+            ProjectsBoundedSourceEpisodeNamesWithoutChangingPlanAuthority();
             PreservesExactBindingScoreIntoSelectedCandidate();
         }
 
@@ -614,8 +616,9 @@ namespace Emby.Plugin.Danmu.RegressionTests
             Assert(controller.Contains("BuildCompositePlanAsync(latest, request.ParsedCompositeSelections, false,") &&
                     controller.Contains("BuildCompositePlanAsync(season, request.ParsedCompositeSelections, false,") &&
                     controller.Contains("MergeEpisodeExclusions") &&
-                    controller.Contains("TryGetTargetOwnershipExclusions"),
-                "composite preview and tracked download must rebuild from the same parsed exclusions");
+                    controller.Contains("TryBuildOwnedPlanningContext") &&
+                    !controller.Contains("CompositeSeasonTargetOwnership.Resolve(inventories)"),
+                "composite preview and tracked download must rebuild from the same parsed exclusions and target-season scope");
             Assert(controller.Contains("TryCreatePlan(local, mappings, null,\n                    effectiveExclusions, durableCompositeMarker") &&
                     controller.Contains("TryCreatePlan(local, mappings, replacementMappings,\n                    effectiveExclusions, durableCompositeMarker"),
                 "the controller must validate exclusions before direct evidence and then rebuild confirmed replacements");
@@ -681,7 +684,7 @@ namespace Emby.Plugin.Danmu.RegressionTests
                 "LogIncompleteAutomaticSearch(season.Name, \"residual-range\", search);",
                 StringComparison.Ordinal);
             var residualSelection = automatic.IndexOf(
-                "var candidate = CompositeSeasonMatchService.SelectSupplementalCandidate(",
+                "var candidate = CompositeSeasonMatchService.SelectResidualCandidate(",
                 StringComparison.Ordinal);
             var firstDownload = automatic.IndexOf(
                 "var outcome = await DownloadEpisodeForProgress(episode, exact, sourceScraper, false, 1)",
@@ -985,6 +988,101 @@ namespace Emby.Plugin.Danmu.RegressionTests
                    !groupModel.Contains("EmitDefaultValue") &&
                    groupModel.Contains("public double? MatchScore { get; set; }"),
                 "Emby/ServiceStack must see a plain nullable score: mapped values serialize, temporary nulls use its default omission policy");
+        }
+
+        private static void ProjectsBoundedSourceEpisodeNamesWithoutChangingPlanAuthority()
+        {
+            var longTitle = "  " + new string('x',
+                CompositeSeasonMatchService.MaximumSourceEpisodeNameLength + 37) + "  ";
+            var resolvedMedia = new ScraperMedia
+            {
+                Id = "title-source",
+                Episodes = new List<ScraperEpisode>
+                {
+                    new ScraperEpisode
+                    {
+                        Id = "title-source-1",
+                        CommentId = "title-comment-1",
+                        EpisodeNumber = 1,
+                        Title = longTitle,
+                    },
+                    new ScraperEpisode
+                    {
+                        Id = "title-source-2",
+                        CommentId = "title-comment-2",
+                        EpisodeNumber = 2,
+                        Title = "",
+                    },
+                },
+            };
+            var source = new CompositeSeasonSourceIdentity
+            {
+                ProviderId = "DandanID",
+                MediaId = "title-source",
+                MediaLookupId = "title-source-lookup",
+            };
+            var sourceEpisodes = CompositeSeasonMatchService.GetSourceEpisodes(resolvedMedia);
+            var sourceEpisodeNames = CompositeSeasonMatchService.GetSourceEpisodeNames(resolvedMedia, source);
+            Assert(sourceEpisodes.Count == 2 &&
+                   sourceEpisodeNames[CompositeSeasonMatchService.GetSourceEpisodeNameKey(source, "title-source-1")].Length ==
+                       CompositeSeasonMatchService.MaximumSourceEpisodeNameLength &&
+                   sourceEpisodeNames[CompositeSeasonMatchService.GetSourceEpisodeNameKey(source, "title-source-1")]
+                       .All(character => character == 'x') &&
+                   sourceEpisodeNames[CompositeSeasonMatchService.GetSourceEpisodeNameKey(source, "title-source-2")] == string.Empty,
+                "source Episode titles must be trimmed, bounded, and keep an empty-title fallback");
+
+            Assert(CompositeSeasonPlanner.TryCreatePlan(LocalEpisodes(1, 2), null,
+                out var plan, out var error), error);
+            Assert(CompositeSeasonPlanner.TryApplySegment(plan,
+                new CompositeSeasonSegmentRequest
+                {
+                    LocalStartEpisodeItemId = "local-1",
+                    RequestedEpisodeCount = 2,
+                    Source = source,
+                    SourceEpisodes = sourceEpisodes,
+                    SourceStartEpisodeId = "title-source-1",
+                    Origin = "manual",
+                }, out plan, out _, out error), error);
+            Assert(plan.Mappings.All(mapping =>
+                       typeof(CompositeSeasonEpisodeMapping).GetProperty("SourceEpisodeName") == null),
+                "the authoritative mapping model must remain free of source display titles");
+
+            var groups = CompositeSeasonMatchService.ToGroups(
+                plan, Enumerable.Empty<Episode>(), sourceEpisodeNames);
+            var mapped = groups.Single(group => !group.IsTemporary);
+            Assert(mapped.Episodes[0].SourceEpisodeName == sourceEpisodeNames[
+                       CompositeSeasonMatchService.GetSourceEpisodeNameKey(source, "title-source-1")] &&
+                   mapped.Episodes[1].SourceEpisodeName == string.Empty &&
+                   JsonSerializer.Serialize(mapped.Episodes[0]).Contains("\"SourceEpisodeName\"", StringComparison.Ordinal),
+                "the public composite-group projection must expose the bounded source title without source identity fields");
+
+            var context = new SeasonPlanningContext
+            {
+                SeriesId = "title-series",
+                SeasonId = "title-season",
+                TargetSeasonNumber = 1,
+                StructureFingerprint = "title-structure",
+            };
+            var selection = new DanmuCompositeSeasonSelection
+            {
+                Site = source.ProviderId,
+                CandidateId = source.MediaLookupId,
+                LocalStartEpisodeItemId = "local-1",
+                RequestedEpisodeCount = 2,
+                SourceStartEpisodeId = "title-source-1",
+                MatchOrigin = "manual",
+                SelectionEvidenceToken = "title-evidence",
+            };
+            var baselineFingerprint = SeasonPlanningContextBuilder.CreatePlanFingerprint(
+                context, new[] { selection }, plan);
+            sourceEpisodeNames[CompositeSeasonMatchService.GetSourceEpisodeNameKey(
+                source, "title-source-1")] = "different-display-title";
+            var displayTitleChangedFingerprint = SeasonPlanningContextBuilder.CreatePlanFingerprint(
+                context, new[] { selection }, plan);
+            Assert(baselineFingerprint == displayTitleChangedFingerprint &&
+                   typeof(DanmuCompositeSeasonSelection).GetProperty("SourceEpisodeName") == null &&
+                   typeof(DanmuEpisodeDownloadResult).GetProperty("SourceEpisodeName") == null,
+                "source display titles must not alter fingerprints, compact selections, or download task snapshots");
         }
 
         private static string MappingSnapshot(CompositeSeasonEpisodeMapping mapping)

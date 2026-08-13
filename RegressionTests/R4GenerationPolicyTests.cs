@@ -16,8 +16,9 @@ namespace Emby.Plugin.Danmu.RegressionTests
 
         private static void RejectsLegacyBatchOrigins()
         {
-            Assert(DanmuMappingProtocol.IsCurrent(20) && !DanmuMappingProtocol.IsCurrent(19),
-                "r4 protocol must reject cached V19/r3 drafts");
+            Assert(DanmuMappingProtocol.IsCurrent(21) && !DanmuMappingProtocol.IsCurrent(20) &&
+                   !DanmuMappingProtocol.IsCurrent(19),
+                "r5 protocol must reject cached V20/r4 and V19/r3 drafts");
             foreach (var origin in new[] { "episode-provider-id", "exact-binding", "binding", "direct" })
                 Assert(!DanmuMappingProtocol.IsAllowedBatchOrigin(origin), "legacy local-id origin must be rejected: " + origin);
             Assert(DanmuMappingProtocol.IsAllowedBatchOrigin("manual") &&

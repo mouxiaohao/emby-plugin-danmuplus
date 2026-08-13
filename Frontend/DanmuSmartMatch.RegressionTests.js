@@ -232,11 +232,11 @@ function fakeResponse(status, statusText, body, contentType) {
 }
 
 async function main() {
-    assert((source.match(/__embyDanmuSmartMenuV20/g) || []).length === 1 &&
-        !source.includes("__embyDanmuSmartMenuV19") && !source.includes("__embyDanmuSmartMenuV18"),
-        "the r4 frontend installation flag should be V20 exactly once");
-    assert(!source.includes("MAPPING_PROTOCOL_GENERATION") && source.includes("var MAPPING_PROTOCOL_VERSION = 20"),
-        "V20 must use the backend numeric protocol and must not invent a browser-only generation string");
+    assert((source.match(/__embyDanmuSmartMenuV23/g) || []).length === 1 &&
+        !source.includes("__embyDanmuSmartMenuV22") && !source.includes("__embyDanmuSmartMenuV21"),
+        "the r7 frontend installation flag should be V23 exactly once");
+    assert(!source.includes("MAPPING_PROTOCOL_GENERATION") && source.includes("var MAPPING_PROTOCOL_VERSION = 21"),
+        "the r7 UI must retain the backend numeric V21 mapping protocol and server-authored plan generation");
     const decodedResponse = fakeResponse(200, "OK", '{"Seasons":[{"SeasonId":"s1"}]}');
     const decodedJson = await hooks.decodeApiResult(decodedResponse);
     assert(decodedJson.Seasons[0].SeasonId === "s1" && decodedResponse.readCount() === 1,
@@ -269,7 +269,7 @@ async function main() {
     const partialSeriesDialog = hooks.openDialog("partial Series");
     apiResponses.MatchPreview = fakeResponse(503, "Unavailable", JSON.stringify({
         code: "season-search-partial", message: "one sibling failed", retryable: true,
-        Seasons: [{ SeasonId: "completed-season", SeasonName: "Season 1", EpisodeCount: 12,
+        Seasons: [{ SeasonId: "completed-season", SeasonName: "Season 1", SeasonNumber: 1, EpisodeCount: 12,
             Status: "matched", MatchOrigin: "scored", DecisionReason: "partial-confident" }]
     }));
     const partialCallStart = apiCalls.length;
@@ -277,9 +277,9 @@ async function main() {
     const partialCall = apiCalls.slice(partialCallStart).find(call => call.option === "MatchPreview");
     assert(allVisibleText(partialSeriesDialog.body).includes("Season 1") &&
         !allVisibleText(partialSeriesDialog.body).includes("[object Response]") &&
-        partialCall.parameters.mappingProtocolVersion === 20 &&
+        partialCall.parameters.mappingProtocolVersion === 21 &&
         partialCall.parameters.mappingProtocolGeneration === undefined,
-        "a whole-Series partial HTTP failure must retain completed sibling Seasons and every API call must carry the V20 fence");
+        "a whole-Series partial HTTP failure must retain completed sibling Seasons and every API call must carry the V21 fence");
     partialSeriesDialog.forceClose();
     delete apiResponses.MatchPreview;
     /* r2 intentionally hid all scores; r3 replaces that contract below.
@@ -386,12 +386,12 @@ async function main() {
     const compositeSeason = {
         SeriesId: "series", SeasonId: "season-composite", SeasonNumber: 1,
         SeasonName: "Composite", EpisodeCount: 5,
-        MappingProtocolVersion: 20, PlanGeneration: 7341,
+        MappingProtocolVersion: 21, PlanGeneration: 7341,
         CompositePlan: {
             OrderedEpisodes: [1, 2, 3, 4, 5].map(number => ({
                 ItemId: "episode-" + number, EpisodeNumber: number, SortOrder: number,
-                ParentSeasonNumber: number === 5 ? 0 : 1,
-                LocalDisplayLabel: number === 5 ? "S00E01" : "S01E" + String(number).padStart(2, "0")
+                ParentSeasonNumber: 1,
+                LocalDisplayLabel: "S01E" + String(number).padStart(2, "0")
             })),
             Mappings: [1, 2].map(number => ({
                 LocalEpisodeItemId: "episode-" + number,
@@ -401,8 +401,8 @@ async function main() {
             })),
             UnmatchedRuns: [{ Episodes: [3, 4, 5].map(number => ({
                 ItemId: "episode-" + number, EpisodeNumber: number, SortOrder: number,
-                ParentSeasonNumber: number === 5 ? 0 : 1,
-                LocalDisplayLabel: number === 5 ? "S00E01" : "S01E" + String(number).padStart(2, "0")
+                ParentSeasonNumber: 1,
+                LocalDisplayLabel: "S01E" + String(number).padStart(2, "0")
             })) }]
         }
     };
@@ -423,21 +423,110 @@ async function main() {
         "exact mappings or a manual virtual season must permit downloading the confirmed subset");
     const compactSelections = hooks.compositeRequestSelections(compositeSelections, compositeSeason);
     const currentSeasonRequest = hooks.seasonRequestParameters(compositeSeason);
-    assert(currentSeasonRequest.mappingProtocolVersion === 20 &&
+    assert(currentSeasonRequest.mappingProtocolVersion === 21 &&
         currentSeasonRequest.planGeneration === compositeSeason.PlanGeneration &&
         currentSeasonRequest.mappingProtocolGeneration === undefined,
-        "every Season rebuild/rematch/download request must echo the server-authored numeric V20 plan generation");
+        "every Season rebuild/rematch/download request must echo the server-authored numeric V21 plan generation");
     assert(compactSelections.length === 2 && compactSelections[0].CandidateId === "frieren-s1" &&
         compactSelections[0].LocalStartEpisodeItemId === "episode-1" && compactSelections[0].RequestedEpisodeCount === 2 &&
         compactSelections[1].CandidateId === "frieren-s2" && compactSelections[1].SourceStartEpisodeNumber === 1 &&
         JSON.stringify(compactSelections).indexOf("server-only") < 0,
         "the browser must resubmit the verified S1 base group together with manual S2 intent and never expose CommentId values");
-    const cachedV19Season = Object.assign({}, compositeSeason, {
-        MappingProtocolVersion: 19, PlanGeneration: null
+    const cachedV20Season = Object.assign({}, compositeSeason, {
+        MappingProtocolVersion: 20, PlanGeneration: compositeSeason.PlanGeneration
     });
-    assert(!hooks.hasCurrentMappingContract(cachedV19Season) && !hooks.hasCompositePlan(cachedV19Season) &&
-        hooks.compositeRequestSelections(compositeSelections, cachedV19Season).length === 0,
-        "a cached V19 or generation-less Season draft must be discarded and cannot be submitted or restored");
+    assert(!hooks.hasCurrentMappingContract(cachedV20Season) && !hooks.hasCompositePlan(cachedV20Season) &&
+        hooks.compositeRequestSelections(compositeSelections, cachedV20Season).length === 0,
+        "a cached V20 Season draft must be discarded and cannot be submitted or restored");
+    assert(!hooks.hasCurrentMappingContract(Object.assign({}, compositeSeason, { PlanGeneration: 0 })) &&
+        !hooks.hasCurrentMappingContract(Object.assign({}, compositeSeason, { PlanGeneration: "invalid" })),
+        "V21 requires a positive numeric server-authored plan generation");
+    assert(hooks.decisionReasonLabel({ DecisionReason: "no-eligible-episodes" }) ===
+        "\u672c\u5b63\u6ca1\u6709\u53ef\u53c2\u4e0e\u5339\u914d\u7684\u5267\u96c6" &&
+        hooks.decisionReasonLabel({ DecisionReason: "target-season-inventory-unavailable" }) ===
+        "\u65e0\u6cd5\u8bfb\u53d6\u672c\u5b63\u5267\u96c6\u6e05\u5355" &&
+        hooks.decisionReasonLabel({ DecisionReason: "stale-scope" }) ===
+        "\u672c\u5b63\u5267\u96c6\u8303\u56f4\u5df2\u53d8\u5316\uff0c\u8bf7\u91cd\u65b0\u9884\u89c8",
+        "r5 inventory, empty-scope, and stale-scope diagnostics must have stable user-facing labels");
+
+    const scopedS1 = {
+        SeriesId: "scope-series", SeasonId: "scope-s1", SeasonNumber: 1, SeasonName: "Season 1",
+        EpisodeCount: 12, DisplayedEpisodeCount: 19, EligibleEpisodeCount: 12,
+        IgnoredParentZeroEpisodeCount: 7, IgnoredOtherSeasonEpisodeCount: 0,
+        IgnoredUnknownParentEpisodeCount: 0, IgnoredInvalidEpisodeCount: 0,
+        MappingProtocolVersion: 21, PlanGeneration: 8101, RequiresCompositeMapping: true,
+        CompositePlan: {
+            OrderedEpisodes: [{ ItemId: "s1e1", ParentSeasonNumber: 1, EpisodeNumber: 1,
+                LocalDisplayLabel: "S01E01" }],
+            Mappings: [{ LocalEpisodeItemId: "s1e1",
+                Source: { ProviderId: "Dandan", MediaId: "scope-source" },
+                SourceEpisodeId: "source-1", SourceEpisodeNumber: 1, Origin: "scored" },
+                { LocalEpisodeItemId: "s0e1",
+                    Source: { ProviderId: "Dandan", MediaId: "foreign-source" },
+                    SourceEpisodeId: "foreign-1", SourceEpisodeNumber: 1, Origin: "scored" }],
+            UnmatchedRuns: [{ Episodes: [{ ItemId: "s0e1", ParentSeasonNumber: 0,
+                EpisodeNumber: 1, LocalDisplayLabel: "S00E01" }] }]
+        },
+        CompositeGroups: [{ IsTemporary: false, Site: "Dandan", CandidateId: "scope-source",
+            MatchOrigin: "scored", Episodes: [{ ItemId: "s1e1", ParentSeasonNumber: 1,
+                EpisodeNumber: 1, LocalDisplayLabel: "S01E01", SourceEpisodeNumber: 1 }] },
+            { IsTemporary: false, Site: "Dandan", CandidateId: "foreign-source",
+                MatchOrigin: "scored", Episodes: [{ ItemId: "s0e1", ParentSeasonNumber: 0,
+                    EpisodeNumber: 1, LocalDisplayLabel: "S00E01", SourceEpisodeNumber: 1 }] },
+            { IsTemporary: true, Episodes: [{ ItemId: "s0e1", ParentSeasonNumber: 0,
+                EpisodeNumber: 1, LocalDisplayLabel: "S00E01" }] }]
+    };
+    assert(hooks.compositeVirtualGroups(scopedS1, {}).length === 1 &&
+        hooks.compositeVirtualGroups(scopedS1, {})[0].episodes[0].ItemId === "s1e1" &&
+        hooks.compositeRequestSelections({}, scopedS1).length === 1 &&
+        hooks.compositeRequestSelections({}, scopedS1)[0].LocalStartEpisodeItemId === "s1e1" &&
+        JSON.stringify(hooks.compositeRequestSelections({}, scopedS1)).indexOf("s0e1") < 0,
+        "normal S1 must render and submit only Parent 1 mappings; foreign S00 mappings and temporary runs stay off wire");
+    assert(hooks.scopeSummaryLine(scopedS1).includes("显示 19 集") &&
+        hooks.scopeSummaryLine(scopedS1).includes("参与匹配 12 集") &&
+        hooks.scopeSummaryLine(scopedS1).includes("S00 7 集"),
+        "ignored cross-season counts must remain a read-only summary");
+
+    const explicitS0 = {
+        SeriesId: "scope-series", SeasonId: "scope-s0", SeasonNumber: 0, SeasonName: "Season 0",
+        EpisodeCount: 1, DisplayedEpisodeCount: 1, EligibleEpisodeCount: 1,
+        MappingProtocolVersion: 21, PlanGeneration: 8102, RequiresCompositeMapping: true,
+        CompositePlan: {
+            OrderedEpisodes: [{ ItemId: "s0-own-e1", ParentSeasonNumber: 0, EpisodeNumber: 1,
+                LocalDisplayLabel: "S00E01" }],
+            Mappings: [{ LocalEpisodeItemId: "s0-own-e1",
+                Source: { ProviderId: "Dandan", MediaId: "special-source" },
+                SourceEpisodeId: "special-1", SourceEpisodeNumber: 1, Origin: "scored" }],
+            UnmatchedRuns: []
+        },
+        CompositeGroups: [{ IsTemporary: false, Site: "Dandan", CandidateId: "special-source",
+            MatchOrigin: "scored", Episodes: [{ ItemId: "s0-own-e1", ParentSeasonNumber: 0,
+                EpisodeNumber: 1, LocalDisplayLabel: "S00E01", SourceEpisodeNumber: 1 }] }]
+    };
+    assert(hooks.isEligibleCompositeEpisode(explicitS0, explicitS0.CompositePlan.OrderedEpisodes[0]) &&
+        hooks.compositeVirtualGroups(explicitS0, {}).length === 1 &&
+        hooks.compositeRequestSelections({}, explicitS0)[0].LocalStartEpisodeItemId === "s0-own-e1",
+        "an explicitly opened Season 0 must render and submit its own Parent 0 plan normally");
+
+    const seriesScopeDialog = hooks.openDialog("r5 whole-Series scope");
+    hooks.renderSeriesPicker(seriesScopeDialog,
+        { Id: "scope-series", Type: "Series", Name: "Scope Series" },
+        [explicitS0, scopedS1], {}, {});
+    assert(!allVisibleText(seriesScopeDialog.body).includes("Season 0") &&
+        allVisibleText(seriesScopeDialog.body).includes("Season 1") &&
+        seriesScopeDialog.body.querySelectorAll(".danmuVirtualSeason").length === 1,
+        "whole-Series rendering must omit Season 0 and must not add it back when the response contains one");
+    seriesScopeDialog.forceClose();
+
+    const incompatibleSelections = { __compositeSelections: {}, __mappingContracts: {} };
+    incompatibleSelections["series::season-composite"] = { Id: "old-candidate" };
+    incompatibleSelections.__compositeSelections["series::season-composite"] = [{
+        LocalStartEpisodeItemId: "episode-1", RequestedEpisodeCount: 1
+    }];
+    hooks.discardIncompatibleSeasonDrafts(null, [cachedV20Season], incompatibleSelections);
+    assert(!incompatibleSelections["series::season-composite"] &&
+        !incompatibleSelections.__compositeSelections["series::season-composite"],
+        "a fresh r5 dialog must clear cached V20 candidate and compact-selection state without submitting it");
     const removeS1 = hooks.filterCompositeSelectionsByItemIds(
         compositeSeason, compactSelections, ["episode-1", "episode-2"]);
     const removeS2 = hooks.filterCompositeSelectionsByItemIds(
@@ -471,7 +560,7 @@ async function main() {
         "direct Episode provider-id mappings must be rebuilt by the server and never submitted by the browser");
     assert(hooks.isForbiddenBatchOrigin("direct-episode-provider-id") &&
         hooks.isForbiddenBatchOrigin("exact-binding") && hooks.isForbiddenBatchOrigin("provider-id"),
-        "V20 must discard all cached V19 local-identifier-derived batch origins");
+        "V21 must discard all cached local-identifier-derived batch origins");
     const staleSelections = {};
     staleSelections.__compositeSelections = {};
     staleSelections.__compositeSelections["series::season-composite"] = [{
@@ -488,12 +577,12 @@ async function main() {
         "a virtual season can be removed and the original unmatched run is restored for re-match");
     const groupOnlySeason = {
         SeriesId: "series", SeasonId: "group-only", SeasonNumber: 2, SeasonName: "Group only",
-        MappingProtocolVersion: 20, PlanGeneration: 7342,
+        MappingProtocolVersion: 21, PlanGeneration: 7342,
         RequiresCompositeMapping: true,
         CompositeGroups: [{ IsTemporary: false, Site: "Dandan", CandidateId: "s1",
-            MatchScore: 0, Episodes: [{ ItemId: "a", EpisodeNumber: 1 }] },
+            MatchScore: 0, Episodes: [{ ItemId: "a", ParentSeasonNumber: 2, EpisodeNumber: 1 }] },
             { IsTemporary: true, MatchScore: 0, ScoreOrigin: "search-confidence",
-                Episodes: [{ ItemId: "b", EpisodeNumber: 2 }] }]
+                Episodes: [{ ItemId: "b", ParentSeasonNumber: 2, EpisodeNumber: 2 }] }]
     };
     assert(hooks.hasCompositePlan(groupOnlySeason) &&
         hooks.compositeVirtualGroups(groupOnlySeason, {}).map(group => group.kind).join(",") === "mapped,unmatched" &&
@@ -518,18 +607,20 @@ async function main() {
             "\u5339\u914d\u5206\uff1a0\uff08\u670d\u52a1\u7aef\u8bc4\u5206\uff09") &&
         unmatchedZeroCard && !allVisibleText(unmatchedZeroCard).includes("\u5339\u914d\u5206"),
         "an explicit mapped zero score may render, but an unmatched temporary season must never render a score");
+    assert(scoreCards.every(card => card.querySelector(".danmuVirtualSeasonTitle").textContent.indexOf("\u4e34\u65f6\u5b63 ") === 0),
+        "mapped and unmatched virtual ranges must use the same temporary-season title convention");
     unmatchedScoreDialog.forceClose();
 
     const liveCompositeGroupsSeason = {
         SeriesId: "one-punch", SeasonId: "one-punch-s1", SeasonNumber: 1,
         SeasonName: "一拳超人 第一季", EpisodeCount: 2,
-        MappingProtocolVersion: 20, PlanGeneration: 202034,
+        MappingProtocolVersion: 21, PlanGeneration: 202034,
         RequiresCompositeMapping: true,
         CompositePlan: {
             OrderedEpisodes: [{ ItemId: "local-dandan-secret", ParentSeasonNumber: 1,
                 EpisodeNumber: 1, LocalDisplayLabel: "S01E01" },
-                { ItemId: "local-youku-secret", ParentSeasonNumber: 0,
-                    EpisodeNumber: 1, LocalDisplayLabel: "S00E01" }],
+                { ItemId: "local-youku-secret", ParentSeasonNumber: 1,
+                    EpisodeNumber: 2, LocalDisplayLabel: "S01E02" }],
             Mappings: [{ LocalEpisodeItemId: "local-dandan-secret",
                 Source: { ProviderId: "DandanID", MediaId: "11123" },
                 SourceEpisodeId: "111230001", SourceEpisodeNumber: 1, Origin: "scored" },
@@ -543,13 +634,15 @@ async function main() {
             SourceStartEpisodeId: "111230001", SourceStartEpisodeNumber: 1,
             MatchOrigin: "scored", MatchScore: 0.934, ScoreOrigin: "search-confidence",
             Episodes: [{ ItemId: "local-dandan-secret", ParentSeasonNumber: 1,
-                EpisodeNumber: 1, LocalDisplayLabel: "S01E01", SourceEpisodeNumber: 1 }]
+                EpisodeNumber: 1, LocalDisplayLabel: "S01E01", EpisodeName: "本地标题一",
+                SourceEpisodeNumber: 1, SourceEpisodeTitle: "来源标题一" }]
         }, {
             IsTemporary: false, Site: "YoukuID", CandidateId: "cfd9e3748c8a4d52b10f",
             SourceStartEpisodeId: "youku-source-secret", SourceStartEpisodeNumber: 5,
             MatchOrigin: "scored", MatchScore: 0.887, ScoreOrigin: "search-confidence",
-            Episodes: [{ ItemId: "local-youku-secret", ParentSeasonNumber: 0,
-                EpisodeNumber: 1, LocalDisplayLabel: "S00E01", SourceEpisodeNumber: 5 }]
+            Episodes: [{ ItemId: "local-youku-secret", ParentSeasonNumber: 1,
+                EpisodeNumber: 2, LocalDisplayLabel: "S01E02", EpisodeName: "本地标题二",
+                SourceEpisodeNumber: 5, SourceEpisodeName: "来源标题五" }]
         }]
     };
     const liveCompositeDialog = hooks.openDialog("live CompositeGroups visibility");
@@ -567,12 +660,14 @@ async function main() {
         "the actual CompositeGroups card path must expose only localized providers and scores in summaries");
     const liveMappingText = liveCompositeDialog.body.querySelectorAll(".danmuVirtualSeasonMappings")
         .map(allVisibleText).join(" ");
-    assert(liveMappingText.includes("本地 S01E01 → 来源第 1 集") &&
-        liveMappingText.includes("本地 S00E01 → 来源第 5 集") &&
+    assert(liveMappingText.includes("S01E01") && liveMappingText.includes("来源第 1 集") &&
+        liveMappingText.includes("S01E02") && liveMappingText.includes("来源第 5 集") &&
+        liveMappingText.includes("本地标题一") && liveMappingText.includes("来源标题一") &&
+        liveMappingText.includes("本地标题二") && liveMappingText.includes("来源标题五") &&
         !liveMappingText.includes("DandanID") && !liveMappingText.includes("YoukuID") &&
         !liveMappingText.includes("111230001") && !liveMappingText.includes("youku-source-secret") &&
         !liveMappingText.includes("匹配分"),
-        "actual CompositeGroups mapping rows must contain only local and source episode coordinates");
+        "actual CompositeGroups mapping rows must expose paired local/source titles without internal identities or scores");
     const liveWireSelections = hooks.compositeRequestSelections({}, liveCompositeGroupsSeason);
     assert(liveWireSelections.length === 2 && liveWireSelections[0].Site === "DandanID" &&
         liveWireSelections[0].CandidateId === "11123" && liveWireSelections[0].SourceStartEpisodeId === "111230001" &&
@@ -598,6 +693,10 @@ async function main() {
         "Restore must remove only the selected run's real ItemIds from dialog-local exclusions");
 
     const rangeGroup = hooks.compositeVirtualGroups(compositeSeason, {}).find(group => group.kind === "unmatched");
+    const laterRangeGroup = { kind: "unmatched", episodes: rangeGroup.episodes.slice(1) };
+    assert(hooks.temporaryRangeStateKey(compositeSeason, rangeGroup) !==
+        hooks.temporaryRangeStateKey(compositeSeason, laterRangeGroup),
+        "temporary-range state must be keyed by the actual local range rather than only its Season");
     const rangeKeyword = hooks.temporaryRangeKeyword(
         { Id: "series", Type: "Series", Name: "葬送的芙莉莲" },
         Object.assign({}, compositeSeason, { SeriesName: "葬送的芙莉莲", Candidates: [{ Id: "stale-full-season" }] }));
@@ -620,33 +719,60 @@ async function main() {
         "a Season entry must use the same range path and fall back to its Season title only when Series title is empty");
 
     const rangeDialog = hooks.openDialog("range search");
+    const broadSeasonCandidates = [{ Id: "stale-full-season", Site: "Stale" }];
     const rangeSeason = Object.assign({}, compositeSeason, {
         SeriesName: "葬送的芙莉莲",
-        Candidates: [{ Id: "stale-full-season", Site: "Stale" }]
+        Candidates: broadSeasonCandidates
     });
     apiResponses.MatchPreview = {
         Seasons: [Object.assign({}, rangeSeason, {
-            Candidates: [{ Id: "fresh-range", Site: "Dandan", Name: "葬送的芙莉莲 第二季", EpisodeSize: 3 }]
+            CandidateGeneration: "range-generation",
+            Candidates: [{ Id: "fresh-range", Site: "Dandan", Name: "葬送的芙莉莲 第二季", EpisodeSize: 3,
+                MatchScore: 0.82, ScoreOrigin: "search-confidence", SelectionEvidenceToken: "range-private" }]
         })]
     };
     const rangeCallCount = apiCalls.length;
     hooks.renderCompositeGroupPicker(rangeDialog,
         { Id: "series", Type: "Series", Name: "葬送的芙莉莲" },
         rangeSeason, 0, [rangeSeason], {}, {}, rangeGroup);
-    assert(rangeDialog.body.querySelectorAll(".danmuBusy").length === 1 &&
-        rangeDialog.body.querySelectorAll(".danmuCandidate").length === 0,
-        "first temporary-group entry must clear stale/full-Season candidates before its immediate request completes");
+    assert(rangeDialog.title.textContent === "手动匹配未匹配临时季" &&
+        rangeDialog.body.querySelectorAll(".danmuBusy").length === 1 &&
+        rangeDialog.body.querySelectorAll(".danmuCandidate").length === 0 &&
+        rangeDialog.footer.querySelectorAll(".danmuForceRefresh").length === 0 &&
+        rangeSeason.Candidates === broadSeasonCandidates,
+        "both temporary-range entry states must share the manual menu title while busy hides force refresh and preserves broad candidates");
     await waitUntil(() => rangeDialog.body.querySelectorAll(".danmuCandidate").length === 1,
         "automatic temporary-range request should settle before assertions");
     const automaticRangeCall = apiCalls.slice(rangeCallCount).find(call => call.option === "MatchPreview");
     assert(automaticRangeCall && automaticRangeCall.parameters.searchScope === "temporary-range" &&
         automaticRangeCall.parameters.keyword === "葬送的芙莉莲" &&
-        rangeDialog.body.querySelectorAll(".danmuCandidate").length === 1,
-        "temporary-group entry must automatically search once and render only the returned range candidates without a user edit");
+        rangeDialog.body.querySelectorAll(".danmuCandidate").length === 1 &&
+        rangeDialog.body.querySelectorAll(".danmuCandidateDetailAction").length === 1 &&
+        rangeDialog.footer.querySelectorAll(".danmuForceRefresh").length === 1 &&
+        rangeSeason.Candidates === broadSeasonCandidates &&
+        Object.keys(rangeDialog.temporaryRangeCandidates).length === 1,
+        "temporary-group entry must retain range-keyed candidates, restore one footer control, and not contaminate the Season candidate list");
+    const rangeCandidateRow = rangeDialog.body.querySelector(".danmuCandidate");
+    const rangeScore = hooks.matchScoreLine({ MatchScore: 0.82, ScoreOrigin: "search-confidence" });
+    assert(allVisibleText(rangeCandidateRow).split(rangeScore).length === 2,
+        "a temporary-range candidate must render its match score exactly once");
+    apiResponses.MatchCandidateDetails = request => ({
+        Success: true, Generation: request.url.query.generation,
+        SourceEpisodes: [{ Id: "range-source", Number: 1, Title: "范围来源标题" }]
+    });
+    await rangeCandidateRow.querySelector(".danmuCandidateDetailAction").dispatch("click");
+    const rangeDetailCall = apiCalls.filter(call => call.option === "MatchCandidateDetails").pop();
+    assert(rangeDetailCall.parameters.candidateId === "fresh-range" &&
+        rangeDetailCall.parameters.candidateEvidence === "range-private" &&
+        allVisibleText(rangeCandidateRow).includes("范围来源标题") &&
+        !allVisibleText(rangeCandidateRow).includes("range-private"),
+        "temporary-range candidates must reuse lazy details with private evidence and row-local expansion");
     rangeDialog.forceClose();
     delete apiResponses.MatchPreview;
+    delete apiResponses.MatchCandidateDetails;
 
     const editableSelections = { __compositeSelections: {} };
+    hooks.discardIncompatibleSeasonDrafts(draftDialog, [directSeason], editableSelections);
     editableSelections.__compositeSelections["series::season-composite"] = [{
         LocalStartEpisodeItemId: "episode-3", RequestedEpisodeCount: 2,
         Source: { ProviderId: "Dandan", MediaId: "frieren-s2" },
@@ -669,14 +795,14 @@ async function main() {
         !fragment.includes("ItemId") && !fragment.includes("source-") && !fragment.includes("frieren-") &&
         !fragment.includes("匹配分"))),
         "expanded rows must contain only local/source episode coordinates, never IDs, provider, score, or provenance");
-    assert(mappingDetails.some(details => allVisibleText(details).includes("本地 S00E01 → 来源第 5 集")),
-        "a placed special must use its server-authored local SxxExx coordinate in the compact mapping row");
-    assert(compactSelections.every(selection => selection.MappingProtocolVersion === 20 &&
+    assert(mappingDetails.some(details => allVisibleText(details).includes("本地 S01E05 → 来源第 5 集")),
+        "an eligible Episode must use its server-authored local SxxExx coordinate in the compact mapping row");
+    assert(compactSelections.every(selection => selection.MappingProtocolVersion === 21 &&
         selection.PlanGeneration === compositeSeason.PlanGeneration &&
         selection.MappingProtocolGeneration === undefined) &&
         compactSelections[1].LocalStartEpisodeItemId === "episode-3" &&
         compactSelections[1].CandidateId === "frieren-s2",
-        "sanitizing visible text must preserve compact wire identity and add the V20 generation fence");
+        "sanitizing visible text must preserve compact wire identity and add the V21 generation fence");
     const editableActionLabels = draftDialog.body.querySelectorAll(".danmuSmartButton")
         .map(button => button.textContent);
     assert(editableActionLabels.filter(label => label === "重新匹配").length === 3 &&
@@ -766,6 +892,7 @@ async function main() {
 
     const searchedDialog = hooks.openDialog("searched selection restore");
     const searchedSelections = { __compositeSelections: {} };
+    hooks.discardIncompatibleSeasonDrafts(searchedDialog, [directSeason], searchedSelections);
     searchedSelections.__compositeSelections["series::season-composite"] = [{
         LocalStartEpisodeItemId: "episode-3", RequestedEpisodeCount: 2,
         Source: { ProviderId: "Dandan", MediaId: "frieren-s2" },
@@ -819,6 +946,104 @@ async function main() {
         hooks.compositeExcludedItemIds(searchedDialog, searchedSeasons[0]).length === 0,
         "closing the dialog must discard removed-selection snapshots and exclusions together");
     delete apiResponses.MatchPreview;
+
+    function rematchFixture(kind, suffix) {
+        const seasonId = "rematch-" + kind + "-" + suffix;
+        const ordered = [1, 2].map(number => ({
+            ItemId: seasonId + "-episode-" + number, ParentSeasonNumber: 1,
+            EpisodeNumber: number, LocalDisplayLabel: "S01E0" + number
+        }));
+        const mapping = {
+            LocalEpisodeItemId: ordered[0].ItemId,
+            Source: { ProviderId: "Dandan", MediaId: "mapped-source" },
+            SourceEpisodeId: "mapped-source-1", SourceEpisodeNumber: 1, Origin: "scored"
+        };
+        const season = {
+            SeriesId: "rematch-series-" + suffix, SeasonId: seasonId, SeasonNumber: 1,
+            SeasonName: "Rematch " + suffix, EpisodeCount: 2,
+            MappingProtocolVersion: 21, PlanGeneration: 9100 + suffix.length,
+            RequiresCompositeMapping: true,
+            CompositePlan: {
+                OrderedEpisodes: ordered, Mappings: [mapping],
+                UnmatchedRuns: [{ Episodes: [ordered[1]] }]
+            },
+            CompositeGroups: [{ IsTemporary: false, Site: "Dandan", CandidateId: "mapped-source",
+                MatchOrigin: "scored", Episodes: [{ ItemId: ordered[0].ItemId,
+                    ParentSeasonNumber: 1, EpisodeNumber: 1, LocalDisplayLabel: "S01E01" }] },
+                { IsTemporary: true, Episodes: [{ ItemId: ordered[1].ItemId,
+                    ParentSeasonNumber: 1, EpisodeNumber: 2, LocalDisplayLabel: "S01E02" }] }]
+        };
+        const selections = { __compositeSelections: {} };
+        return { season: season, selections: selections, ordered: ordered, mapping: mapping };
+    }
+
+    async function verifyRematchReturn(entry, kind, returnPath, suffix) {
+        const fixture = rematchFixture(kind, suffix);
+        const seasons = [fixture.season];
+        const dialog = hooks.openDialog("rematch " + entry + " " + kind);
+        const item = { Id: entry === "series" ? fixture.season.SeriesId : fixture.season.SeasonId,
+            Type: entry === "series" ? "Series" : "Season", Name: "Rematch" };
+        const keywords = { preserved: "keep" };
+        hooks.discardIncompatibleSeasonDrafts(dialog, seasons, fixture.selections);
+        if (kind === "manual") {
+            fixture.selections.__compositeSelections[fixture.season.SeriesId + "::" + fixture.season.SeasonId] = [{
+                LocalStartEpisodeItemId: fixture.ordered[1].ItemId, RequestedEpisodeCount: 1,
+                Source: { ProviderId: "Youku", MediaId: "manual-source" },
+                SourceStartEpisodeNumber: 4, Origin: "manual", SelectionEvidenceToken: "manual-private"
+            }];
+        }
+        const state = hooks.compositeDraftSeasonState(dialog, fixture.season, true);
+        state.exclusions.push("pre-existing-exclusion");
+        state.removedRuns.push({ start: "pre-existing-run", itemIds: ["pre-existing-exclusion"],
+            label: "preserved run", selections: [] });
+        const confirmed = JSON.parse(JSON.stringify(fixture.season));
+        confirmed.CompositePlan.Mappings = kind === "mapped" ? [] : [fixture.mapping];
+        confirmed.CompositePlan.UnmatchedRuns = [{ Episodes: kind === "mapped" ? fixture.ordered : [fixture.ordered[1]] }];
+        apiResponses.MatchPreview = request => {
+            if (request.url.query.searchScope === "temporary-range") {
+                return { Seasons: [Object.assign({}, confirmed, { CandidateGeneration: "rematch-range",
+                    Candidates: [{ Site: "Dandan", Id: "rematch-candidate", Name: "Rematch candidate",
+                        SelectionEvidenceToken: "rematch-private" }] })] };
+            }
+            return { Seasons: [confirmed] };
+        };
+        if (entry === "series") hooks.renderSeriesPicker(dialog, item, seasons, fixture.selections, keywords);
+        else {
+            dialog.compositeTargetState = {
+                seasonId: fixture.season.SeasonId, selections: fixture.selections, keywords: keywords
+            };
+            hooks.renderCompositeTargetPicker(dialog, item, seasons[0]);
+        }
+        const beforeSeason = JSON.stringify(seasons[0]);
+        const beforeSelections = JSON.stringify(fixture.selections);
+        const beforeKeywords = JSON.stringify(keywords);
+        const beforeDraft = JSON.stringify(dialog.compositeDraft);
+        const beforePayload = JSON.stringify(hooks.compositeRequestSelections(fixture.selections, seasons[0]));
+        const targetCard = dialog.body.querySelectorAll(".danmuVirtualSeason").find(card =>
+            kind === "manual" ? allVisibleText(card).includes("手动匹配") : allVisibleText(card).includes("精确集映射"));
+        const rematch = targetCard.querySelectorAll(".danmuSmartButton")
+            .find(button => button.textContent === "重新匹配");
+        await rematch.dispatch("click");
+        await waitUntil(() => dialog.body.querySelectorAll(".danmuCandidate").length === 1,
+            entry + "/" + kind + " rematch should enter the temporary-range picker");
+        if (returnPath === "android") dialog.handleAndroidBack();
+        else await dialog.footer.children.find(button => button.textContent === "返回总览").dispatch("click");
+        assert(JSON.stringify(seasons[0]) === beforeSeason &&
+            JSON.stringify(fixture.selections) === beforeSelections &&
+            JSON.stringify(keywords) === beforeKeywords &&
+            JSON.stringify(dialog.compositeDraft) === beforeDraft &&
+            JSON.stringify(hooks.compositeRequestSelections(fixture.selections, seasons[0])) === beforePayload &&
+            dialog.body.querySelectorAll(".danmuVirtualSeason").some(card =>
+                allVisibleText(card).includes(kind === "manual" ? "手动匹配" : "精确集映射")),
+            entry + "/" + kind + " rematch return must restore the exact overview, draft, and download payload");
+        dialog.forceClose();
+        delete apiResponses.MatchPreview;
+    }
+
+    await verifyRematchReturn("series", "mapped", "footer", "a");
+    await verifyRematchReturn("series", "manual", "android", "b");
+    await verifyRematchReturn("season", "mapped", "android", "c");
+    await verifyRematchReturn("season", "manual", "footer", "d");
 
     function deferredTransport() {
         let resolve;
@@ -987,6 +1212,19 @@ async function main() {
     assert(!busyBackDialog.overlay.isConnected,
         "the top-right close button must remain effective while Android back is locked");
 
+    const busyForceDialog = hooks.openDialog("busy force state");
+    busyForceDialog.forceRefresh = true;
+    hooks.setBusy(busyForceDialog, "searching");
+    assert(busyForceDialog.footer.querySelectorAll(".danmuForceRefresh").length === 0 &&
+        busyForceDialog.forceRefresh,
+        "busy rendering must hide the force-refresh control without resetting the user's selected state");
+    hooks.renderSeriesPicker(busyForceDialog,
+        { Id: "busy-force-series", Type: "Series", Name: "Series" }, [], {}, {});
+    assert(busyForceDialog.footer.querySelectorAll(".danmuForceRefresh").length === 1 &&
+        busyForceDialog.footer.querySelector(".danmuForceRefresh").children[0].checked,
+        "the saved force-refresh state must reappear when an editable picker is restored");
+    busyForceDialog.forceClose();
+
     const completedSearchDialog = hooks.openDialog("completed-search");
     hooks.setBusy(completedSearchDialog, "searching");
     hooks.renderSeriesPicker(completedSearchDialog,
@@ -1104,13 +1342,14 @@ async function main() {
     const manyCandidates = Array.from({ length: 60 }, function (_unused, index) {
         return {
             Site: "Fake", SiteName: "Fake", Id: "candidate-" + index,
-            Name: "Candidate " + index, Year: 2026, EpisodeSize: 12, Category: "TV"
+            Name: "Candidate " + index, Year: 2026, EpisodeSize: 12, Category: "TV",
+            SelectionEvidenceToken: "private-evidence-" + index
         };
     });
     const episodeTarget = {
         ParentName: "Series", SeasonName: "Season 2", EpisodeNumber: 3, ItemName: "Episode 3",
         ResolvedScopeType: "VirtualSeason", ResolvedScopeItemId: "virtual-season-2",
-        Candidates: manyCandidates
+        __danmuManualCandidates: true, Candidates: manyCandidates
     };
     const candidateDialog = hooks.openDialog("episode candidates");
     const detailCallsBefore = apiCalls.filter(call => call.option === "GetSelectedCandidatePreview").length;
@@ -1119,6 +1358,39 @@ async function main() {
     assert(candidateDialog.body.querySelectorAll(".danmuCandidate").length === 60 &&
         apiCalls.filter(call => call.option === "GetSelectedCandidatePreview").length === detailCallsBefore,
         "rendering 60 search candidates must use Search metadata without resolving any candidate details");
+    assert(candidateDialog.body.querySelectorAll(".danmuCandidateDetailAction").length === 60 &&
+        !allVisibleText(candidateDialog.body).includes("private-evidence-"),
+        "manual episode candidates may show lazy controls, but never expose evidence tokens");
+
+    apiResponses.MatchCandidateDetails = {
+        Success: true, Generation: 1,
+        SourceEpisodes: [{ Id: "inspected-a", Number: 1, Title: "Inspected A" }]
+    };
+    const inspectedMain = candidateDialog.body.querySelectorAll(".danmuCandidate")[0].children[1];
+    await inspectedMain.querySelector(".danmuCandidateDetailAction").dispatch("click");
+    const inspectCalls = apiCalls.filter(call => call.option === "MatchCandidateDetails" &&
+        call.parameters.candidateId === "candidate-0");
+    assert(inspectCalls.length === 1 && inspectCalls[0].parameters.candidateId === "candidate-0" &&
+        inspectCalls[0].parameters.candidateEvidence === "private-evidence-0" &&
+        candidateDialog.body.querySelectorAll(".danmuCandidateDetails").length === 1 &&
+        inspectedMain.children.indexOf(inspectedMain.querySelector(".danmuCandidateDetailAction")) <
+            inspectedMain.children.indexOf(inspectedMain.querySelector(".danmuCandidateDetails")),
+        "clicking one lazy detail control must request only that candidate, pass evidence privately, and expand below its button");
+    apiResponses.MatchCandidateDetails = { Success: false, Retryable: true, Message: "detail business failure" };
+    const failureMain = candidateDialog.body.querySelectorAll(".danmuCandidate")[1].children[1];
+    await failureMain.querySelector(".danmuCandidateDetailAction").dispatch("click");
+    assert(failureMain.querySelector(".danmuCandidateDetails").className.includes("error") &&
+        allVisibleText(failureMain).includes("detail business failure"),
+        "HTTP-success business failures must remain on the candidate row with a retryable error");
+    apiResponses.MatchCandidateDetails = {
+        Success: true, Generation: 1,
+        SourceEpisodes: [{ Id: "retried-b", Number: 2, Title: "Retried B" }]
+    };
+    await failureMain.querySelector(".danmuCandidateDetailAction").dispatch("click");
+    assert(!failureMain.querySelector(".danmuCandidateDetails").className.includes("error") &&
+        allVisibleText(failureMain).includes("Retried B"),
+        "a candidate-detail business error must support an in-place retry without touching other candidates");
+    delete apiResponses.MatchCandidateDetails;
     apiResponses.GetSelectedCandidatePreview = {
         Status: "ready", CandidateId: "candidate-37", ResolvedScopeType: "VirtualSeason",
         Episodes: [
@@ -1127,7 +1399,7 @@ async function main() {
         ]
     };
     candidateDialog.body.querySelectorAll(".danmuCandidate")[37].children[0].checked = true;
-    await candidateDialog.footer.children[0].dispatch("click");
+    await candidateDialog.footer.children[candidateDialog.footer.children.length - 1].dispatch("click");
     await waitUntil(() => candidateDialog.body.querySelectorAll(".danmuSourceEpisodeChoice").length === 2,
         "the selected candidate detail should become visible");
     const selectedDetailCalls = apiCalls.filter(call => call.option === "GetSelectedCandidatePreview");
@@ -1138,17 +1410,136 @@ async function main() {
         selectedDetailCall.parameters.searchOperationId &&
         candidateDialog.body.querySelectorAll(".danmuSourceEpisodeChoice").length === 2,
         "selecting one candidate must resolve exactly that candidate once and render its source episodes");
-    assert(candidateDialog.body.children[0].textContent.includes("VirtualSeason") &&
-        candidateDialog.body.children[0].textContent.includes("virtual-season-2"),
-        "episode resolution must display the authoritative ResolvedScopeType and ResolvedScopeItemId");
+    assert(candidateDialog.body.children[0].textContent.includes("Series / Season 2 / 第 3 集 · Episode 3") &&
+        !allVisibleText(candidateDialog.body).includes("virtual-season-2") &&
+        !allVisibleText(candidateDialog.body).includes("标识符作用域"),
+        "episode pages must keep the local episode summary without exposing scope or ItemId internals");
     candidateDialog.forceClose();
+
+    const initialEpisodeDialog = hooks.openDialog("initial episode");
+    hooks.renderItemCandidatePicker(initialEpisodeDialog,
+        { Id: "initial-episode", Type: "Episode", Name: "Episode 3" }, {
+            ParentName: "Series", SeasonName: "Season 2", EpisodeNumber: 3, ItemName: "Episode 3",
+            Candidates: manyCandidates
+        }, "Series");
+    const initialForceControls = initialEpisodeDialog.footer.querySelectorAll(".danmuForceRefresh");
+    assert(initialEpisodeDialog.body.querySelectorAll(".danmuCandidateDetailAction").length === 0 &&
+        initialForceControls.length === 1 && initialForceControls[0].children[1].textContent === "强制刷新",
+        "initial episode pages must preserve the original picker without lazy details and have one footer force-refresh checkbox");
+    const initialDetailCalls = apiCalls.filter(call => call.option === "MatchCandidateDetails").length;
+    initialEpisodeDialog.body.querySelectorAll(".danmuCandidate")[2].children[0].checked = true;
+    await initialEpisodeDialog.footer.children[initialEpisodeDialog.footer.children.length - 1].dispatch("click");
+    await waitUntil(() => initialEpisodeDialog.body.querySelectorAll(".danmuSourceEpisodeChoice").length === 2,
+        "the original initial-episode parse flow must still open its authoritative source picker");
+    assert(apiCalls.filter(call => call.option === "MatchCandidateDetails").length === initialDetailCalls &&
+        apiCalls.some(call => call.option === "GetSelectedCandidatePreview" && call.parameters.candidateId === "candidate-2"),
+        "initial candidates must retain GetSelectedCandidatePreview and never issue per-row details");
+    initialEpisodeDialog.forceClose();
+
+    let resolveStaleDetail;
+    apiResponses.MatchCandidateDetails = function () {
+        return new Promise(resolve => { resolveStaleDetail = resolve; });
+    };
+    const staleDialog = hooks.openDialog("stale lazy detail");
+    hooks.renderItemCandidatePicker(staleDialog,
+        { Id: "stale-episode", Type: "Episode", Name: "Episode 3" }, episodeTarget, "Series");
+    const staleButton = staleDialog.body.querySelectorAll(".danmuCandidateDetailAction")[0];
+    const staleRequest = staleButton.dispatch("click");
+    await Promise.resolve();
+    hooks.renderItemCandidatePicker(staleDialog,
+        { Id: "stale-episode", Type: "Episode", Name: "Episode 3" }, {
+            ParentName: "Series", SeasonName: "Season 2", EpisodeNumber: 3, ItemName: "Episode 3",
+            __danmuManualCandidates: true,
+            CandidateGeneration: "new-generation",
+            Candidates: [{ Site: "Fake", Id: "new-candidate", Name: "New", SelectionEvidenceToken: "new-private" }]
+        }, "Series");
+    resolveStaleDetail({ Success: true, Generation: 1, SourceEpisodes: [{ Id: "old", Number: 1, Title: "Old result" }] });
+    await staleRequest;
+    assert(staleDialog.body.querySelectorAll(".danmuCandidateDetails").length === 0 &&
+        !allVisibleText(staleDialog.body).includes("Old result"),
+        "a stale candidate-details response must not expand or overwrite a newer candidate generation");
+    staleDialog.forceClose();
+    delete apiResponses.MatchCandidateDetails;
+
+    let resolveRotatedTokenDetail;
+    apiResponses.MatchCandidateDetails = function () {
+        return new Promise(resolve => { resolveRotatedTokenDetail = resolve; });
+    };
+    const tokenDialog = hooks.openDialog("rotated evidence token");
+    const tokenItem = { Id: "token-episode", Type: "Episode", Name: "Episode" };
+    const tokenTarget = function (token) {
+        return {
+            ParentName: "Series", SeasonName: "Season", EpisodeNumber: 1, ItemName: "Episode",
+            __danmuManualCandidates: true,
+            Candidates: [{ Site: "Fake", Id: "same-candidate", Name: "Same candidate", SelectionEvidenceToken: token }]
+        };
+    };
+    hooks.renderItemCandidatePicker(tokenDialog, tokenItem, tokenTarget("old-token"), "Series");
+    const oldTokenGeneration = tokenDialog.candidateDetailGeneration;
+    const oldTokenRequest = tokenDialog.body.querySelector(".danmuCandidateDetailAction").dispatch("click");
+    await Promise.resolve();
+    hooks.renderItemCandidatePicker(tokenDialog, tokenItem, tokenTarget("new-token"), "Series");
+    assert(tokenDialog.candidateDetailGeneration > oldTokenGeneration,
+        "rotating candidate evidence must advance the candidate-details generation even when target and candidate ID are unchanged");
+    resolveRotatedTokenDetail({ Success: true, Generation: oldTokenGeneration,
+        SourceEpisodes: [{ Id: "old-token-source", Number: 1, Title: "Old token result" }] });
+    await oldTokenRequest;
+    assert(tokenDialog.body.querySelectorAll(".danmuCandidateDetails").length === 0 &&
+        !allVisibleText(tokenDialog.body).includes("Old token result"),
+        "an old-token response must not render after refreshed evidence replaces the same candidate");
+    apiResponses.MatchCandidateDetails = {
+        Success: true, Generation: tokenDialog.candidateDetailGeneration,
+        SourceEpisodes: [{ Id: "new-token-source", Number: 1, Title: "New token result" }]
+    };
+    await tokenDialog.body.querySelector(".danmuCandidateDetailAction").dispatch("click");
+    const tokenCalls = apiCalls.filter(call => call.option === "MatchCandidateDetails" &&
+        call.parameters.candidateId === "same-candidate");
+    assert(tokenCalls[tokenCalls.length - 1].parameters.candidateEvidence === "new-token" &&
+        allVisibleText(tokenDialog.body).includes("New token result") &&
+        !allVisibleText(tokenDialog.body).includes("new-token"),
+        "the refreshed candidate request must use the new private evidence token without rendering it");
+    tokenDialog.forceClose();
+    delete apiResponses.MatchCandidateDetails;
+
+    const lazySeason = {
+        SeasonId: "lazy-season", SeasonName: "Lazy Season", CandidateGeneration: "season-generation",
+        Candidates: [{ Site: "Fake", SiteName: "Fake", Id: "season-candidate", Name: "Season candidate",
+            SelectionEvidenceToken: "season-private", EpisodeSize: 12 }]
+    };
+    const seriesSeasonDialog = hooks.openDialog("series season lazy details");
+    const beforeSeasonDetails = apiCalls.filter(call => call.option === "MatchCandidateDetails").length;
+    hooks.renderSeriesSeasonPicker(seriesSeasonDialog, { Id: "series-lazy", Type: "Series", Name: "Series" },
+        [lazySeason], 0, {}, {});
+    assert(seriesSeasonDialog.body.querySelectorAll(".danmuCandidateDetailAction").length === 1 &&
+        apiCalls.filter(call => call.option === "MatchCandidateDetails").length === beforeSeasonDetails &&
+        seriesSeasonDialog.footer.querySelectorAll(".danmuForceRefresh").length === 1,
+        "series per-season picker must render lazy details and exactly one footer force-refresh without eager requests");
+    const seriesForce = seriesSeasonDialog.footer.querySelector(".danmuForceRefresh").children[0];
+    seriesForce.checked = true;
+    await seriesForce.dispatch("change");
+    hooks.renderSeriesSeasonPicker(seriesSeasonDialog, { Id: "series-lazy", Type: "Series", Name: "Series" },
+        [lazySeason], 0, {}, {});
+    assert(seriesSeasonDialog.footer.querySelectorAll(".danmuForceRefresh").length === 1 &&
+        seriesSeasonDialog.footer.querySelector(".danmuForceRefresh").children[0].checked,
+        "force-refresh state must persist across pre-download picker re-renders");
+    seriesSeasonDialog.forceClose();
+
+    const directSeasonDialog = hooks.openDialog("direct season lazy details");
+    hooks.renderCandidatePicker(directSeasonDialog, { Id: "season-item", Type: "Season", Name: "Season" }, lazySeason, "");
+    assert(directSeasonDialog.body.querySelectorAll(".danmuCandidateDetailAction").length === 1 &&
+        directSeasonDialog.footer.querySelectorAll(".danmuForceRefresh").length === 1 &&
+        directSeasonDialog.footer.querySelector(".danmuForceRefresh").children[1].textContent === "强制刷新",
+        "direct Season picker must use the same lazy control and one exact footer force-refresh label");
+    directSeasonDialog.forceClose();
+    assert(source.includes("查看逐集映射") && source.includes("danmuVirtualSeasonDetail"),
+        "candidate inspection must not remove the existing authoritative per-episode mapping-detail UI");
 
     const failedDetailDialog = hooks.openDialog("failed detail resolution");
     hooks.renderItemCandidatePicker(failedDetailDialog,
         { Id: "episode-detail-failure", Type: "Episode", Name: "Episode 3" }, episodeTarget, "Series");
     apiResponses.GetSelectedCandidatePreview = { Status: "failed", Message: "provider detail failed", Episodes: [] };
     failedDetailDialog.body.querySelectorAll(".danmuCandidate")[8].children[0].checked = true;
-    await failedDetailDialog.footer.children[0].dispatch("click");
+    await failedDetailDialog.footer.children[failedDetailDialog.footer.children.length - 1].dispatch("click");
     await waitUntil(() => failedDetailDialog.body.querySelectorAll(".danmuCandidate").length === 60,
         "a failed detail request should restore candidates");
     assert(failedDetailDialog.body.querySelectorAll(".danmuCandidate").length === 60 &&
@@ -1161,7 +1552,7 @@ async function main() {
         apiCalls.length = 0;
         const targetId = type === "Movie" ? "movie-target-id" : "episode-target-id";
         apiResponses.StartTrackedDownload = {
-            TaskId: type.toLowerCase() + "-task", Status: "failed", Failed: 1,
+            TaskId: type.toLowerCase() + "-task", Status: "completed", Failed: 1,
             Episodes: [{ ItemId: targetId, EpisodeNumber: 3, EpisodeName: type, Status: "failed", Message: "provider failed" }]
         };
         apiResponses.RetryTrackedEpisode = {
@@ -1198,6 +1589,41 @@ async function main() {
     }
     await verifySingleTarget("Movie");
     await verifySingleTarget("Episode");
+
+    apiCalls.length = 0;
+    apiResponses.StartTrackedDownload = { TaskId: "", Status: "failed", Message: "single start failed" };
+    let singleRecovery = 0;
+    const singleFailureDialog = {
+        body: new FakeElement("div"), footer: new FakeElement("div"), overlay: { isConnected: false },
+        closable: false, forceRefresh: true, forceRefreshLocked: false, executionForceRefresh: null,
+        close: function () {}, forceClose: function () {}, setBackHandler: function () {},
+        preDownloadRecovery: function () { singleRecovery++; }
+    };
+    await hooks.renderSingleTargetProgress(singleFailureDialog,
+        { Id: "single-failure", Type: "Movie", Name: "Movie" }, {},
+        { Site: "Fake", Id: "candidate", Name: "Candidate" }, null, null, false);
+    const singleStart = apiCalls.find(call => call.option === "StartTrackedDownload");
+    assert(singleRecovery === 1 && singleFailureDialog.closable && !singleFailureDialog.forceRefreshLocked &&
+        singleFailureDialog.executionForceRefresh === null && singleStart.parameters.forceRefresh === "true",
+        "a zero-task single start must use the atomic force snapshot then unlock and restore the editable page");
+
+    apiCalls.length = 0;
+    apiResponses.StartTrackedDownload = { TaskId: "", Status: "failed", Message: "multi start failed" };
+    let multiRecovery = 0;
+    const multiFailureDialog = {
+        body: new FakeElement("div"), footer: new FakeElement("div"), overlay: { isConnected: false },
+        closable: false, forceRefresh: true, forceRefreshLocked: false, executionForceRefresh: null,
+        close: function () {}, forceClose: function () {}, setBackHandler: function () {},
+        preDownloadRecovery: function () { multiRecovery++; }
+    };
+    const failedSeason = { SeasonId: "multi-failure", SeasonName: "Failure season" };
+    await hooks.renderDownloadProgress(multiFailureDialog, [failedSeason], {
+        "::multi-failure": { Site: "Fake", Id: "candidate", Name: "Candidate" }
+    });
+    const multiStart = apiCalls.find(call => call.option === "StartTrackedDownload");
+    assert(multiRecovery === 1 && multiFailureDialog.closable && !multiFailureDialog.forceRefreshLocked &&
+        multiFailureDialog.executionForceRefresh === null && multiStart.parameters.forceRefresh === "true",
+        "a zero-task multi-season start must share the snapshotted force flag then unlock and restore the picker");
 
     apiResponses.StartTrackedDownload = {
         TaskId: "running-task", Status: "running",

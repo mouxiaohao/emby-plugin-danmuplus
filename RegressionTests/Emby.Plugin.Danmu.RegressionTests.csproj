@@ -16,5 +16,7 @@
     <Compile Remove="R3SearchQuality\**\*.cs" />
     <Compile Remove="R4ParentSeasonContext\**\*.cs" />
     <Compile Remove="R4IdentifierMetamorphic\**\*.cs" />
+    <Compile Remove="R5TargetSeasonScope\**\*.cs" />
+    <Compile Remove="MgtvSearch\**\*.cs" />
   </ItemGroup>
 </Project>

@@ -180,10 +180,10 @@ namespace Emby.Plugin.Danmu.R4IdentifierMetamorphicRegression
                        entry.Contains("DanmuMatchSearchEngine.SearchSeasonAsync", StringComparison.Ordinal),
                     "a Series/Season batch entry must search descriptively without resolving local identifiers");
             }
-            Assert(interactive.Contains("SeasonPlanningContextBuilder.Build", StringComparison.Ordinal) &&
+            Assert(interactive.Contains("TryBuildOwnedPlanningContext", StringComparison.Ordinal) &&
                    composite.Contains("BuildCompositePlanAsync", StringComparison.Ordinal) &&
                    automatic.Contains("TryBuildAutomaticPlanningContext", StringComparison.Ordinal),
-                "interactive, composite, and automatic paths must retain the shared structural planner boundaries");
+                "interactive, composite, and automatic paths must retain the shared target coordinator boundaries");
         }
 
         private static string Slice(string source, string startMarker, string endMarker)

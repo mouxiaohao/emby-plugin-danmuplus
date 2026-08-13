@@ -131,9 +131,14 @@ namespace Emby.Plugin.Danmu.EpisodeSelectionPolicyRegression
                    !episodePreview.Contains("GetMedia(season, candidate.Id)", StringComparison.Ordinal) &&
                    episodePreview.Contains("metadataOnly: true", StringComparison.Ordinal),
                 "Episode candidate discovery must not issue detail requests for every search result");
-            Assert(controller.Contains("effectiveForceSearch = forceSearch || compositeMarked || metadataOnly", StringComparison.Ordinal) &&
-                   controller.Contains("if (!metadataOnly)", StringComparison.Ordinal),
-                "metadata-only Episode discovery must bypass Season bindings and suppress high-confidence composite detail");
+            Assert(episodePreview.Contains("metadataOnly: true", StringComparison.Ordinal) &&
+                   controller.Contains("InitializeDecision(result, scrapers, true)", StringComparison.Ordinal) &&
+                   controller.Contains("if (!metadataOnly)", StringComparison.Ordinal) &&
+                   !controller.Substring(controller.IndexOf("private async Task<DanmuSeasonMatchResult> GetSeasonMatchPreview", StringComparison.Ordinal),
+                       controller.IndexOf("private async Task<DanmuSeasonMatchResult> GetCompositeSeasonPlanPreview", StringComparison.Ordinal) -
+                       controller.IndexOf("private async Task<DanmuSeasonMatchResult> GetSeasonMatchPreview", StringComparison.Ordinal))
+                       .Contains("TryGetSavedManualBinding", StringComparison.Ordinal),
+                "metadata-only Episode discovery and r5 Season planning must remain identifier-free and suppress high-confidence composite detail");
             Assert(controller.Contains("task.CandidateId = request.CandidateId", StringComparison.Ordinal) &&
                    !controller.Contains("season.GetProviderId(task.Site)", StringComparison.Ordinal),
                 "retry must retain the selected lookup token and must not fall back to a Season binding");

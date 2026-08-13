@@ -101,7 +101,11 @@ namespace Emby.Plugin.Danmu.Scraper
             var title = Normalize(source.Name);
             if (!string.IsNullOrWhiteSpace(keywordOverride))
             {
-                return HasTitleEvidence(keywordOverride, title, SeasonCandidateTitleEligibilityFloor);
+                // An explicit manual keyword is provider-discovery input.  Once a
+                // provider returns a structurally usable Season record, retain it
+                // for target-metadata scoring and manual selection; aliases and
+                // cross-language titles cannot be required to resemble the query.
+                return true;
             }
 
             var parent = SanitizeSearchTerm(seriesName);

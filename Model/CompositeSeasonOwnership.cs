@@ -34,6 +34,109 @@ namespace Emby.Plugin.Danmu.Model
         }
 
         /// <summary>
+        /// Builds the r5 target-season scope from one selected Season's own
+        /// display inventory. The complete observed inventory is retained for
+        /// drift detection, while only exact parent-season matches are exposed
+        /// to scoring, planning, and execution.
+        /// </summary>
+        public static bool TryGetTargetScope(
+            CompositeSeasonTargetContext context,
+            IEnumerable<CompositeSeasonLocalEpisode> episodes,
+            out CompositeSeasonEpisodeScope scope,
+            out string error)
+        {
+            scope = new CompositeSeasonEpisodeScope
+            {
+                TargetSeasonNumber = context?.TargetSeasonNumber,
+            };
+            error = string.Empty;
+            if (context == null || !context.IsKnown)
+            {
+                error = "target-season-number-unknown";
+                scope.Diagnostics.Add(error);
+                return false;
+            }
+
+            var indexed = (episodes ?? Enumerable.Empty<CompositeSeasonLocalEpisode>())
+                .Select((episode, ordinal) => new { Episode = episode, Ordinal = ordinal })
+                .ToList();
+            var accepted = new Dictionary<string, CompositeSeasonLocalEpisode>(
+                StringComparer.OrdinalIgnoreCase);
+            foreach (var entry in indexed)
+            {
+                var episode = entry.Episode;
+                if (episode == null || !IsValidItemId(episode.ItemId))
+                {
+                    scope.InvalidIdentityCount++;
+                    scope.Diagnostics.Add("invalid-episode-item-id:" + entry.Ordinal);
+                    continue;
+                }
+
+                var observed = Clone(episode);
+                observed.PlacementOrder = episode.PlacementOrder ?? entry.Ordinal;
+                observed.SortOrder = episode.SortOrder ?? entry.Ordinal;
+                if (accepted.TryGetValue(observed.ItemId, out var existing))
+                {
+                    if (existing.ParentSeasonNumber != observed.ParentSeasonNumber ||
+                        existing.EpisodeNumber != observed.EpisodeNumber ||
+                        existing.OriginalEpisodeNumber != observed.OriginalEpisodeNumber)
+                    {
+                        error = "target-season-inventory-conflict:" + observed.ItemId;
+                        scope.Diagnostics.Add(error);
+                        return false;
+                    }
+
+                    scope.DuplicateIdentityCount++;
+                    continue;
+                }
+
+                accepted.Add(observed.ItemId, observed);
+                scope.ObservedEpisodes.Add(observed);
+            }
+
+            scope.ObservedEpisodes = scope.ObservedEpisodes
+                .OrderBy(episode => episode.PlacementOrder ?? episode.SortOrder ?? int.MaxValue)
+                .ThenBy(episode => episode.PlacementRelation)
+                .ThenBy(episode => episode.OriginalEpisodeNumber ?? episode.EpisodeNumber ?? int.MaxValue)
+                .ThenBy(episode => episode.ItemId ?? string.Empty, StringComparer.OrdinalIgnoreCase)
+                .Select(episode => Mark(context, episode))
+                .ToList();
+            scope.EligibleEpisodes = scope.ObservedEpisodes
+                .Where(episode => episode.Ownership == CompositeSeasonOwnershipKind.Owning)
+                .Select(Clone)
+                .ToList();
+
+            foreach (var episode in scope.ObservedEpisodes.Where(item =>
+                         item.Ownership != CompositeSeasonOwnershipKind.Owning))
+            {
+                if (!episode.ParentSeasonNumber.HasValue)
+                {
+                    scope.UnknownParentCount++;
+                }
+                else if (episode.ParentSeasonNumber.Value == 0)
+                {
+                    scope.ParentZeroCount++;
+                }
+                else
+                {
+                    scope.OtherSeasonCount++;
+                }
+            }
+
+            if (scope.InvalidIdentityCount > 0) scope.Diagnostics.Add(
+                "invalid-episode-item-id-count:" + scope.InvalidIdentityCount);
+            if (scope.DuplicateIdentityCount > 0) scope.Diagnostics.Add(
+                "duplicate-episode-item-id-count:" + scope.DuplicateIdentityCount);
+            if (scope.UnknownParentCount > 0) scope.Diagnostics.Add(
+                "unknown-parent-season-count:" + scope.UnknownParentCount);
+            if (scope.ParentZeroCount > 0) scope.Diagnostics.Add(
+                "foreign-season-zero-count:" + scope.ParentZeroCount);
+            if (scope.OtherSeasonCount > 0) scope.Diagnostics.Add(
+                "foreign-season-other-count:" + scope.OtherSeasonCount);
+            return true;
+        }
+
+        /// <summary>
         /// Returns the complete display inventory. Episodes placed under the
         /// target folder but logically belonging to another known season remain
         /// visible as Supplemental; callers may never silently drop them.
@@ -120,6 +223,30 @@ namespace Emby.Plugin.Danmu.Model
                     : CompositeSeasonOwnershipKind.Supplemental;
             return marked;
         }
+
+        private static bool IsValidItemId(string itemId)
+        {
+            return Guid.TryParse(itemId, out var parsed) && parsed != Guid.Empty;
+        }
+    }
+
+    /// <summary>
+    /// One immutable-by-convention snapshot of a selected Season's observed
+    /// Episode inventory and its exact target-number eligible subset.
+    /// </summary>
+    public sealed class CompositeSeasonEpisodeScope
+    {
+        public int? TargetSeasonNumber { get; set; }
+        public List<CompositeSeasonLocalEpisode> ObservedEpisodes { get; set; } =
+            new List<CompositeSeasonLocalEpisode>();
+        public List<CompositeSeasonLocalEpisode> EligibleEpisodes { get; set; } =
+            new List<CompositeSeasonLocalEpisode>();
+        public int ParentZeroCount { get; set; }
+        public int OtherSeasonCount { get; set; }
+        public int UnknownParentCount { get; set; }
+        public int InvalidIdentityCount { get; set; }
+        public int DuplicateIdentityCount { get; set; }
+        public List<string> Diagnostics { get; set; } = new List<string>();
     }
 
     public sealed class CompositeSeasonTargetInventory

@@ -14,7 +14,7 @@ namespace Emby.Plugin.Danmu.Configuration
         /// <summary>
         /// 版本信息
         /// </summary>
-        public string Version { get; } = "2.0.2r4";//Assembly.GetExecutingAssembly().GetName().Version.ToString();
+        public string Version { get; } = "2.0.3r9";//Assembly.GetExecutingAssembly().GetName().Version.ToString();
 
         public DandanOption Dandan { get; set; } = new DandanOption();
 

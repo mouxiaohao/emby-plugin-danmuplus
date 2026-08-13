@@ -16,6 +16,7 @@ namespace Emby.Plugin.Danmu.Model
     {
         public int MappingProtocolVersion { get; set; } = Core.DanmuMappingProtocol.CurrentVersion;
         public long PlanGeneration { get; set; }
+        public string PlanFingerprint { get; set; } = string.Empty;
         public string ItemId { get; set; } = string.Empty;
         public string ItemName { get; set; } = string.Empty;
         public string ItemType { get; set; } = string.Empty;
@@ -81,6 +82,7 @@ namespace Emby.Plugin.Danmu.Model
     {
         public int MappingProtocolVersion { get; set; } = Core.DanmuMappingProtocol.CurrentVersion;
         public long PlanGeneration { get; set; }
+        public string PlanFingerprint { get; set; } = string.Empty;
         public string SeasonId { get; set; } = string.Empty;
         public string SeriesId { get; set; } = string.Empty;
         public string SeasonName { get; set; } = string.Empty;
@@ -88,6 +90,15 @@ namespace Emby.Plugin.Danmu.Model
         public int? SeasonNumber { get; set; }
         public int? Year { get; set; }
         public int EpisodeCount { get; set; }
+        // r5 target-Season scope diagnostics are response-only presentation
+        // data. They never identify selectable Episodes and are not accepted
+        // back from the browser as planning evidence.
+        public int DisplayedEpisodeCount { get; set; }
+        public int EligibleEpisodeCount { get; set; }
+        public int IgnoredParentZeroEpisodeCount { get; set; }
+        public int IgnoredOtherSeasonEpisodeCount { get; set; }
+        public int IgnoredUnknownParentEpisodeCount { get; set; }
+        public int IgnoredInvalidEpisodeCount { get; set; }
         public string Keyword { get; set; } = string.Empty;
         public string Status { get; set; } = string.Empty;
         public string Message { get; set; } = string.Empty;
@@ -142,6 +153,10 @@ namespace Emby.Plugin.Danmu.Model
         public int? EpisodeNumber { get; set; }
         public string EpisodeName { get; set; } = string.Empty;
         public int? SourceEpisodeNumber { get; set; }
+
+        // Public, presentation-only source title. No internal source identity
+        // or comment/download data is exposed through this field.
+        public string SourceEpisodeName { get; set; } = string.Empty;
     }
 
     // This is intentionally compact. Comment IDs and arbitrary item mappings
@@ -383,6 +398,21 @@ namespace Emby.Plugin.Danmu.Model
     }
 
     /// <summary>
+    /// Read-only detail response for a candidate card.  Source Episode ids are
+    /// retained only as trusted transport state; presentation uses number/title.
+    /// </summary>
+    public class DanmuMatchCandidateDetailResult
+    {
+        public bool Success { get; set; }
+        public bool Retryable { get; set; }
+        public string Message { get; set; } = string.Empty;
+        public string Generation { get; set; } = string.Empty;
+        public int? SuggestedEpisodeNumber { get; set; }
+        public List<DanmuSelectedCandidateSourceEpisode> SourceEpisodes { get; set; } =
+            new List<DanmuSelectedCandidateSourceEpisode>();
+    }
+
+    /// <summary>
     /// Per-provider completion evidence for a bounded search.  It is additive
     /// so existing clients can retain their legacy SearchErrors handling.
     /// </summary>
@@ -433,6 +463,10 @@ namespace Emby.Plugin.Danmu.Model
         public long PlanGeneration { get; set; }
         public string SeasonProviderValue { get; set; } = string.Empty;
         public string SeasonStructureFingerprint { get; set; } = string.Empty;
+        public string SeasonPlanFingerprint { get; set; } = string.Empty;
+        public List<DanmuCompositeSeasonSelection> SeasonPlanSelections { get; set; } =
+            new List<DanmuCompositeSeasonSelection>();
+        public List<string> SeasonPlanExcludedItemIds { get; set; } = new List<string>();
         public bool SeasonMirrorEligible { get; set; }
         public string SeasonMirrorWarning { get; set; } = string.Empty;
         public long SeasonProviderWriteGeneration { get; set; }

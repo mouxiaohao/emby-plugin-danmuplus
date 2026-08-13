@@ -10,6 +10,7 @@ using System.Xml;
 using System.Xml.Serialization;
 using Emby.Plugin.Danmu.Configuration;
 using Emby.Plugin.Danmu.Core;
+using Emby.Plugin.Danmu.Core.Controllers;
 using Emby.Plugin.Danmu.Core.Extensions;
 using Emby.Plugin.Danmu.Model;
 using Emby.Plugin.Danmu.Scraper;
@@ -65,6 +66,7 @@ namespace Emby.Plugin.Danmu.RegressionTests
             ScoresStandardCandidatesWithoutDynamicAliasMode();
             UsesOneMovieSearchTermAndPreservesStandardProvenance();
             IsolatesMovieProviderFailures();
+            VerifiesLazyCandidateDetailContract();
             ResolvesProviderIdsBySiteThenHierarchy();
             EnforcesItemLocalProviderScopes();
             DiscoversCandidatesWithBoundedTitleClauses();
@@ -490,16 +492,16 @@ namespace Emby.Plugin.Danmu.RegressionTests
                 new[] { "BilibiliID", "DandanID", "IqiyiID", "MgtvID" },
                 "DandanID",
                 "new-dandan",
-                true);
+                false);
 
             Assert(updated["DandanID"] == "new-dandan" &&
-                   !updated.ContainsKey("BilibiliID") &&
-                   !updated.ContainsKey("IqiyiID") &&
+                   updated["BilibiliID"] == "old-bili" &&
+                   updated["IqiyiID"] == "disabled-iqiyi" &&
                    updated["BilibiliIDManual"] == "manual-bili" &&
                    updated["DandanIDManual"] == "manual-dandan" &&
                    updated["Tmdb"] == "tmdb-1" && updated["Tvdb"] == "tvdb-1" &&
                    updated["Imdb"] == "imdb-1" && updated["CustomID"] == "custom-1",
-                "successful Season/Episode writes must remove all registered ordinary IDs, including disabled sites, and preserve Manual/non-plugin keys");
+                "successful Season/Episode writes must overwrite only the target key and preserve every other plugin, Manual, and foreign key");
             Assert(current["BilibiliID"] == "old-bili" && current["DandanID"] == "old-dandan",
                 "the pure provider-ID policy must not mutate its input dictionary before repository persistence");
 
@@ -532,6 +534,80 @@ namespace Emby.Plugin.Danmu.RegressionTests
             Assert(search.Candidates.Count == 1, "successful movie providers should still contribute candidates");
             Assert(search.SearchErrors.Count == 1 && search.SearchErrors[0].Contains("DandanID"),
                 "a failed Dandan proxy provider should be isolated in diagnostics");
+        }
+
+        private static void VerifiesLazyCandidateDetailContract()
+        {
+            var scraper = new FakeScraper("LazyID", null, false, new Dictionary<string, ScraperMedia>
+            {
+                ["candidate-a"] = new ScraperMedia
+                {
+                    Id = "candidate-a",
+                    Episodes = new List<ScraperEpisode>
+                    {
+                        new ScraperEpisode { Id = "source-2", CommentId = "comment-2", EpisodeNumber = 2, Title = "Second" },
+                        new ScraperEpisode { Id = "source-1", CommentId = "comment-1", EpisodeNumber = 1, Title = "First" },
+                    },
+                },
+            }, null, new Dictionary<string, List<ScraperSearchInfo>>
+            {
+                ["Example"] = new List<ScraperSearchInfo>
+                {
+                    new ScraperSearchInfo { Id = "candidate-a", Name = "Example", EpisodeSize = 2 },
+                },
+            });
+            var discovery = DanmuMatchSearchEngine.SearchSeasonAsync(
+                    new AbstractScraper[] { scraper }, "Example", "Example", 2024, 2, "Example", null)
+                .GetAwaiter().GetResult();
+            Assert(discovery.Candidates.Count == 1 && scraper.MediaCalls == 0,
+                "candidate discovery must not resolve source media before an explicit detail request");
+
+            var registry = new DanmuCandidateEvidenceRegistry();
+            var token = registry.Register("target-episode", "LazyID", "candidate-a", 0.9, "search-confidence");
+            Assert(registry.TryResolve(token, "target-episode", "LazyID", "candidate-a", out var evidence) &&
+                   !registry.TryResolve(token, "target-episode", "LazyID", "candidate-b", out _) &&
+                   !registry.TryResolve(token, "other-target", "LazyID", "candidate-a", out _),
+                "candidate evidence must bind target, provider, and candidate before provider access");
+            evidence.ExpiresUtc = DateTime.UtcNow.AddSeconds(-1);
+            Assert(!registry.TryResolve(token, "target-episode", "LazyID", "candidate-a", out _),
+                "expired candidate evidence must be rejected without resolving media");
+
+            var resolver = typeof(DanmuController).GetMethod(
+                "ResolveMatchCandidateDetailsMediaAsync", BindingFlags.Static | BindingFlags.NonPublic);
+            var safeCandidate = typeof(DanmuController).GetMethod(
+                "IsSafeMatchCandidateId", BindingFlags.Static | BindingFlags.NonPublic);
+            Assert(resolver != null && safeCandidate != null,
+                "lazy candidate-detail resolver and input validator must remain testable");
+            Assert(!(bool)safeCandidate.Invoke(null, new object[] { "https://host/media" }) &&
+                   !(bool)safeCandidate.Invoke(null, new object[] { "../media" }) &&
+                   !(bool)safeCandidate.Invoke(null, new object[] { "a\\media" }) &&
+                   !(bool)safeCandidate.Invoke(null, new object[] { "bad\u0001id" }) &&
+                   !(bool)safeCandidate.Invoke(null, new object[] { new string('a', 513) }),
+                "detail requests must reject URI, path, control-character, and oversized candidate ids");
+            var media = ((Task<ScraperMedia>)resolver.Invoke(null, new object[]
+                { new Episode { Name = "Local", IndexNumber = 2 }, new Season { Name = "Season" }, scraper, "candidate-a" }))
+                .GetAwaiter().GetResult();
+            Assert(media?.Episodes.Count == 2 && scraper.MediaCalls == 1,
+                "one explicit inspection must resolve only the named candidate exactly once");
+            var rows = media.Episodes.OrderBy(item => item.EpisodeNumber ?? int.MaxValue)
+                .ThenBy(item => item.Id, StringComparer.OrdinalIgnoreCase).ToList();
+            Assert(rows.Select(item => item.Title).SequenceEqual(new[] { "First", "Second" }),
+                "candidate detail source rows must be deterministically ordered by number then identity");
+
+            var root = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", ".."));
+            var controller = File.ReadAllText(Path.Combine(root, "Core", "Controllers", "DanmuController.cs"));
+            var detailStart = controller.IndexOf("private async Task<DanmuMatchCandidateDetailResult> GetMatchCandidateDetails", StringComparison.Ordinal);
+            var detailEnd = controller.IndexOf("private static Task<ScraperMedia> ResolveMatchCandidateDetailsMediaAsync", detailStart, StringComparison.Ordinal);
+            var detailBody = detailStart >= 0 && detailEnd > detailStart
+                ? controller.Substring(detailStart, detailEnd - detailStart) : string.Empty;
+            Assert(controller.Contains("MatchCandidateDetails") &&
+                   controller.Contains("CandidateEvidence.TryResolve(evidenceToken") &&
+                   controller.Contains("candidate-detail-evidence-stale") &&
+                   controller.Contains("StampCandidateEvidence(episode, result.Target.Candidates)") &&
+                   !detailBody.Contains("BindMatch(") && !detailBody.Contains("StartTrackedDownload(") &&
+                   !detailBody.Contains("UpdateToRepository") && !detailBody.Contains("CompositePlan") &&
+                   !controller.Contains("DanmuSeasonCollection") && !controller.Contains("DanmuSeasonSegment"),
+                "detail inspection must remain evidence-gated, target-bound, and independent of collection/segment protocols");
         }
 
         private static void ResolvesProviderIdsBySiteThenHierarchy()

@@ -17,6 +17,7 @@ namespace Emby.Plugin.Danmu.R3SearchQualityRegression
         {
             BuildsOnlyIdentityBearingTerms();
             AppliesProviderNeutralEligibilityBeforeProjection();
+            RetainsManualCustomSearchCandidatesWithoutTitleEvidence();
             ProjectsProviderGroupsWithFairDeterministicQuotas();
             KeepsCanonicalSelectionIndependentFromProjection();
             ClassifiesIncompleteAndCancelledRounds();
@@ -77,6 +78,60 @@ namespace Emby.Plugin.Danmu.R3SearchQualityRegression
                        .OrderBy(id => id).SequenceEqual(new[] { "relevant", "same-evidence" }) &&
                    result.CanonicalCandidates.Select(candidate => candidate.Site).Distinct().Count() == 2,
                 "the same eligibility rule must run for every provider before merge and projection");
+        }
+
+        private static void RetainsManualCustomSearchCandidatesWithoutTitleEvidence()
+        {
+            var thirdSeason = Info("dandan-s3", "\u4e00\u62f3\u8d85\u4eba \u7b2c\u4e09\u5b63", "anime", 12, 2025);
+            var emptyId = Info(string.Empty, "usable title", "anime", 12, 2025);
+            var emptyTitle = Info("empty-title", string.Empty, "anime", 12, 2025);
+            var movie = Info("movie", "\u4e00\u62f3\u8d85\u4eba \u5267\u573a\u7248", "movie", 1, 2025);
+
+            foreach (var keyword in new[]
+            {
+                "one punch",
+                "one punch man",
+                "one punch+man",
+                "\u4e00\u62f3 \u8d85\u4eba",
+                "\u4e00\u62f3+\u8d85\u4eba",
+            })
+            {
+                Assert(DanmuMatchScorer.IsEligibleSeasonCandidate(
+                        thirdSeason, "One Punch Man", "One Punch Man Season 3", keyword),
+                    "an explicit alias, space, literal plus, or non-ASCII keyword must retain a Chinese Season title");
+                Assert(!DanmuMatchScorer.IsEligibleSeasonCandidate(
+                        emptyId, "One Punch Man", "One Punch Man Season 3", keyword) &&
+                    !DanmuMatchScorer.IsEligibleSeasonCandidate(
+                        emptyTitle, "One Punch Man", "One Punch Man Season 3", keyword) &&
+                    !DanmuMatchScorer.IsEligibleSeasonCandidate(
+                        movie, "One Punch Man", "One Punch Man Season 3", keyword),
+                    "manual discovery must still reject unusable identifiers, titles, and identifiable Movies");
+
+                var dandan = new ResultScraper("dandan", new[] { thirdSeason, emptyId, emptyTitle, movie });
+                var result = DanmuMatchSearchEngine.SearchSeasonAsync(
+                        new AbstractScraper[] { dandan }, "One Punch Man", "One Punch Man Season 3", 2025, 12,
+                        keyword, null)
+                    .GetAwaiter().GetResult();
+                Assert(dandan.Keywords.SequenceEqual(new[] { keyword }) &&
+                    result.CanonicalCandidates.Select(candidate => candidate.Id).SequenceEqual(new[] { "dandan-s3" }) &&
+                    result.Decision == "manual" && result.SelectedCandidate == null,
+                    "manual MatchPreview must keep the DandanPlay third Season while preserving low-confidence manual selection");
+            }
+
+            Assert(!DanmuMatchScorer.IsEligibleSeasonCandidate(
+                    thirdSeason, "Unrelated Series", "Unrelated Series Season 1", null),
+                "automatic searches must continue rejecting unrelated results without title evidence");
+
+            var successful = new ResultScraper("dandan", new[] { thirdSeason });
+            var failed = new ThrowingScraper("failed");
+            var partial = DanmuMatchSearchEngine.SearchSeasonAsync(
+                    new AbstractScraper[] { successful, failed }, "One Punch Man", "One Punch Man Season 3", 2025, 12,
+                    "one punch man", null)
+                .GetAwaiter().GetResult();
+            Assert(partial.CanonicalCandidates.Any(candidate => candidate.Id == "dandan-s3") &&
+                partial.Decision == "partial-manual" && partial.SelectedCandidate == null &&
+                partial.CompletionDiagnostics.Any(diagnostic => diagnostic.Status == "failed"),
+                "manual custom search must isolate provider failures without promoting a low-confidence candidate");
         }
 
         private static void ProjectsProviderGroupsWithFairDeterministicQuotas()

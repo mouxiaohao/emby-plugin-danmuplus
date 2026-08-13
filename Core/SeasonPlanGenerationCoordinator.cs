@@ -8,7 +8,7 @@ namespace Emby.Plugin.Danmu.Core
 {
     public static class DanmuMappingProtocol
     {
-        public const int CurrentVersion = 20;
+        public const int CurrentVersion = 21;
 
         private static readonly HashSet<string> ForbiddenBatchOrigins = new HashSet<string>(
             new[] { "episode-provider-id", "provider-id", "exact-binding", "binding", "direct" },
@@ -31,6 +31,9 @@ namespace Emby.Plugin.Danmu.Core
     /// </summary>
     public sealed class SeasonPlanGenerationCoordinator
     {
+        public static SeasonPlanGenerationCoordinator Shared { get; } =
+            new SeasonPlanGenerationCoordinator();
+
         private readonly ConcurrentDictionary<string, long> _generations =
             new ConcurrentDictionary<string, long>(StringComparer.OrdinalIgnoreCase);
         private long _nextGeneration;

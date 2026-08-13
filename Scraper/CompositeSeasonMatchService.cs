@@ -15,6 +15,7 @@ namespace Emby.Plugin.Danmu.Scraper
     /// </summary>
     public static class CompositeSeasonMatchService
     {
+        public const int MaximumSourceEpisodeNameLength = 256;
         private static readonly object PlacementPropertyLock = new object();
         private static readonly Dictionary<string, PropertyInfo> PlacementProperties =
             new Dictionary<string, PropertyInfo>(StringComparer.Ordinal);
@@ -136,6 +137,18 @@ namespace Emby.Plugin.Danmu.Scraper
                     (candidate.Site ?? string.Empty) + "\u001f" + (candidate.Id ?? string.Empty)));
             }
             return DanmuMatchScorer.SelectAutoCandidate(eligible.ToList());
+        }
+
+        /// <summary>
+        /// r5 residual selection operates only over the already filtered
+        /// target-season eligible set. The legacy supplemental name remains as
+        /// a compatibility wrapper, but no production path uses it.
+        /// </summary>
+        public static DanmuMatchCandidate SelectResidualCandidate(
+            IEnumerable<DanmuMatchCandidate> candidates,
+            IEnumerable<CompositeSeasonSourceIdentity> exhaustedSources)
+        {
+            return SelectSupplementalCandidate(candidates, exhaustedSources);
         }
 
         // Compatibility wrapper for the first composite import rollout. New
@@ -275,6 +288,38 @@ namespace Emby.Plugin.Danmu.Scraper
                 .ToList();
         }
 
+        /// <summary>
+        /// Returns an ephemeral, bounded title lookup for a single provider
+        /// response. Callers keep it only for preview projection; mappings,
+        /// fingerprints, evidence, persistence, and download execution never
+        /// receive these values.
+        /// </summary>
+        public static Dictionary<string, string> GetSourceEpisodeNames(
+            ScraperMedia media, CompositeSeasonSourceIdentity source)
+        {
+            return (media?.Episodes ?? new List<ScraperEpisode>())
+                .Where(episode => episode != null && !string.IsNullOrWhiteSpace(episode.Id) &&
+                    !string.IsNullOrWhiteSpace(episode.CommentId))
+                .GroupBy(episode => GetSourceEpisodeNameKey(source, episode.Id), StringComparer.Ordinal)
+                .ToDictionary(group => group.Key,
+                    group => BoundSourceEpisodeName(group.First().Title), StringComparer.Ordinal);
+        }
+
+        public static string GetSourceEpisodeNameKey(
+            CompositeSeasonSourceIdentity source, string episodeId)
+        {
+            return (source?.ProviderId ?? string.Empty) + "\u001f" +
+                (source?.MediaId ?? string.Empty) + "\u001f" + (episodeId ?? string.Empty);
+        }
+
+        private static string BoundSourceEpisodeName(string title)
+        {
+            if (string.IsNullOrWhiteSpace(title)) return string.Empty;
+            var normalized = title.Trim();
+            return normalized.Length <= MaximumSourceEpisodeNameLength
+                ? normalized : normalized.Substring(0, MaximumSourceEpisodeNameLength);
+        }
+
         public static CompositeSeasonEpisodeMapping CreateDirectMapping(
             string localEpisodeItemId,
             string providerId,
@@ -314,7 +359,8 @@ namespace Emby.Plugin.Danmu.Scraper
 
         public static List<DanmuCompositeSeasonGroup> ToGroups(
             CompositeSeasonPlan plan,
-            IEnumerable<Episode> localEpisodes)
+            IEnumerable<Episode> localEpisodes,
+            IReadOnlyDictionary<string, string> sourceEpisodeNames = null)
         {
             var names = (localEpisodes ?? Enumerable.Empty<Episode>())
                 .Where(x => x != null)
@@ -325,7 +371,7 @@ namespace Emby.Plugin.Danmu.Scraper
             var groupIndex = 0;
             foreach (var run in CompositeSeasonPlanner.GetEditableMappedRuns(plan))
             {
-                AddMappedGroup(groups, run.Mappings, names, episodeNumbers, ref groupIndex);
+                AddMappedGroup(groups, run.Mappings, names, episodeNumbers, sourceEpisodeNames, ref groupIndex);
             }
 
             foreach (var run in plan?.UnmatchedRuns ?? new List<CompositeSeasonUnmatchedRun>())
@@ -351,6 +397,7 @@ namespace Emby.Plugin.Danmu.Scraper
             IList<CompositeSeasonEpisodeMapping> mappings,
             IReadOnlyDictionary<string, string> names,
             IReadOnlyDictionary<string, int?> episodeNumbers,
+            IReadOnlyDictionary<string, string> sourceEpisodeNames,
             ref int groupIndex)
         {
             if (mappings == null || mappings.Count == 0) return;
@@ -378,6 +425,9 @@ namespace Emby.Plugin.Danmu.Scraper
                     EpisodeNumber = episodeNumbers.TryGetValue(mapping.LocalEpisodeItemId, out var number) ? number : null,
                     EpisodeName = names.TryGetValue(mapping.LocalEpisodeItemId, out var name) ? name : string.Empty,
                     SourceEpisodeNumber = mapping.SourceEpisodeNumber,
+                    SourceEpisodeName = sourceEpisodeNames != null && sourceEpisodeNames.TryGetValue(
+                        GetSourceEpisodeNameKey(mapping.Source, mapping.SourceEpisodeId), out var sourceName)
+                        ? sourceName ?? string.Empty : string.Empty,
                 }).ToList(),
             });
         }

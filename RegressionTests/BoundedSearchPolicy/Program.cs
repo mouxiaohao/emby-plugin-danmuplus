@@ -374,13 +374,25 @@ namespace Emby.Plugin.Danmu.BoundedSearchPolicyRegression
             }
 
             var root = FindRepositoryRoot(AppContext.BaseDirectory);
-            var controller = File.ReadAllText(Path.Combine(root, "Core", "Controllers", "DanmuController.cs"));
             var resolver = File.ReadAllText(Path.Combine(root, "Scraper", "DanmuProviderIdResolver.cs"));
             const string cancellationBoundary =
                 "catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)";
-            Assert(controller.Contains(cancellationBoundary, StringComparison.Ordinal) &&
-                   resolver.Contains(cancellationBoundary, StringComparison.Ordinal),
-                "composite direct reconstruction and ProviderId resolution must preserve caller cancellation");
+            Assert(resolver.Contains(cancellationBoundary, StringComparison.Ordinal),
+                "single-item ProviderId resolution must preserve caller cancellation");
+
+            var controller = File.ReadAllText(Path.Combine(root, "Core", "Controllers", "DanmuController.cs"));
+            var batchStart = controller.IndexOf(
+                "private async Task<CompositePlanBuild> BuildCompositePlanAsync(",
+                StringComparison.Ordinal);
+            var batchEnd = controller.IndexOf(
+                "private static DanmuCompositeSeasonSelection CloneSeasonPlanSelection(",
+                batchStart,
+                StringComparison.Ordinal);
+            Assert(batchStart >= 0 && batchEnd > batchStart,
+                "batch Season plan builder source boundary must remain discoverable");
+            var batchBuilder = controller.Substring(batchStart, batchEnd - batchStart);
+            Assert(!batchBuilder.Contains("DanmuProviderIdResolver", StringComparison.Ordinal),
+                "r5 batch Series/Season reconstruction must not read Episode ProviderIds");
         }
 
         private static void VerifiesControllerCancelContract()
@@ -439,7 +451,7 @@ namespace Emby.Plugin.Danmu.BoundedSearchPolicyRegression
                 "if (plan.Mappings.Count == 0 || plan.UnmatchedRuns.Count > 0) return false;");
             var residualGuard = residual.IndexOf("if (!IsCompleteAutomaticSearch(search))", StringComparison.Ordinal);
             var residualAbort = residual.IndexOf("return false;", residualGuard, StringComparison.Ordinal);
-            var residualSelect = residual.IndexOf("SelectSupplementalCandidate", StringComparison.Ordinal);
+            var residualSelect = residual.IndexOf("SelectResidualCandidate", StringComparison.Ordinal);
             Assert(residualGuard >= 0 && residualAbort > residualGuard && residualSelect > residualAbort,
                 "an incomplete residual round must abort before supplemental selection, binding, or any mapped download");
         }

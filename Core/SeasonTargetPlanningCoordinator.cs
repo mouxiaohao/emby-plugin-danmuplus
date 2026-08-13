@@ -7,8 +7,14 @@ using MediaBrowser.Controller.Entities.TV;
 
 namespace Emby.Plugin.Danmu.Core
 {
+    /// <summary>
+    /// The single r5 boundary for every batch Season operation. It reads only
+    /// target.GetEpisodes(); sibling Season inventories cannot claim, lend, or
+    /// supplement an Episode for the selected target.
+    /// </summary>
     public static class SeasonTargetPlanningCoordinator
     {
+        [Obsolete("r5 batch planning no longer resolves ownership across Season targets.")]
         public static CompositeSeasonTargetOwnershipResult ResolveOwnership(
             IEnumerable<CompositeSeasonTargetInventory> source)
         {
@@ -17,7 +23,6 @@ namespace Emby.Plugin.Danmu.Core
 
         public static bool TryBuild(
             Season target,
-            IEnumerable<Season> seriesSeasons,
             out SeasonPlanningContext context,
             out string error)
         {
@@ -28,37 +33,44 @@ namespace Emby.Plugin.Danmu.Core
                 error = "target-season-missing";
                 return false;
             }
-
-            var seasons = (seriesSeasons ?? Enumerable.Empty<Season>())
-                .Where(item => item != null).ToList();
-            if (!seasons.Any(item => item.Id == target.Id)) seasons.Add(target);
-            var contexts = seasons.ToDictionary(item => item.Id.ToString(), item =>
-                SeasonPlanningContextBuilder.Build(item,
-                    (item.GetEpisodes()?.Items ?? Array.Empty<BaseItem>()).OfType<Episode>()),
-                StringComparer.OrdinalIgnoreCase);
-            var ownership = ResolveOwnership(seasons.Select(item =>
-                new CompositeSeasonTargetInventory
-                {
-                    TargetId = item.Id.ToString(),
-                    TargetSeasonNumber = item.IndexNumber,
-                    Episodes = contexts[item.Id.ToString()].LocalEpisodes,
-                }));
-            if (!ownership.IsValid)
+            if (!target.IndexNumber.HasValue)
             {
-                error = string.Join(",", ownership.Conflicts.Select(conflict =>
-                    conflict.Code + ":" + conflict.ItemId));
+                error = "target-season-number-unknown";
                 return false;
             }
 
-            var targetId = target.Id.ToString();
-            var owners = ownership.Assignments.ToDictionary(item => item.ItemId, item => item.TargetId,
-                StringComparer.OrdinalIgnoreCase);
-            var exclusions = contexts[targetId].LocalEpisodes
-                .Where(item => owners.TryGetValue(item.ItemId, out var owner) &&
-                    !string.Equals(owner, targetId, StringComparison.OrdinalIgnoreCase))
-                .Select(item => item.ItemId);
-            context = SeasonPlanningContextBuilder.Filter(contexts[targetId], exclusions);
-            return true;
+            try
+            {
+                var result = target.GetEpisodes();
+                if (result == null || result.Items == null)
+                {
+                    error = "target-season-inventory-unavailable";
+                    return false;
+                }
+
+                return SeasonPlanningContextBuilder.TryBuild(target,
+                    result.Items.OfType<Episode>(), out context, out error);
+            }
+            catch (Exception)
+            {
+                error = "target-season-inventory-unavailable";
+                context = null;
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Compatibility signature retained for r4 callers while intentionally
+        /// ignoring sibling inventories. Every request is scoped solely from
+        /// the selected target Season.
+        /// </summary>
+        public static bool TryBuild(
+            Season target,
+            IEnumerable<Season> ignoredSeriesSeasons,
+            out SeasonPlanningContext context,
+            out string error)
+        {
+            return TryBuild(target, out context, out error);
         }
     }
 }

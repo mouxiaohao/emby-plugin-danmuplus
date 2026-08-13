@@ -24,21 +24,34 @@ namespace Emby.Plugin.Danmu.Scrapers.Mgtv
         private static readonly TimeSpan _mgtvApiMinInterval = TimeSpan.FromMilliseconds(500);
         private readonly HttpClient _httpClient;
         private readonly JsonSerializerOptions _jsonOptions;
+        private static readonly TimeSpan MaximumSuggestRetryDelay = TimeSpan.FromSeconds(2);
+        private const string SuggestEndpointLabel = "pc-suggest-v1";
 
         /// <summary>
         /// Initializes a new instance of the <see cref="MgtvApi"/> class.
         /// </summary>
         /// <param name="loggerFactory">The <see cref="ILoggerFactory"/>.</param>
         public MgtvApi(ILogManager logManager, IHttpClient httpClient)
+            : this(logManager, httpClient, null)
+        {
+        }
+
+        // Kept internal solely so deterministic regression fixtures can exercise
+        // the discovery boundary without a network request. Production uses the
+        // default handler below.
+        internal MgtvApi(ILogManager logManager, IHttpClient httpClient, HttpMessageHandler requestHandler)
             : base(logManager.getDefaultLogger("MgtvApi"), httpClient)
         {
             _jsonOptions = new JsonSerializerOptions
             {
                 PropertyNameCaseInsensitive = true,
             };
-            var handler = new HttpClientHandler
+            var handler = requestHandler ?? new HttpClientHandler
             {
-                AutomaticDecompression = System.Net.DecompressionMethods.GZip | System.Net.DecompressionMethods.Deflate
+                AutomaticDecompression = System.Net.DecompressionMethods.GZip | System.Net.DecompressionMethods.Deflate,
+                // Discovery is public and anonymous. Do not acquire, retain, or
+                // resend an upstream cookie as part of a suggestion request.
+                UseCookies = false,
             };
             _httpClient = new HttpClient(handler);
             // --- 为 HttpClient 设置通用的默认请求头 (主要用于 API 调用) ---
@@ -57,49 +70,142 @@ namespace Emby.Plugin.Danmu.Scrapers.Mgtv
         public async Task<List<MgtvSearchItem>> SearchAsync(string keyword, CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (string.IsNullOrEmpty(keyword))
+            var normalizedKeyword = NormalizeSearchKeyword(keyword);
+            if (string.IsNullOrEmpty(normalizedKeyword))
             {
                 return new List<MgtvSearchItem>();
             }
 
-            var cacheKey = $"search_{keyword}";
-            var expiredOption = new MemoryCacheEntryOptions() { AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(5) };
+            var cacheKey = $"mgtv-suggest-v1:{normalizedKeyword}";
             if (_memoryCache.TryGetValue<List<MgtvSearchItem>>(cacheKey, out var cacheValue))
             {
-                return cacheValue;
+                return CloneSearchItems(cacheValue);
             }
 
-            await this.LimitRequestFrequently(cancellationToken).ConfigureAwait(false);
-
-            keyword = HttpUtility.UrlEncode(keyword);
-            var url = $"https://mobileso.bz.mgtv.com/msite/search/v2?q={keyword}&pc=30&pn=1&sort=-99&ty=0&du=0&pt=0&corr=1&abroad=0&_support=10000000000000000";
-            var response = await _httpClient.GetAsync(url, cancellationToken).ConfigureAwait(false);
-            response.EnsureSuccessStatusCode();
-
-            var result = new List<MgtvSearchItem>();
-            var searchResult = await DeserializeJsonResponseAsync<MgtvSearchResult>(response, cancellationToken).ConfigureAwait(false);
-            if (searchResult != null && searchResult.Data != null && searchResult.Data.Contents != null)
+            var result = await RequestSuggestionsAsync(normalizedKeyword, cancellationToken).ConfigureAwait(false);
+            _memoryCache.Set<List<MgtvSearchItem>>(cacheKey, CloneSearchItems(result), new MemoryCacheEntryOptions
             {
-                foreach (var content in searchResult.Data.Contents)
+                AbsoluteExpirationRelativeToNow = result.Count == 0 ? TimeSpan.FromSeconds(60) : TimeSpan.FromMinutes(5),
+            });
+            return CloneSearchItems(result);
+        }
+
+        private async Task<List<MgtvSearchItem>> RequestSuggestionsAsync(
+            string normalizedKeyword,
+            CancellationToken cancellationToken)
+        {
+            var url = $"https://mobileso.bz.mgtv.com/pc/suggest/v1?q={HttpUtility.UrlEncode(normalizedKeyword)}&src=mgtv";
+            for (var attempt = 0; attempt < 2; attempt++)
+            {
+                // Every upstream attempt, including the one permitted retry,
+                // must participate in the shared 500 ms provider limiter.
+                await this.LimitRequestFrequently(cancellationToken).ConfigureAwait(false);
+                using (var response = await _httpClient.GetAsync(url, cancellationToken).ConfigureAwait(false))
                 {
-                    if (content.Type != "media")
+                    if (!response.IsSuccessStatusCode)
                     {
-                        continue;
-                    }
-                    foreach (var item in content.Data)
-                    {
-                        if (string.IsNullOrEmpty(item.Id))
+                        var status = (int)response.StatusCode;
+                        if (attempt == 0 && IsRetryableSuggestStatus(status))
                         {
+                            await Task.Delay(GetSuggestRetryDelay(response), cancellationToken).ConfigureAwait(false);
                             continue;
                         }
 
-                        result.Add(item);
+                        throw DiscoveryFailure("http-" + status);
                     }
+
+                    var searchResult = await DeserializeSuggestResponseAsync(response).ConfigureAwait(false);
+                    if (searchResult == null)
+                    {
+                        throw DiscoveryFailure("malformed-json");
+                    }
+                    if (searchResult.Code != 200)
+                    {
+                        throw DiscoveryFailure("business-" + (searchResult.Code.HasValue
+                            ? searchResult.Code.Value.ToString() : "missing"));
+                    }
+                    if (searchResult.Data == null || searchResult.Data.Suggest == null)
+                    {
+                        throw DiscoveryFailure("incompatible-schema");
+                    }
+
+                    return MgtvSuggestionNormalizer.Normalize(searchResult);
                 }
             }
 
-            _memoryCache.Set<List<MgtvSearchItem>>(cacheKey, result, expiredOption);
-            return result;
+            // The loop either returns or throws; retain an explicit safe
+            // category in case a future edit changes that control flow.
+            throw DiscoveryFailure("retry-exhausted");
+        }
+
+        private async Task<MgtvSearchResult> DeserializeSuggestResponseAsync(HttpResponseMessage response)
+        {
+            try
+            {
+                var content = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+                if (string.IsNullOrWhiteSpace(content))
+                {
+                    return null;
+                }
+
+                return JsonSerializer.Deserialize<MgtvSearchResult>(content, _jsonOptions);
+            }
+            catch (JsonException)
+            {
+                return null;
+            }
+            catch (NotSupportedException)
+            {
+                return null;
+            }
+        }
+
+        private static bool IsRetryableSuggestStatus(int status)
+        {
+            return status == 429 || status == 502 || status == 503 || status == 504;
+        }
+
+        private static TimeSpan GetSuggestRetryDelay(HttpResponseMessage response)
+        {
+            var retryAfter = response.Headers.RetryAfter;
+            var delay = retryAfter?.Delta ?? (retryAfter?.Date.HasValue == true
+                ? retryAfter.Date.Value - DateTimeOffset.UtcNow
+                : TimeSpan.Zero);
+            if (delay < TimeSpan.Zero)
+            {
+                return TimeSpan.Zero;
+            }
+
+            return delay > MaximumSuggestRetryDelay ? MaximumSuggestRetryDelay : delay;
+        }
+
+        private static List<MgtvSearchItem> CloneSearchItems(IEnumerable<MgtvSearchItem> items)
+        {
+            return (items ?? Enumerable.Empty<MgtvSearchItem>()).Select(item => new MgtvSearchItem
+            {
+                Id = item.Id,
+                Title = item.Title,
+                TypeName = item.TypeName,
+                Year = item.Year,
+                VideoCount = item.VideoCount,
+            }).ToList();
+        }
+
+        private Exception DiscoveryFailure(string category)
+        {
+            // Intentionally no URL, response body, keyword, or request headers:
+            // search-engine aggregation will surface this safe provider-local
+            // category without exposing request/session data.
+            _logger.Warn("MGTV discovery failed: endpoint={0} category={1}", SuggestEndpointLabel, category);
+            return new InvalidOperationException("mgtv-" + SuggestEndpointLabel + "-" + category);
+        }
+
+        private static string NormalizeSearchKeyword(string keyword)
+        {
+            return string.IsNullOrWhiteSpace(keyword)
+                ? string.Empty
+                : string.Join(" ", keyword.Trim().Split((char[])null, StringSplitOptions.RemoveEmptyEntries))
+                    .ToLowerInvariant();
         }
 
         public async Task<MgtvVideo?> GetVideoAsync(string id, CancellationToken cancellationToken)
