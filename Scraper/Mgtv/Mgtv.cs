@@ -3,6 +3,7 @@ using System.Linq;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Net.Http;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Common.Net;
 using Emby.Plugin.Danmu.Core.Extensions;
@@ -26,6 +27,14 @@ namespace Emby.Plugin.Danmu.Scrapers.Mgtv
             _api = new MgtvApi(logManager, httpClient);
         }
 
+        // Regression fixtures inject an in-memory handler. Production retains
+        // the existing constructor and anonymous public discovery client.
+        internal Mgtv(ILogManager logManager, IHttpClient httpClient, HttpMessageHandler requestHandler)
+            : base(logManager.getDefaultLogger("Mgtv"))
+        {
+            _api = new MgtvApi(logManager, httpClient, requestHandler);
+        }
+
         public override int DefaultOrder => 6;
 
         public override bool DefaultEnable => true;
@@ -39,24 +48,25 @@ namespace Emby.Plugin.Danmu.Scrapers.Mgtv
 
         private static readonly Regex regTvEpisodeTitle = new Regex(@"^第.+?集$", RegexOptions.Compiled);
 
-        public override async Task<List<ScraperSearchInfo>> Search(BaseItem item)
+        public override Task<List<ScraperSearchInfo>> Search(BaseItem item)
         {
+            return Search(item, CancellationToken.None);
+        }
+
+        public override async Task<List<ScraperSearchInfo>> Search(BaseItem item, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
             var list = new List<ScraperSearchInfo>();
             var isMovieItemType = item is MediaBrowser.Controller.Entities.Movies.Movie;
             var searchName = this.NormalizeSearchName(item.Name);
-            var videos = await this._api.SearchAsync(searchName, CancellationToken.None).ConfigureAwait(false);
+            var videos = await this._api.SearchAsync(searchName, cancellationToken).ConfigureAwait(false);
             foreach (var video in videos)
             {
                 var videoId = video.Id;
                 var title = video.Title;
                 var pubYear = video.Year;
 
-                if (isMovieItemType && video.TypeName != "电影")
-                {
-                    continue;
-                }
-
-                if (!isMovieItemType && video.TypeName == "电影")
+                if (IsExplicitOppositeType(video.TypeName, isMovieItemType))
                 {
                     continue;
                 }
@@ -86,12 +96,7 @@ namespace Emby.Plugin.Danmu.Scrapers.Mgtv
                 var title = video.Title;
                 var pubYear = video.Year;
 
-                if (isMovieItemType && video.TypeName != "电影")
-                {
-                    continue;
-                }
-
-                if (!isMovieItemType && video.TypeName == "电影")
+                if (IsExplicitOppositeType(video.TypeName, isMovieItemType))
                 {
                     continue;
                 }
@@ -277,10 +282,18 @@ namespace Emby.Plugin.Danmu.Scrapers.Mgtv
         }
 
 
-        public override async Task<List<ScraperSearchInfo>> SearchForApi(string keyword)
+        public override Task<List<ScraperSearchInfo>> SearchForApi(string keyword)
         {
+            return SearchForApi(keyword, CancellationToken.None);
+        }
+
+        public override async Task<List<ScraperSearchInfo>> SearchForApi(
+            string keyword,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
             var list = new List<ScraperSearchInfo>();
-            var videos = await this._api.SearchAsync(keyword, CancellationToken.None).ConfigureAwait(false);
+            var videos = await this._api.SearchAsync(keyword, cancellationToken).ConfigureAwait(false);
             foreach (var video in videos)
             {
                 var videoId = video.Id;
@@ -329,6 +342,24 @@ namespace Emby.Plugin.Danmu.Scrapers.Mgtv
         public override async Task<ScraperDanmaku?> DownloadDanmuForApi(string commentId)
         {
             return await this.GetDanmuContent(null, commentId).ConfigureAwait(false);
+        }
+
+        private static bool IsExplicitOppositeType(string providerType, bool localIsMovie)
+        {
+            return localIsMovie ? IsExplicitTelevisionType(providerType) : IsExplicitMovieType(providerType);
+        }
+
+        private static bool IsExplicitMovieType(string providerType)
+        {
+            var value = (providerType ?? string.Empty).Trim().ToLowerInvariant();
+            return value == "电影" || value == "movie" || value == "film" || value == "movie_feature";
+        }
+
+        private static bool IsExplicitTelevisionType(string providerType)
+        {
+            var value = (providerType ?? string.Empty).Trim().ToLowerInvariant();
+            return value == "电视剧" || value == "综艺" || value == "动漫" || value == "tv" ||
+                value == "series" || value == "show" || value == "television";
         }
     }
 }

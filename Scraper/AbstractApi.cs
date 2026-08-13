@@ -163,11 +163,11 @@ namespace Emby.Plugin.Danmu.Scraper
             }
         }
         
-        protected virtual Task LimitRequestFrequently()
+        protected virtual Task LimitRequestFrequently(CancellationToken cancellationToken = default)
         {
             // Thread.Sleep(1000);
             // return Task.CompletedTask;
-            return Task.Delay(5000); // 还原：延迟改回 3000ms
+            return Task.Delay(5000, cancellationToken); // 还原：延迟改回 3000ms
         }
     }
 }

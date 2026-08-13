@@ -10,6 +10,7 @@ using System.Xml;
 using System.Xml.Serialization;
 using Emby.Plugin.Danmu.Configuration;
 using Emby.Plugin.Danmu.Core;
+using Emby.Plugin.Danmu.Core.Controllers;
 using Emby.Plugin.Danmu.Core.Extensions;
 using Emby.Plugin.Danmu.Model;
 using Emby.Plugin.Danmu.Scraper;
@@ -30,8 +31,30 @@ namespace Emby.Plugin.Danmu.RegressionTests
 {
     internal static class Program
     {
-        private static int Main()
+        private static int Main(string[] args)
         {
+            if (args != null && args.Contains("--composite-season-state", StringComparer.Ordinal))
+            {
+                CompositeSeasonStateTests.Run();
+                Console.WriteLine("Composite season state regression checks passed.");
+                return 0;
+            }
+
+            if (args != null && args.Contains("--composite-season-planner", StringComparer.Ordinal))
+            {
+                CompositeSeasonPlannerTests.Run();
+                Console.WriteLine("Composite season planner regression checks passed.");
+                return 0;
+            }
+
+            if (args != null && args.Contains("--composite-season", StringComparer.Ordinal))
+            {
+                CompositeSeasonStateTests.Run();
+                CompositeSeasonPlannerTests.Run();
+                Console.WriteLine("Composite season regression checks passed.");
+                return 0;
+            }
+
             MapsAnimeSeason();
             MapsLiveActionSeasonAndCleansTitle();
             UsesIdentifierFallbackOrder();
@@ -40,9 +63,10 @@ namespace Emby.Plugin.Danmu.RegressionTests
             PreservesSameSiteHighestScoreTieAmbiguity();
             SelectsCloseHighConfidenceCandidatesBySitePriority();
             ScoresMoviesAndFiltersTelevisionCandidates();
-            ScoresAliasCandidatesWithStructuralEvidence();
-            DiscoversMovieAliasesAndPreservesStandardProvenance();
+            ScoresStandardCandidatesWithoutDynamicAliasMode();
+            UsesOneMovieSearchTermAndPreservesStandardProvenance();
             IsolatesMovieProviderFailures();
+            VerifiesLazyCandidateDetailContract();
             ResolvesProviderIdsBySiteThenHierarchy();
             EnforcesItemLocalProviderScopes();
             DiscoversCandidatesWithBoundedTitleClauses();
@@ -59,8 +83,11 @@ namespace Emby.Plugin.Danmu.RegressionTests
             AppliesDuplicateAndForceRefreshPolicy();
             PreservesSingleEpisodeIsolationAndLegacyTaskShape();
             PreservesProviderWriteGenerationOrdering();
+            R4GenerationPolicyTests.Run();
+            CompositeSeasonStateTests.Run();
             ReplacesOnlyRegisteredOrdinaryProviderIds();
             MapsEpisodeSourceNumbersSafely();
+            CompositeSeasonPlannerTests.Run();
             DeserializesAndNormalizesBilibiliEpisodes();
             DeserializesBilibiliExactVideoDetails();
             DeserializesBilibiliExactSeasonDetails();
@@ -75,6 +102,7 @@ namespace Emby.Plugin.Danmu.RegressionTests
             EmbedsDandanCredentialSettings();
             VerifiesVersionedConfigurationPageResources();
             VerifiesSingleTargetSmartMatchReliabilityContracts();
+            PreservesStrmIndependentSeasonResolutionContract();
             PreservesValidUnicodeWhileRemovingInvalidXmlScalars();
             RemovesInvalidXmlCharacterReferences();
             PreservesCharacterReferenceTextInsideCdata();
@@ -283,9 +311,9 @@ namespace Emby.Plugin.Danmu.RegressionTests
                 Candidate("second", "MiddleSite", 2, 0.99),
                 Candidate("preferred", "PrioritySite", 0, 0.98)
             });
-            Assert(preferredThirdScore.Select(x => x.Id).SequenceEqual(new[] { "preferred", "full", "second" }) &&
+            Assert(preferredThirdScore.Select(x => x.Id).SequenceEqual(new[] { "preferred", "second", "full" }) &&
                    DanmuMatchScorer.SelectAutoCandidate(preferredThirdScore)?.Id == "preferred",
-                "the earliest confident site wins over all later scores");
+                "display stays in provider order while the earliest confident site wins over later scores");
 
             Assert(DanmuMatchScorer.SelectAutoCandidate(preferredRunnerUp, false)?.Id == "preferred" &&
                    DanmuMatchScorer.SelectAutoCandidate(outsideGap, false)?.Id == "outside",
@@ -333,31 +361,22 @@ namespace Emby.Plugin.Danmu.RegressionTests
                 "identifiable television candidates must be rejected for movies");
         }
 
-        private static void ScoresAliasCandidatesWithStructuralEvidence()
+        private static void ScoresStandardCandidatesWithoutDynamicAliasMode()
         {
             var source = new ScraperSearchInfo
             {
-                Id = "alias-season",
+                Id = "standard-season",
                 Name = "abcdefzzzz",
                 Year = 2024,
                 EpisodeSize = 12,
             };
             var standard = DanmuMatchScorer.Score(
                 source, "AliasID", "Alias", 0, "abcdefghij", "abcdefghij", 2024, 12);
-            var alias = DanmuMatchScorer.Score(
-                source, "AliasID", "Alias", 0, "abcdefghij", "abcdefghij", 2024, 12, true);
-            var expectedAlias = Math.Round(
-                alias.TitleScore * 0.35 + alias.YearScore * 0.20 + alias.EpisodeScore * 0.45,
-                4,
-                MidpointRounding.AwayFromZero);
-
-            Assert(alias.TitleScore >= 0.72 && alias.Score == expectedAlias && alias.Score >= 0.90,
-                "an alias-only season with related title and exact year/count must use 35/20/45 and reach confidence");
             Assert(Math.Abs(standard.Score - Math.Round(
                        standard.TitleScore * 0.55 + standard.YearScore * 0.15 + standard.EpisodeScore * 0.30,
                        4,
                        MidpointRounding.AwayFromZero)) < 0.0001,
-                "standard discovery must retain the existing no-keyword season weights");
+                "fixed-term discovery must retain the standard no-keyword season weights");
 
             var unrelated = DanmuMatchScorer.Score(
                 new ScraperSearchInfo
@@ -367,27 +386,27 @@ namespace Emby.Plugin.Danmu.RegressionTests
                     Year = 2024,
                     EpisodeSize = 12,
                 },
-                "AliasID", "Alias", 0, "abcdefghij", "abcdefghij", 2024, 12, true);
+                "AliasID", "Alias", 0, "abcdefghij", "abcdefghij", 2024, 12);
             Assert(unrelated.TitleScore < 0.72 && unrelated.Score < 0.90,
-                "exact year/count must not rescue an alias below the 0.72 title floor");
+                "exact year/count must not rescue an unrelated fixed-term candidate");
 
-            var movieAlias = DanmuMatchScorer.ScoreMovie(
+            var movie = DanmuMatchScorer.ScoreMovie(
                 new ScraperSearchInfo
                 {
-                    Id = "alias-movie",
+                    Id = "standard-movie",
                     Name = "abcdefzzzz",
                     Category = "movie",
                     Year = 2024,
                 },
-                "AliasID", "Alias", 0, "abcdefghij", 2024, true);
-            Assert(movieAlias.Score == Math.Round(
-                       movieAlias.TitleScore * 0.70 + movieAlias.YearScore * 0.30,
+                "AliasID", "Alias", 0, "abcdefghij", 2024);
+            Assert(movie.Score == Math.Round(
+                       movie.TitleScore * 0.82 + movie.YearScore * 0.18,
                        4,
                        MidpointRounding.AwayFromZero),
-                "alias-only movies must use 70/30 title/year scoring");
+                "fixed-term movies must use the standard title/year scoring");
         }
 
-        private static void DiscoversMovieAliasesAndPreservesStandardProvenance()
+        private static void UsesOneMovieSearchTermAndPreservesStandardProvenance()
         {
             const string movieName = "Alpha Adventure：Hidden Alias";
             var provider = new FakeScraper(
@@ -418,9 +437,9 @@ namespace Emby.Plugin.Danmu.RegressionTests
                     null)
                 .GetAwaiter().GetResult();
 
-            Assert(provider.SearchNames.Contains("Hidden Alias") &&
-                   result.Candidates.Any(x => x.Id == "movie-alias" && x.Score >= 0.90),
-                "Movie search must apply bounded local clauses through the Movie-specific provider path");
+            Assert(provider.SearchNames.SequenceEqual(new[] { movieName }) &&
+                   !result.Candidates.Any(x => x.Id == "movie-alias"),
+                "Movie search must issue only its standard metadata term and never follow a title-clause alias");
 
             var duplicateProvider = new FakeScraper(
                 "MovieDuplicateID",
@@ -441,16 +460,6 @@ namespace Emby.Plugin.Danmu.RegressionTests
                             Year = 2000,
                         },
                     },
-                    ["Hidden Alias"] = new List<ScraperSearchInfo>
-                    {
-                        new ScraperSearchInfo
-                        {
-                            Id = "same",
-                            Name = movieName,
-                            Category = "movie",
-                            Year = 2024,
-                        },
-                    },
                 });
             var duplicate = DanmuMatchSearchEngine.SearchMovieAsync(
                     new[] { duplicateProvider },
@@ -459,8 +468,9 @@ namespace Emby.Plugin.Danmu.RegressionTests
                     null)
                 .GetAwaiter().GetResult();
             Assert(duplicate.Candidates.Count(x => x.Id == "same") == 1 &&
-                   duplicate.Candidates.Single(x => x.Id == "same").Year == 2000,
-                "a standard-first candidate must retain standard provenance and metadata when an alias round repeats it");
+                   duplicate.Candidates.Single(x => x.Id == "same").Year == 2000 &&
+                   duplicateProvider.SearchNames.SequenceEqual(new[] { movieName }),
+                "Movie default search must retain its sole standard candidate and never add an alias round");
         }
 
         private static void ReplacesOnlyRegisteredOrdinaryProviderIds()
@@ -482,16 +492,16 @@ namespace Emby.Plugin.Danmu.RegressionTests
                 new[] { "BilibiliID", "DandanID", "IqiyiID", "MgtvID" },
                 "DandanID",
                 "new-dandan",
-                true);
+                false);
 
             Assert(updated["DandanID"] == "new-dandan" &&
-                   !updated.ContainsKey("BilibiliID") &&
-                   !updated.ContainsKey("IqiyiID") &&
+                   updated["BilibiliID"] == "old-bili" &&
+                   updated["IqiyiID"] == "disabled-iqiyi" &&
                    updated["BilibiliIDManual"] == "manual-bili" &&
                    updated["DandanIDManual"] == "manual-dandan" &&
                    updated["Tmdb"] == "tmdb-1" && updated["Tvdb"] == "tvdb-1" &&
                    updated["Imdb"] == "imdb-1" && updated["CustomID"] == "custom-1",
-                "successful Season/Episode writes must remove all registered ordinary IDs, including disabled sites, and preserve Manual/non-plugin keys");
+                "successful Season/Episode writes must overwrite only the target key and preserve every other plugin, Manual, and foreign key");
             Assert(current["BilibiliID"] == "old-bili" && current["DandanID"] == "old-dandan",
                 "the pure provider-ID policy must not mutate its input dictionary before repository persistence");
 
@@ -524,6 +534,80 @@ namespace Emby.Plugin.Danmu.RegressionTests
             Assert(search.Candidates.Count == 1, "successful movie providers should still contribute candidates");
             Assert(search.SearchErrors.Count == 1 && search.SearchErrors[0].Contains("DandanID"),
                 "a failed Dandan proxy provider should be isolated in diagnostics");
+        }
+
+        private static void VerifiesLazyCandidateDetailContract()
+        {
+            var scraper = new FakeScraper("LazyID", null, false, new Dictionary<string, ScraperMedia>
+            {
+                ["candidate-a"] = new ScraperMedia
+                {
+                    Id = "candidate-a",
+                    Episodes = new List<ScraperEpisode>
+                    {
+                        new ScraperEpisode { Id = "source-2", CommentId = "comment-2", EpisodeNumber = 2, Title = "Second" },
+                        new ScraperEpisode { Id = "source-1", CommentId = "comment-1", EpisodeNumber = 1, Title = "First" },
+                    },
+                },
+            }, null, new Dictionary<string, List<ScraperSearchInfo>>
+            {
+                ["Example"] = new List<ScraperSearchInfo>
+                {
+                    new ScraperSearchInfo { Id = "candidate-a", Name = "Example", EpisodeSize = 2 },
+                },
+            });
+            var discovery = DanmuMatchSearchEngine.SearchSeasonAsync(
+                    new AbstractScraper[] { scraper }, "Example", "Example", 2024, 2, "Example", null)
+                .GetAwaiter().GetResult();
+            Assert(discovery.Candidates.Count == 1 && scraper.MediaCalls == 0,
+                "candidate discovery must not resolve source media before an explicit detail request");
+
+            var registry = new DanmuCandidateEvidenceRegistry();
+            var token = registry.Register("target-episode", "LazyID", "candidate-a", 0.9, "search-confidence");
+            Assert(registry.TryResolve(token, "target-episode", "LazyID", "candidate-a", out var evidence) &&
+                   !registry.TryResolve(token, "target-episode", "LazyID", "candidate-b", out _) &&
+                   !registry.TryResolve(token, "other-target", "LazyID", "candidate-a", out _),
+                "candidate evidence must bind target, provider, and candidate before provider access");
+            evidence.ExpiresUtc = DateTime.UtcNow.AddSeconds(-1);
+            Assert(!registry.TryResolve(token, "target-episode", "LazyID", "candidate-a", out _),
+                "expired candidate evidence must be rejected without resolving media");
+
+            var resolver = typeof(DanmuController).GetMethod(
+                "ResolveMatchCandidateDetailsMediaAsync", BindingFlags.Static | BindingFlags.NonPublic);
+            var safeCandidate = typeof(DanmuController).GetMethod(
+                "IsSafeMatchCandidateId", BindingFlags.Static | BindingFlags.NonPublic);
+            Assert(resolver != null && safeCandidate != null,
+                "lazy candidate-detail resolver and input validator must remain testable");
+            Assert(!(bool)safeCandidate.Invoke(null, new object[] { "https://host/media" }) &&
+                   !(bool)safeCandidate.Invoke(null, new object[] { "../media" }) &&
+                   !(bool)safeCandidate.Invoke(null, new object[] { "a\\media" }) &&
+                   !(bool)safeCandidate.Invoke(null, new object[] { "bad\u0001id" }) &&
+                   !(bool)safeCandidate.Invoke(null, new object[] { new string('a', 513) }),
+                "detail requests must reject URI, path, control-character, and oversized candidate ids");
+            var media = ((Task<ScraperMedia>)resolver.Invoke(null, new object[]
+                { new Episode { Name = "Local", IndexNumber = 2 }, new Season { Name = "Season" }, scraper, "candidate-a" }))
+                .GetAwaiter().GetResult();
+            Assert(media?.Episodes.Count == 2 && scraper.MediaCalls == 1,
+                "one explicit inspection must resolve only the named candidate exactly once");
+            var rows = media.Episodes.OrderBy(item => item.EpisodeNumber ?? int.MaxValue)
+                .ThenBy(item => item.Id, StringComparer.OrdinalIgnoreCase).ToList();
+            Assert(rows.Select(item => item.Title).SequenceEqual(new[] { "First", "Second" }),
+                "candidate detail source rows must be deterministically ordered by number then identity");
+
+            var root = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", ".."));
+            var controller = File.ReadAllText(Path.Combine(root, "Core", "Controllers", "DanmuController.cs"));
+            var detailStart = controller.IndexOf("private async Task<DanmuMatchCandidateDetailResult> GetMatchCandidateDetails", StringComparison.Ordinal);
+            var detailEnd = controller.IndexOf("private static Task<ScraperMedia> ResolveMatchCandidateDetailsMediaAsync", detailStart, StringComparison.Ordinal);
+            var detailBody = detailStart >= 0 && detailEnd > detailStart
+                ? controller.Substring(detailStart, detailEnd - detailStart) : string.Empty;
+            Assert(controller.Contains("MatchCandidateDetails") &&
+                   controller.Contains("CandidateEvidence.TryResolve(evidenceToken") &&
+                   controller.Contains("candidate-detail-evidence-stale") &&
+                   controller.Contains("StampCandidateEvidence(episode, result.Target.Candidates)") &&
+                   !detailBody.Contains("BindMatch(") && !detailBody.Contains("StartTrackedDownload(") &&
+                   !detailBody.Contains("UpdateToRepository") && !detailBody.Contains("CompositePlan") &&
+                   !controller.Contains("DanmuSeasonCollection") && !controller.Contains("DanmuSeasonSegment"),
+                "detail inspection must remain evidence-gated, target-bound, and independent of collection/segment protocols");
         }
 
         private static void ResolvesProviderIdsBySiteThenHierarchy()
@@ -681,9 +765,22 @@ namespace Emby.Plugin.Danmu.RegressionTests
                 "Movie exact matching must inspect only the Movie");
             Assert(DanmuProviderIdResolver.GetSeasonScopes(season).SequenceEqual(new BaseItem[] { season }),
                 "Season exact matching must inspect only the Season");
-            Assert(DanmuProviderIdResolver.GetEpisodeScopes(episode, season)
-                    .SequenceEqual(new BaseItem[] { episode, season }),
-                "Episode exact matching must inspect Episode before its Season");
+            Assert(DanmuProviderIdResolver.GetSingleEpisodeDirectScopes(episode)
+                    .SequenceEqual(new BaseItem[] { episode }),
+                "single Episode direct matching must inspect only the Episode");
+
+            season.ProviderIds["SeasonOnlyID"] = "season-only";
+            var seasonOnlyScraper = new FakeScraper("SeasonOnlyID", null, false,
+                new Dictionary<string, ScraperMedia>
+                {
+                    ["season-only"] = new ScraperMedia { Id = "season-only" },
+                });
+            var seasonOnlyDecision = DanmuProviderIdResolver.ResolveAsync(
+                    new[] { seasonOnlyScraper },
+                    DanmuProviderIdResolver.GetSingleEpisodeDirectScopes(episode), null)
+                .GetAwaiter().GetResult();
+            Assert(seasonOnlyDecision.Candidate == null && seasonOnlyScraper.MediaCalls == 0,
+                "a Season-only ProviderId must not be reported as Episode-local direct evidence");
 
             series.ProviderIds["ScopedID"] = "series-value";
             var scraper = new FakeScraper("ScopedID", null, false,
@@ -735,105 +832,48 @@ namespace Emby.Plugin.Danmu.RegressionTests
             var controller = File.ReadAllText(Path.Combine(
                 repositoryRoot, "Core", "Controllers", "DanmuController.cs"));
             var library = File.ReadAllText(Path.Combine(repositoryRoot, "LibraryManagerEventsHelper.cs"));
-            Assert(controller.Contains("latest, authoritativeParentSeries, scrapers") &&
-                   controller.Contains("authoritativeSeries).ConfigureAwait(false)") &&
-                   controller.Contains("item.ProviderIds = DanmuProviderIdResolver.GetItemLocalProviderIds(") &&
-                   library.Contains("currentItem ?? season, authoritativeSeries, scrapers") &&
-                   library.Contains("updateItem.ProviderIds = DanmuProviderIdResolver.GetItemLocalProviderIds("),
-                "Season manual binding, automatic import, and metadata writes must all use item-local IDs");
+            Assert(!controller.Contains("GetSeasonScopes(latest)") &&
+                    !controller.Contains("TryGetSavedManualBinding(\n                    true,\n                    scrapers") &&
+                    Regex.IsMatch(controller,
+                        @"GetSingleEpisodeDirectScopes\(latest\)[\s\S]{0,300}authoritativeSeries,[\s\S]{0,100}cancellationToken\)\.ConfigureAwait\(false\)") &&
+                    controller.Contains("_libraryManagerEventsHelper.SaveProviderId(item, providerId, providerValue, true)") &&
+                    controller.Contains("CommitSeasonDisplayMirrorAfterTerminalAsync") &&
+                    library.Contains("UpsertSeasonDisplayMirrorAsync") &&
+                    !library.Contains("SaveAutomaticSeasonProviderId"),
+                "r4 must retain item-local Movie/Episode paths while Season matching is fresh-plan only and mirrors only at terminal completion");
         }
 
         private static void DiscoversCandidatesWithBoundedTitleClauses()
         {
-            const string title = "爱书的下克上：为了成为图书管理员不择手段！";
-            var clauses = DanmuTitleClauseExtractor.Extract(title, new[] { title });
-            Assert(clauses.SequenceEqual(new[] { "爱书的下克上", "为了成为图书管理员不择手段" }),
-                "explicit Chinese punctuation should yield bounded meaningful clauses");
-            Assert(DanmuTitleClauseExtractor.Extract("动画：A：正片：有效标题", null)
-                    .SequenceEqual(new[] { "有效标题" }),
-                "short and generic fragments must not create search rounds");
-            Assert(DanmuTitleClauseExtractor.ExtractProviderAliases(
-                    new[] { "小书痴的下克上 〜为了成为图书管理员而不择手段〜 第三季" },
-                    new[] { title })
-                    .SequenceEqual(new[] { "小书痴的下克上", "为了成为图书管理员而不择手段" }),
-                "a related provider title should yield bounded season-suffix-free aliases without a static dictionary");
+            var repositoryRoot = Path.GetFullPath(Path.Combine(
+                AppContext.BaseDirectory, "..", "..", "..", ".."));
+            var engine = File.ReadAllText(Path.Combine(repositoryRoot, "Scraper", "DanmuMatchSearchEngine.cs"))
+                .Replace("\r\n", "\n");
+            var controller = File.ReadAllText(Path.Combine(
+                repositoryRoot, "Core", "Controllers", "DanmuController.cs")).Replace("\r\n", "\n");
+            var resolver = File.ReadAllText(Path.Combine(
+                repositoryRoot, "Scraper", "DanmuProviderIdResolver.cs")).Replace("\r\n", "\n");
 
-            var preferred = new FakeScraper("PreferredID", null, false, null, null,
-                new Dictionary<string, List<ScraperSearchInfo>>(StringComparer.OrdinalIgnoreCase)
-                {
-                    ["为了成为图书管理员不择手段"] = new List<ScraperSearchInfo>
-                    {
-                        new ScraperSearchInfo
-                        {
-                            Id = "preferred-clause",
-                            Name = title,
-                            Year = 2022,
-                            EpisodeSize = 12,
-                        },
-                    },
-                });
-            var alreadyConfident = new FakeScraper("LaterID", null, false, null, null,
-                new Dictionary<string, List<ScraperSearchInfo>>(StringComparer.OrdinalIgnoreCase)
-                {
-                    [title] = new List<ScraperSearchInfo>
-                    {
-                        new ScraperSearchInfo
-                        {
-                            Id = "later-standard",
-                            Name = title,
-                            Year = 2022,
-                            EpisodeSize = 12,
-                        },
-                    },
-                });
-            var search = DanmuMatchSearchEngine.SearchSeasonAsync(
-                    new AbstractScraper[] { preferred, alreadyConfident },
-                    title, title, 2022, 12, null, null)
-                .GetAwaiter().GetResult();
-            Assert(search.Candidates.Any(x => x.Id == "preferred-clause") &&
-                   DanmuMatchScorer.SelectAutoCandidate(search.Candidates)?.Id == "preferred-clause",
-                "a confident clause result from the earlier configured provider must participate in normal scoring");
-            Assert(!alreadyConfident.ApiKeywords.Contains("为了成为图书管理员不择手段"),
-                "a provider with a confident standard result should not receive clause fallback");
-
-            var aliasProvider = new FakeScraper("AliasID", null, false, null, null,
-                new Dictionary<string, List<ScraperSearchInfo>>(StringComparer.OrdinalIgnoreCase)
-                {
-                    [title] = new List<ScraperSearchInfo>
-                    {
-                        new ScraperSearchInfo
-                        {
-                            Id = "15634",
-                            Name = "小书痴的下克上 〜为了成为图书管理员而不择手段〜 第三季",
-                            Year = 2022,
-                            EpisodeSize = 10,
-                        },
-                    },
-                    ["小书痴的下克上"] = new List<ScraperSearchInfo>
-                    {
-                        new ScraperSearchInfo
-                        {
-                            Id = "15293",
-                            Name = "小书痴的下克上 〜为了成为图书管理员而不择手段〜 第二季",
-                            Year = 2020,
-                            EpisodeSize = 12,
-                        },
-                    },
-                });
-            var aliasSearch = DanmuMatchSearchEngine.SearchSeasonAsync(
-                    new[] { aliasProvider }, title, "第 2 季", 2026, 12, null, null)
-                .GetAwaiter().GetResult();
-            Assert(aliasProvider.ApiKeywords.Contains("小书痴的下克上") &&
-                   aliasSearch.Candidates.Any(x => x.Id == "15293"),
-                "provider-local second-hop aliases must discover otherwise hidden seasons without changing full-title scoring");
-
-            var custom = new FakeScraper("CustomID", null, false, null, null,
-                new Dictionary<string, List<ScraperSearchInfo>>());
-            DanmuMatchSearchEngine.SearchSeasonAsync(
-                    new[] { custom }, title, title, 2022, 12, "只搜索这个词", null)
-                .GetAwaiter().GetResult();
-            Assert(custom.ApiKeywords.SequenceEqual(new[] { "只搜索这个词" }),
-                "an explicit custom keyword must remain isolated from derived clauses");
+            Assert(engine.Contains(".Take(string.IsNullOrWhiteSpace(keywordOverride) ? 2 : 1)") &&
+                   !engine.Contains("DanmuTitleClauseExtractor") &&
+                   !engine.Contains("ExtractProviderAliases"),
+                "Season search must use only bounded standard metadata terms and must not derive punctuation or provider-result aliases");
+            Assert(engine.Contains("// Movies intentionally have one standard metadata term.") &&
+                   !engine.Contains("var clauses = DanmuTitleClauseExtractor.Extract(movieName"),
+                "Movie search must issue exactly one standard or explicit metadata term without a second hop");
+            Assert(resolver.Contains("GetSingleEpisodeDirectScopes(Episode episode)") &&
+                   resolver.Contains("new BaseItem[] { episode }") &&
+                   controller.Contains("DanmuProviderIdResolver.GetSingleEpisodeDirectScopes(latest)"),
+                "the single Episode direct path must never include a Season scope");
+            Assert(controller.Contains("InitializeDecision(result, episodeScrapers, forceSearch);") &&
+                   controller.Contains("if (!forceSearch)\n            {\n                var providerDecision = await DanmuProviderIdResolver.ResolveAsync(\n                    episodeScrapers,") &&
+                   controller.Contains("var rematch = IsRematch(request);"),
+                "force/rematch must bypass Episode direct lookup before search fallback");
+            Assert(CountOccurrences(controller, "result.ResolvedScopeType = decision.ResolvedScopeType;") == 2 &&
+                   CountOccurrences(controller, "result.ResolvedScopeItemId = decision.ResolvedScopeItemId;") == 2 &&
+                   CountOccurrences(controller, "target.ResolvedScopeType = source.ResolvedScopeType;") == 3 &&
+                   CountOccurrences(controller, "target.ResolvedScopeItemId = source.ResolvedScopeItemId;") == 3,
+                "every ApplyProviderDecision and CopyDecision path must preserve resolved scope provenance");
         }
 
         private static void NormalizesDandanStandaloneSeasonOrdinals()
@@ -918,19 +958,19 @@ namespace Emby.Plugin.Danmu.RegressionTests
             var controller = File.ReadAllText(Path.Combine(repositoryRoot, "Core", "Controllers", "DanmuController.cs"));
             var library = File.ReadAllText(Path.Combine(repositoryRoot, "LibraryManagerEventsHelper.cs"));
             Assert(controller.Contains("PersistProviderIdAfterAcceptedOutcome(episode, outcome)") &&
-                   controller.Contains("PersistSeasonProviderIdAfterAcceptedOutcome(") &&
-                   controller.Contains("task.SeasonProviderWriteGeneration") &&
-                   controller.Contains("task.SeasonProviderCommitted") &&
-                   controller.Contains("if (request.Manual)") &&
-                   controller.Contains("SaveManualBindingAsync(season"),
-                "tracked Season downloads must write each successful Episode and commit the Season only from accepted file success");
-            Assert(library.Contains("anyFilePersisted = true") &&
-                   library.Contains("SaveAutomaticSeasonProviderId(") &&
-                   library.Contains("MarkStarted(GetProviderWriteKey(item, providerId), generation)") &&
-                   library.Contains("_scraperManager.AllWithNoEnabled()") &&
-                   library.Contains("DanmuProviderIdWritePolicy.BuildSuccessfulWrite(") &&
-                   library.Contains("updateItem is Season || updateItem is Episode"),
-                "automatic import, latest-started protection, and all-registered ordinary-ID cleanup must share the success-gated persistence path");
+                    !controller.Contains("PersistSeasonProviderIdAfterAcceptedOutcome(") &&
+                    controller.Contains("CommitSeasonDisplayMirrorAfterTerminalAsync") &&
+                    controller.Contains("CanPersistCompleteSeasonBinding") &&
+                   controller.Contains("ErrorCode = \"mapping_required\"") &&
+                   controller.Contains("ErrorCode = \"partial_confirmation_required\""),
+                "mapped Season downloads must write each successful Episode, persist a Season binding only for a complete single-source plan, and reject positional or unconfirmed partial downloads");
+            Assert(library.Contains("persisted = true") &&
+                    !library.Contains("SaveAutomaticSeasonProviderId(") &&
+                    library.Contains("SeasonDisplayMirrorPolicy.CanCommit") &&
+                    library.Contains("acceptedCount") && library.Contains("anyFailed") &&
+                    library.Contains("MarkStarted(GetProviderWriteKey(item, providerId), generation)") &&
+                    library.Contains("UpsertSeasonDisplayMirrorAsync"),
+                "automatic import must write a Season display mirror only after complete accepted terminal success");
         }
 
         private static void PreservesSeriesPreviewProviderIdContract()
@@ -938,7 +978,8 @@ namespace Emby.Plugin.Danmu.RegressionTests
             var repositoryRoot = Path.GetFullPath(Path.Combine(
                 AppContext.BaseDirectory, "..", "..", "..", ".."));
             var controller = File.ReadAllText(Path.Combine(
-                repositoryRoot, "Core", "Controllers", "DanmuController.cs"));
+                    repositoryRoot, "Core", "Controllers", "DanmuController.cs"))
+                .Replace("\r\n", "\n");
             var seriesStart = controller.IndexOf("else if (item is Series series)", StringComparison.Ordinal);
             var seriesEnd = controller.IndexOf("if (request.SeasonNumber.HasValue", seriesStart, StringComparison.Ordinal);
             var seriesPreview = controller.Substring(seriesStart, seriesEnd - seriesStart);
@@ -948,11 +989,13 @@ namespace Emby.Plugin.Danmu.RegressionTests
                    seriesPreview.Contains("Recursive = false") &&
                    !seriesPreview.Contains("DtoOptions"),
                 "Series match preview must enumerate direct, non-projected library Seasons with ProviderIds intact");
-            Assert(controller.Contains("item is Series,\n                    item as Series).ConfigureAwait(false)") &&
+            Assert(controller.Contains("item is Series,") &&
+                   controller.Contains("item as Series,") &&
                    controller.Contains("bool preserveProvidedSeason = false") &&
                    controller.Contains("Series explicitParentSeries = null") &&
                    controller.Contains("_libraryManager.GetItemById(parentSeries.InternalId)") &&
-                   controller.Contains("? season\n                : _libraryManager.GetItemById(season.Id)"),
+                   controller.Contains("var latest = preserveProvidedSeason") &&
+                   controller.Contains(": _libraryManager.GetItemById(season.Id) as Season ?? season"),
                 "Series preview must pass its entry Series explicitly while direct Season/Episode paths refresh the parent by InternalId");
 
             var scraper = new FakeScraper("SeriesSeasonID", null, false, new Dictionary<string, ScraperMedia>
@@ -1136,9 +1179,11 @@ namespace Emby.Plugin.Danmu.RegressionTests
             var tencent = File.ReadAllText(Path.Combine(repositoryRoot, "Scraper", "Tencent", "Tencent.cs"));
             var youku = File.ReadAllText(Path.Combine(repositoryRoot, "Scraper", "Youku", "Youku.cs"));
 
-            Assert(dandan.Contains("Dandan's existing detail endpoint accepts Anime IDs") &&
-                   !dandan.Contains("return new ScraperEpisode() { Id = id, CommentId = id }"),
-                "Dandan Episode ProviderIds must fail closed when no exact episode detail endpoint exists");
+            Assert(dandan.Contains("DandanEpisodeId.TryGetAnimeId(id, out var animeId)") &&
+                   dandan.Contains("includeNonMainEpisodes: true") &&
+                   dandan.Contains("DandanEpisodeId.CreateVerifiedEpisode(id, anime?.Episodes)") &&
+                   !dandan.Contains("Dandan's existing detail endpoint accepts Anime IDs"),
+                "Dandan Episode ProviderIds must derive only a candidate Anime parent, then verify the complete EpisodeId from detail before becoming exact evidence");
             Assert(mgtv.Contains("GetVideoAsync(seasonId") &&
                    mgtv.Contains("string.Equals(x.VideoId, id") &&
                    tencent.Contains("GetVideoAsync(seasonId") &&
@@ -1762,6 +1807,26 @@ namespace Emby.Plugin.Danmu.RegressionTests
             }
         }
 
+        private static void PreservesStrmIndependentSeasonResolutionContract()
+        {
+            var controllerSource = File.ReadAllText(Path.GetFullPath(Path.Combine(
+                AppContext.BaseDirectory, "..", "..", "..", "..", "Core", "Controllers", "DanmuController.cs")));
+            var start = controllerSource.IndexOf(
+                "private Season ResolveSeason(DanmuParams request)", StringComparison.Ordinal);
+            var end = controllerSource.IndexOf(
+                "private static Season SelectSeasonByContext", start, StringComparison.Ordinal);
+            Assert(start >= 0 && end > start,
+                "the Season context resolver must remain available to direct and fallback matching entry points");
+            var resolver = controllerSource.Substring(start, end - start);
+            Assert(resolver.Contains("_libraryManager.GetItemById(request.Id) as Season") &&
+                   resolver.Contains("_libraryManager.GetItemById(request.SeriesId) as Series") &&
+                   resolver.Contains("SelectSeasonByContext(seasons, request)") &&
+                   !resolver.Contains(".Path") &&
+                   !resolver.Contains("ContainingFolderPath") &&
+                   !resolver.Contains("FileNameWithoutExtension"),
+                "Season resolution must use Emby ItemId/Series context and remain independent of STRM or physical media paths");
+        }
+
         private static int CountOccurrences(string text, string value)
         {
             var count = 0;
@@ -1991,7 +2056,7 @@ namespace Emby.Plugin.Danmu.RegressionTests
             public override Task<ScraperDanmaku> GetDanmuContent(BaseItem item, string commentId) => Task.FromResult<ScraperDanmaku>(null);
         }
 
-        private static void Assert(bool condition, string message)
+        internal static void Assert(bool condition, string message)
         {
             if (!condition)
             {

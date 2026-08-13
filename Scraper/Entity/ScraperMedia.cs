@@ -36,6 +36,11 @@ namespace Emby.Plugin.Danmu.Scraper.Entity
         /// </summary>
         public string Id { get; set; }
         public string CommentId { get; set; }
+        /// <summary>
+        /// Stable parent media identity when an exact Episode response can
+        /// verify it. Empty means the provider exposed only an episode token.
+        /// </summary>
+        public string ParentMediaId { get; set; }
         public string Title { get; set; } = string.Empty;
 
         /// <summary>

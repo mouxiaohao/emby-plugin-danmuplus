@@ -1,0 +1,3 @@
+artifacts/2.0.3r2/DanmuSmartMatch.CustomCssJS.js -text whitespace=cr-at-eol
+artifacts/2.0.3r2/restart_emby.sh -text
+artifacts/2.0.3r2/update_customcssjs.py -text

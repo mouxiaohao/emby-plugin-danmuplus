@@ -1,7 +1,9 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
+using Emby.Plugin.Danmu.Core;
 using Emby.Plugin.Danmu.Core.Extensions;
 using Emby.Plugin.Danmu.Model;
 using Emby.Plugin.Danmu.Scraper.Entity;
@@ -32,6 +34,16 @@ namespace Emby.Plugin.Danmu.Scraper
         public static BaseItem[] GetEpisodeScopes(Episode episode, Season season)
         {
             return new BaseItem[] { episode, season }.Where(x => x != null).ToArray();
+        }
+
+        /// <summary>
+        /// Direct evidence for a single-Episode decision must be owned by that
+        /// Episode. The containing Season is search context, not Episode-local
+        /// ProviderId evidence.
+        /// </summary>
+        public static BaseItem[] GetSingleEpisodeDirectScopes(Episode episode)
+        {
+            return episode == null ? Array.Empty<BaseItem>() : new BaseItem[] { episode };
         }
 
         public static ProviderIdDictionary GetItemLocalProviderIds(
@@ -78,7 +90,8 @@ namespace Emby.Plugin.Danmu.Scraper
             IEnumerable<AbstractScraper> scraperSource,
             IEnumerable<BaseItem> itemScopes,
             ILogger logger,
-            Series parentSeries = null)
+            Series parentSeries = null,
+            CancellationToken cancellationToken = default(CancellationToken))
         {
             var decision = new DanmuMatchDecision();
             var scrapers = (scraperSource ?? Enumerable.Empty<AbstractScraper>())
@@ -95,6 +108,7 @@ namespace Emby.Plugin.Danmu.Scraper
                 var key = scraper.ProviderId;
                 foreach (var scope in scopes)
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
                     var localProviderIds = scope is Season && parentSeries != null
                         ? GetItemLocalProviderIds(scope, parentSeries, scrapers)
                         : GetItemLocalProviderIds(scope, scrapers);
@@ -107,24 +121,38 @@ namespace Emby.Plugin.Danmu.Scraper
                     foundIdentifier = true;
                     try
                     {
-                        ScraperMedia media;
-                        if (scope is Episode)
+                        var resolution = await BoundedSearchPolicy.Shared.ExecuteAsync(
+                            scraper.ProviderId,
+                            ignored => scope is Episode
+                                ? ResolveDirectEpisodeMediaAsync(
+                                    scraper, (Episode)scope, externalId, ((Episode)scope).IndexNumber ?? 0)
+                                : scraper.GetMedia(scope, externalId),
+                            cancellationToken).ConfigureAwait(false);
+                        if (resolution.Status != BoundedSearchExecutionStatus.Completed)
                         {
-                            media = await ResolveDirectEpisodeMediaAsync(
-                                scraper, (Episode)scope, externalId, ((Episode)scope).IndexNumber ?? 0)
-                                .ConfigureAwait(false);
+                            // A caller cancellation is an operation boundary,
+                            // not a failed ProviderId lookup. Preserve it for
+                            // the interactive/automatic operation coordinator.
+                            cancellationToken.ThrowIfCancellationRequested();
+                            decision.Diagnostics.Add("provider-id-unresolved:" + scraper.ProviderId);
+                            continue;
                         }
-                        else
-                        {
-                            media = await scraper.GetMedia(scope, externalId).ConfigureAwait(false);
-                        }
+
+                        var media = resolution.Result;
                         if (!IsUsable(media))
                         {
                             decision.Diagnostics.Add("provider-id-unresolved:" + scraper.ProviderId);
                             continue;
                         }
 
-                        var resolvedId = string.IsNullOrWhiteSpace(media.Id) ? externalId : media.Id;
+                        // An Episode ProviderId is a precise lookup token even
+                        // if its verified response also reveals a canonical
+                        // parent media identity. Keep the token in Candidate.Id
+                        // for exact download/retry; the media carries the
+                        // stable parent identity for composite planning.
+                        var resolvedId = scope is Episode
+                            ? externalId
+                            : string.IsNullOrWhiteSpace(media.Id) ? externalId : media.Id;
                         decision.Scraper = scraper;
                         decision.Media = media;
                         decision.MatchOrigin = "provider-id";
@@ -147,6 +175,10 @@ namespace Emby.Plugin.Danmu.Scraper
                         };
                         ApplyResolvedUpstreamMetadata(decision.Candidate, media);
                         return decision;
+                    }
+                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                    {
+                        throw;
                     }
                     catch (Exception ex)
                     {
@@ -190,7 +222,12 @@ namespace Emby.Plugin.Danmu.Scraper
 
             return new ScraperMedia
             {
-                Id = providerId,
+                // The lookup token remains the saved Episode ProviderId. When
+                // a provider verified parent ownership, expose that canonical
+                // media identity so composite planning can distinguish S1/S2.
+                Id = !string.IsNullOrWhiteSpace(sourceEpisode.ParentMediaId)
+                    ? sourceEpisode.ParentMediaId
+                    : providerId,
                 ProviderId = scraper.ProviderId,
                 Title = sourceEpisode.Title ?? string.Empty,
                 EpisodeCount = 1,
@@ -200,6 +237,7 @@ namespace Emby.Plugin.Danmu.Scraper
                     {
                         Id = sourceEpisode.Id,
                         CommentId = sourceEpisode.CommentId,
+                        ParentMediaId = sourceEpisode.ParentMediaId,
                         Title = sourceEpisode.Title,
                         // The direct id already identifies this exact source episode.
                         // Prefer a reliable upstream number, then the local number;

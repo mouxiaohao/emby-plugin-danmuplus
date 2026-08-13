@@ -1,6 +1,6 @@
 # emby-plugin-danmuplus
 
-Emby 弹幕插件增强版，参考 [fengymi/emby-plugin-danmu](https://github.com/fengymi/emby-plugin-danmu) 开发。当前版本为 **2.0.2r4**，已在 Synology 套件版 Emby **4.9.3.0** 上验证。
+Emby 弹幕插件增强版，参考 [fengymi/emby-plugin-danmu](https://github.com/fengymi/emby-plugin-danmu) 开发。当前版本为 **2.0.3r9**，已在 Synology 套件版 Emby **4.9.5.0** 上验证。
 
 版本变化请查看 [完整更新日志（UPDATE.md）](UPDATE.md)。README 只汇总 DanmuPlus 相比旧版 Danmu 插件的重要使用功能变化。
 

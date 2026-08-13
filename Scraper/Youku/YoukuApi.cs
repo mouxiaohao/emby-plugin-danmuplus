@@ -34,6 +34,7 @@ namespace Emby.Plugin.Danmu.Scraper.Youku
 
         public async Task<List<YoukuVideo>> SearchAsync(string keyword, CancellationToken cancellationToken)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             if (string.IsNullOrEmpty(keyword))
             {
                 return new List<YoukuVideo>();
@@ -47,7 +48,7 @@ namespace Emby.Plugin.Danmu.Scraper.Youku
                 return cacheValue;
             }
 
-            await this.LimitRequestFrequently();
+            await this.LimitRequestFrequently(cancellationToken).ConfigureAwait(false);
 
             keyword = HttpUtility.UrlEncode(keyword);
             var ua = HttpUtility.UrlEncode(AbstractApi.HTTP_USER_AGENT);

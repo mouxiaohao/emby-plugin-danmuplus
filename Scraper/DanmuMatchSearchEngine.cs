@@ -1,7 +1,10 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
+using Emby.Plugin.Danmu.Core;
 using Emby.Plugin.Danmu.Core.Extensions;
 using Emby.Plugin.Danmu.Model;
 using Emby.Plugin.Danmu.Scraper.Entity;
@@ -11,9 +14,9 @@ using MediaBrowser.Model.Logging;
 namespace Emby.Plugin.Danmu.Scraper
 {
     /// <summary>
-    /// Performs provider-neutral season searches.  Both the manual matching API and
-    /// automatic library-import flow use this class so their candidate sets and
-    /// selection decisions cannot drift apart.
+    /// Provider-neutral, bounded candidate discovery.  All planned terms are
+    /// known before execution. Terms remain serial per provider while provider
+    /// work shares one global bounded gate across interactive and import paths.
     /// </summary>
     public static class DanmuMatchSearchEngine
     {
@@ -26,155 +29,101 @@ namespace Emby.Plugin.Danmu.Scraper
             string keywordOverride,
             ILogger logger)
         {
-            var result = new DanmuMatchSearchResult();
+            using (var automaticDeadline = new CancellationTokenSource(
+                BoundedSearchPolicy.Shared.Options.AutomaticOperationTimeout))
+            {
+                return await SearchSeasonAsync(
+                    scraperSource,
+                    seriesName,
+                    seasonName,
+                    expectedYear,
+                    expectedEpisodes,
+                    keywordOverride,
+                    logger,
+                    BoundedSearchPolicy.Shared,
+                    automaticDeadline.Token).ConfigureAwait(false);
+            }
+        }
+
+        public static async Task<DanmuMatchSearchResult> SearchSeasonAsync(
+            IEnumerable<AbstractScraper> scraperSource,
+            string seriesName,
+            string seasonName,
+            int? expectedYear,
+            int expectedEpisodes,
+            string keywordOverride,
+            ILogger logger,
+            BoundedSearchPolicy policy,
+            CancellationToken cancellationToken)
+        {
+            return await SearchSeasonAsync(
+                scraperSource,
+                seriesName,
+                seasonName,
+                expectedYear,
+                expectedEpisodes,
+                keywordOverride,
+                logger,
+                policy,
+                cancellationToken,
+                cancellationToken).ConfigureAwait(false);
+        }
+
+        /// <summary>
+        /// Separates the bounded child execution token from the parent/user
+        /// cancellation token.  Child budget exhaustion remains an actionable
+        /// partial result; parent cancellation invalidates the whole result.
+        /// </summary>
+        public static async Task<DanmuMatchSearchResult> SearchSeasonAsync(
+            IEnumerable<AbstractScraper> scraperSource,
+            string seriesName,
+            string seasonName,
+            int? expectedYear,
+            int expectedEpisodes,
+            string keywordOverride,
+            ILogger logger,
+            BoundedSearchPolicy policy,
+            CancellationToken executionCancellationToken,
+            CancellationToken parentCancellationToken)
+        {
             var scrapers = (scraperSource ?? Enumerable.Empty<AbstractScraper>()).ToList();
-            var keywords = DanmuMatchScorer.BuildSearchKeywords(seriesName, seasonName, keywordOverride);
-            var sources = new Dictionary<string, DiscoveredSearchInfo>(StringComparer.OrdinalIgnoreCase);
-            var failedSites = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            var queried = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
-            // Keyword is the outer loop on purpose: first search the parent title on
-            // every provider, then run the more specific season-name rounds everywhere.
-            foreach (var keyword in keywords)
+            var keywords = DanmuMatchScorer.BuildSearchKeywords(seriesName, seasonName, keywordOverride)
+                .Take(string.IsNullOrWhiteSpace(keywordOverride) ? 2 : 1)
+                .Where(keyword => !string.IsNullOrWhiteSpace(keyword))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            var outcomes = await ExecutePlannedCallsAsync(
+                scrapers,
+                keywords,
+                (scraper, keyword, cancellationToken) => scraper.SearchForApi(keyword, cancellationToken),
+                searchInfo => DanmuMatchScorer.IsEligibleSeasonCandidate(
+                    searchInfo, seriesName, seasonName, keywordOverride),
+                policy,
+                executionCancellationToken,
+                logger,
+                "season").ConfigureAwait(false);
+            var result = ToResult(outcomes, parentCancellationToken);
+            if (keywords.Count == 0)
             {
-                foreach (var scraper in scrapers)
+                result.IsComplete = false;
+                result.CompletionDiagnostics.Add(new DanmuSearchCompletionDiagnostic
                 {
-                    await SearchProviderAsync(
-                        scraper, keyword, seasonName, sources, queried, failedSites, result, logger, false)
-                        .ConfigureAwait(false);
-                }
-
-                // Do not finalize after an individual keyword round.  r6 requires
-                // all enabled sites and all fallback evidence before site-priority
-                // selection, otherwise an early response can hide a better local
-                // candidate or incorrectly decide a cross-site result.
+                    Status = "invalid_metadata",
+                    Message = "An identity-bearing Series title is required for Season search.",
+                });
+                result.SearchErrors.Add("An identity-bearing Series title is required for Season search.");
             }
 
-            // Explicit custom keywords remain isolated. Otherwise, only providers
-            // that still lack a 0.90 candidate receive bounded punctuation-clause
-            // fallback rounds. Search terms discover candidates; the original full
-            // metadata remains authoritative for every score below.
-            if (string.IsNullOrWhiteSpace(keywordOverride))
-            {
-                var standardCandidates = ScoreCandidates(
-                    sources, scrapers, seriesName, seasonName, expectedYear, expectedEpisodes);
-                var confidentSites = new HashSet<string>(
-                    standardCandidates.Where(x => x.Score >= 0.90).Select(x => x.Site),
-                    StringComparer.OrdinalIgnoreCase);
-                var clauses = DanmuTitleClauseExtractor.Extract(seriesName, keywords);
-
-                foreach (var scraper in scrapers.Where(x => !confidentSites.Contains(x.ProviderId)))
-                {
-                    foreach (var clause in clauses)
-                    {
-                        await SearchProviderAsync(
-                            scraper, clause, seasonName, sources, queried, failedSites, result, logger, true)
-                            .ConfigureAwait(false);
-
-                        var providerConfident = ScoreCandidates(
-                                sources, scrapers, seriesName, seasonName, expectedYear, expectedEpisodes)
-                            .Any(x => string.Equals(x.Site, scraper.ProviderId, StringComparison.OrdinalIgnoreCase) &&
-                                      x.Score >= 0.90);
-                        if (providerConfident)
-                        {
-                            break;
-                        }
-                    }
-
-                    var providerScores = ScoreCandidates(
-                            sources, scrapers, seriesName, seasonName, expectedYear, expectedEpisodes)
-                        .Where(x => string.Equals(
-                            x.Site, scraper.ProviderId, StringComparison.OrdinalIgnoreCase))
-                        .ToList();
-                    if (providerScores.Any(x => x.Score >= 0.90))
-                    {
-                        continue;
-                    }
-
-                    // A provider may know the same work under an upstream alias.
-                    // Derive at most two second-hop terms from already discovered,
-                    // strongly related titles. This is provider-local and contains
-                    // no title-specific alias dictionary.
-                    var providerAliases = DanmuTitleClauseExtractor.ExtractProviderAliases(
-                        providerScores
-                            .Where(x => x.ParentTitleScore >= 0.72)
-                            .OrderByDescending(x => x.ParentTitleScore)
-                            .ThenBy(x => x.Name, StringComparer.Ordinal)
-                            .Select(x => x.Name),
-                        keywords.Concat(clauses));
-                    foreach (var providerAlias in providerAliases)
-                    {
-                        await SearchProviderAsync(
-                            scraper, providerAlias, seasonName, sources, queried, failedSites, result, logger, true)
-                            .ConfigureAwait(false);
-                        if (ScoreCandidates(
-                                sources, scrapers, seriesName, seasonName, expectedYear, expectedEpisodes)
-                            .Any(x => string.Equals(
-                                          x.Site, scraper.ProviderId, StringComparison.OrdinalIgnoreCase) &&
-                                      x.Score >= 0.90))
-                        {
-                            break;
-                        }
-                    }
-                }
-            }
-
-            result.Candidates = ScoreCandidates(
-                sources,
+            result.CanonicalCandidates = ScoreCandidates(
+                MergeSources(outcomes),
                 scrapers,
                 seriesName,
                 seasonName,
                 expectedYear,
                 expectedEpisodes);
-
+            result.Candidates = OrderCandidates(result.CanonicalCandidates);
+            ClassifyResult(result);
             return result;
-        }
-
-        private static async Task SearchProviderAsync(
-            AbstractScraper scraper,
-            string keyword,
-            string seasonName,
-            IDictionary<string, DiscoveredSearchInfo> sources,
-            ISet<string> queried,
-            ISet<string> failedSites,
-            DanmuMatchSearchResult result,
-            ILogger logger,
-            bool aliasRound)
-        {
-            if (scraper == null || string.IsNullOrWhiteSpace(keyword) ||
-                !queried.Add(BuildKey(scraper.ProviderId, DanmuMatchScorer.Normalize(keyword))))
-            {
-                return;
-            }
-
-            try
-            {
-                var searchResults = await scraper.SearchForApi(keyword).ConfigureAwait(false);
-                foreach (var searchInfo in searchResults ?? new List<ScraperSearchInfo>())
-                {
-                    if (searchInfo == null || string.IsNullOrWhiteSpace(searchInfo.Id) ||
-                        string.IsNullOrWhiteSpace(searchInfo.Name))
-                    {
-                        continue;
-                    }
-
-                    AddDiscoveredSource(sources, scraper.ProviderId, searchInfo, aliasRound);
-                }
-            }
-            catch (Exception ex)
-            {
-                if (failedSites.Add(scraper.ProviderId))
-                {
-                    result.SearchErrors.Add(scraper.ProviderName + "：搜索失败");
-                }
-
-                logger?.LogError(
-                    ex,
-                    "[{0}] 智能匹配搜索失败: keyword={1}, season={2}",
-                    scraper.Name,
-                    keyword,
-                    seasonName);
-            }
         }
 
         public static async Task<DanmuMatchSearchResult> SearchMovieAsync(
@@ -183,123 +132,213 @@ namespace Emby.Plugin.Danmu.Scraper
             string keywordOverride,
             ILogger logger)
         {
-            var result = new DanmuMatchSearchResult();
-            var scrapers = (scraperSource ?? Enumerable.Empty<AbstractScraper>()).ToList();
-            var movieName = string.IsNullOrWhiteSpace(keywordOverride) ? movie?.Name : keywordOverride.Trim();
-            var sources = new Dictionary<string, DiscoveredSearchInfo>(StringComparer.OrdinalIgnoreCase);
-            var failedSites = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            var queried = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
-            foreach (var scraper in scrapers)
+            using (var automaticDeadline = new CancellationTokenSource(
+                BoundedSearchPolicy.Shared.Options.AutomaticOperationTimeout))
             {
-                await SearchMovieProviderAsync(
-                    scraper, movieName, movie?.ProductionYear, sources, queried, failedSites, result, logger, false)
-                    .ConfigureAwait(false);
+                return await SearchMovieAsync(
+                    scraperSource,
+                    movie,
+                    keywordOverride,
+                    logger,
+                    BoundedSearchPolicy.Shared,
+                    automaticDeadline.Token).ConfigureAwait(false);
             }
-
-            if (string.IsNullOrWhiteSpace(keywordOverride))
-            {
-                var standardCandidates = ScoreMovieCandidates(
-                    sources, scrapers, movieName, movie?.ProductionYear);
-                var confidentSites = new HashSet<string>(
-                    standardCandidates.Where(x => x.Score >= 0.90).Select(x => x.Site),
-                    StringComparer.OrdinalIgnoreCase);
-                var clauses = DanmuTitleClauseExtractor.Extract(movieName, new[] { movieName });
-
-                foreach (var scraper in scrapers.Where(x => !confidentSites.Contains(x.ProviderId)))
-                {
-                    foreach (var clause in clauses)
-                    {
-                        await SearchMovieProviderAsync(
-                            scraper, clause, movie?.ProductionYear, sources, queried, failedSites, result, logger, true)
-                            .ConfigureAwait(false);
-                        if (ScoreMovieCandidates(sources, scrapers, movieName, movie?.ProductionYear)
-                            .Any(x => string.Equals(x.Site, scraper.ProviderId, StringComparison.OrdinalIgnoreCase) &&
-                                      x.Score >= 0.90))
-                        {
-                            break;
-                        }
-                    }
-
-                    var providerScores = ScoreMovieCandidates(
-                            sources, scrapers, movieName, movie?.ProductionYear)
-                        .Where(x => string.Equals(x.Site, scraper.ProviderId, StringComparison.OrdinalIgnoreCase))
-                        .ToList();
-                    if (providerScores.Any(x => x.Score >= 0.90))
-                    {
-                        continue;
-                    }
-
-                    var aliases = DanmuTitleClauseExtractor.ExtractProviderAliases(
-                        providerScores
-                            .Where(x => x.ParentTitleScore >= 0.72)
-                            .OrderByDescending(x => x.ParentTitleScore)
-                            .ThenBy(x => x.Name, StringComparer.Ordinal)
-                            .Select(x => x.Name),
-                        new[] { movieName }.Concat(clauses));
-                    foreach (var alias in aliases)
-                    {
-                        await SearchMovieProviderAsync(
-                            scraper, alias, movie?.ProductionYear, sources, queried, failedSites, result, logger, true)
-                            .ConfigureAwait(false);
-                        if (ScoreMovieCandidates(sources, scrapers, movieName, movie?.ProductionYear)
-                            .Any(x => string.Equals(x.Site, scraper.ProviderId, StringComparison.OrdinalIgnoreCase) &&
-                                      x.Score >= 0.90))
-                        {
-                            break;
-                        }
-                    }
-                }
-            }
-
-            result.Candidates = ScoreMovieCandidates(sources, scrapers, movieName, movie?.ProductionYear);
-            return result;
         }
 
-        private static async Task SearchMovieProviderAsync(
-            AbstractScraper scraper,
-            string keyword,
-            int? expectedYear,
-            IDictionary<string, DiscoveredSearchInfo> sources,
-            ISet<string> queried,
-            ISet<string> failedSites,
-            DanmuMatchSearchResult result,
+        public static async Task<DanmuMatchSearchResult> SearchMovieAsync(
+            IEnumerable<AbstractScraper> scraperSource,
+            Movie movie,
+            string keywordOverride,
             ILogger logger,
-            bool aliasRound)
+            BoundedSearchPolicy policy,
+            CancellationToken cancellationToken)
         {
-            if (scraper == null || string.IsNullOrWhiteSpace(keyword) ||
-                !queried.Add(BuildKey(scraper.ProviderId, DanmuMatchScorer.Normalize(keyword))))
-            {
-                return;
-            }
-
-            try
-            {
-                var searchResults = await scraper.Search(new Movie
+            var scrapers = (scraperSource ?? Enumerable.Empty<AbstractScraper>()).ToList();
+            var movieName = string.IsNullOrWhiteSpace(keywordOverride) ? movie?.Name : keywordOverride.Trim();
+            var expectedYear = movie?.ProductionYear;
+            // Movies intentionally have one standard metadata term.
+            var keywords = string.IsNullOrWhiteSpace(movieName)
+                ? new List<string>()
+                : new List<string> { movieName };
+            var outcomes = await ExecutePlannedCallsAsync(
+                scrapers,
+                keywords,
+                (scraper, keyword, cancellationToken) => scraper.Search(new Movie
                 {
                     Name = keyword.Trim(),
                     ProductionYear = expectedYear,
-                }).ConfigureAwait(false);
-                foreach (var searchInfo in searchResults ?? new List<ScraperSearchInfo>())
-                {
-                    if (searchInfo == null || string.IsNullOrWhiteSpace(searchInfo.Id) ||
-                        string.IsNullOrWhiteSpace(searchInfo.Name) ||
-                        DanmuMatchScorer.IsIdentifiableNonMovie(searchInfo.Category))
-                    {
-                        continue;
-                    }
+                }, cancellationToken),
+                searchInfo => searchInfo != null &&
+                              !string.IsNullOrWhiteSpace(searchInfo.Id) &&
+                              !string.IsNullOrWhiteSpace(searchInfo.Name) &&
+                              !DanmuMatchScorer.IsIdentifiableNonMovie(searchInfo.Category),
+                policy,
+                cancellationToken,
+                logger,
+                "movie").ConfigureAwait(false);
+            var result = ToResult(outcomes, cancellationToken);
+            result.CanonicalCandidates = ScoreMovieCandidates(MergeSources(outcomes), scrapers, movieName, expectedYear);
+            result.Candidates = OrderCandidates(result.CanonicalCandidates);
+            ClassifyResult(result);
+            return result;
+        }
 
-                    AddDiscoveredSource(sources, scraper.ProviderId, searchInfo, aliasRound);
-                }
-            }
-            catch (Exception ex)
+        private static async Task<List<ProviderSearchOutcome>> ExecutePlannedCallsAsync(
+            IList<AbstractScraper> scrapers,
+            IList<string> keywords,
+            Func<AbstractScraper, string, CancellationToken, Task<List<ScraperSearchInfo>>> search,
+            Func<ScraperSearchInfo, bool> include,
+            BoundedSearchPolicy policy,
+            CancellationToken cancellationToken,
+            ILogger logger,
+            string searchKind)
+        {
+            var boundedPolicy = policy ?? BoundedSearchPolicy.Shared;
+            var tasks = new List<Task<ProviderSearchOutcome>>();
+            for (var sourceOrder = 0; sourceOrder < scrapers.Count; sourceOrder++)
             {
-                if (failedSites.Add(scraper.ProviderId))
-                {
-                    result.SearchErrors.Add(scraper.ProviderName + "：搜索失败");
-                }
-                logger?.LogError(ex, "[{0}] 电影智能匹配搜索失败: movie={1}", scraper.Name, keyword);
+                var scraper = scrapers[sourceOrder];
+                tasks.Add(ExecuteProviderCallsAsync(
+                    scraper,
+                    sourceOrder,
+                    keywords,
+                    search,
+                    include,
+                    boundedPolicy,
+                    cancellationToken,
+                    logger,
+                    searchKind));
             }
+
+            return (await Task.WhenAll(tasks).ConfigureAwait(false))
+                .OrderBy(outcome => outcome.SourceOrder)
+                .ToList();
+        }
+
+        private static async Task<ProviderSearchOutcome> ExecuteProviderCallsAsync(
+            AbstractScraper scraper,
+            int sourceOrder,
+            IEnumerable<string> keywords,
+            Func<AbstractScraper, string, CancellationToken, Task<List<ScraperSearchInfo>>> search,
+            Func<ScraperSearchInfo, bool> include,
+            BoundedSearchPolicy policy,
+            CancellationToken cancellationToken,
+            ILogger logger,
+            string searchKind)
+        {
+            var outcome = new ProviderSearchOutcome(sourceOrder, scraper);
+            var plannedKeywords = (keywords ?? Enumerable.Empty<string>()).ToList();
+            if (scraper == null)
+            {
+                foreach (var keyword in plannedKeywords)
+                {
+                    outcome.AddDiagnostic("unstarted", keyword, 0, "Provider is unavailable.", false, true);
+                }
+
+                return outcome;
+            }
+
+            // One provider's terms intentionally execute in order. A timed-out
+            // non-cooperative term retains that provider's gate until it ends,
+            // so later planned terms are cancelled by the enclosing deadline
+            // rather than running concurrently against the same site.
+            foreach (var keyword in plannedKeywords)
+            {
+                var stopwatch = Stopwatch.StartNew();
+                var execution = await policy.ExecuteAsync(
+                    scraper.ProviderId,
+                    providerCancellationToken => search(scraper, keyword, providerCancellationToken),
+                    cancellationToken).ConfigureAwait(false);
+                stopwatch.Stop();
+
+                switch (execution.Status)
+                {
+                    case BoundedSearchExecutionStatus.Completed:
+                        foreach (var searchInfo in execution.Result ?? new List<ScraperSearchInfo>())
+                        {
+                            if (include(searchInfo))
+                            {
+                                AddDiscoveredSource(outcome.Sources, scraper.ProviderId, searchInfo);
+                            }
+                        }
+
+                        outcome.AddDiagnostic("completed", keyword, stopwatch.ElapsedMilliseconds, string.Empty, false, false);
+                        break;
+
+                    case BoundedSearchExecutionStatus.ProviderTimedOut:
+                        outcome.AddDiagnostic("timed_out", keyword, stopwatch.ElapsedMilliseconds,
+                            "Provider call exceeded the bounded deadline.", true, false);
+                        break;
+
+                    case BoundedSearchExecutionStatus.Cancelled:
+                        outcome.AddDiagnostic(cancellationToken.IsCancellationRequested ? "unstarted" : "cancelled",
+                            keyword,
+                            stopwatch.ElapsedMilliseconds,
+                            cancellationToken.IsCancellationRequested
+                                ? "Search operation deadline or cancellation occurred before this call completed."
+                                : "Provider call was cancelled.",
+                            false,
+                            true);
+                        break;
+
+                    default:
+                        var error = execution.Error?.Message ?? "Provider search failed.";
+                        outcome.AddDiagnostic("failed", keyword, stopwatch.ElapsedMilliseconds, error, false, false);
+                        logger?.LogError(execution.Error,
+                            "[{0}] bounded {1} search failed: keyword={2}",
+                            scraper.Name,
+                            searchKind,
+                            keyword);
+                        break;
+                }
+            }
+
+            return outcome;
+        }
+
+        private static DanmuMatchSearchResult ToResult(
+            IEnumerable<ProviderSearchOutcome> outcomes,
+            CancellationToken cancellationToken)
+        {
+            var result = new DanmuMatchSearchResult
+            {
+                WasCancelled = cancellationToken.IsCancellationRequested,
+            };
+            foreach (var outcome in outcomes ?? Enumerable.Empty<ProviderSearchOutcome>())
+            {
+                result.CompletionDiagnostics.AddRange(outcome.Diagnostics);
+                if (outcome.Diagnostics.Any(diagnostic =>
+                    !string.Equals(diagnostic.Status, "completed", StringComparison.OrdinalIgnoreCase)))
+                {
+                    result.IsComplete = false;
+                }
+
+                foreach (var diagnostic in outcome.Diagnostics.Where(diagnostic =>
+                    !string.Equals(diagnostic.Status, "completed", StringComparison.OrdinalIgnoreCase)))
+                {
+                    var providerName = outcome.Scraper?.ProviderName ?? "Unknown provider";
+                    result.SearchErrors.Add(providerName + ": " + diagnostic.Status);
+                }
+            }
+
+            // An empty provider list is a completed no-candidate search. It is
+            // intentionally not an execution failure, preserving legacy UI.
+            return result;
+        }
+
+        private static Dictionary<string, DiscoveredSearchInfo> MergeSources(
+            IEnumerable<ProviderSearchOutcome> outcomes)
+        {
+            var sources = new Dictionary<string, DiscoveredSearchInfo>(StringComparer.OrdinalIgnoreCase);
+            foreach (var outcome in outcomes ?? Enumerable.Empty<ProviderSearchOutcome>())
+            {
+                foreach (var source in outcome.Sources.OrderBy(pair => pair.Key, StringComparer.OrdinalIgnoreCase))
+                {
+                    sources[source.Key] = source.Value;
+                }
+            }
+
+            return sources;
         }
 
         private static List<DanmuMatchCandidate> ScoreMovieCandidates(
@@ -312,20 +351,24 @@ namespace Emby.Plugin.Danmu.Scraper
             for (var sourceOrder = 0; sourceOrder < scrapers.Count; sourceOrder++)
             {
                 var scraper = scrapers[sourceOrder];
+                if (scraper == null)
+                {
+                    continue;
+                }
+
                 var prefix = scraper.ProviderId + "\u001f";
                 candidates.AddRange(sources
-                    .Where(x => x.Key.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
-                    .Select(x => DanmuMatchScorer.ScoreMovie(
-                        x.Value.Info,
+                    .Where(source => source.Key.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                    .Select(source => DanmuMatchScorer.ScoreMovie(
+                        source.Value.Info,
                         scraper.ProviderId,
                         scraper.ProviderName,
                         sourceOrder,
                         movieName,
-                        expectedYear,
-                        x.Value.AliasOnly)));
+                        expectedYear)));
             }
 
-            return OrderCandidates(candidates.Where(x => x.Score > 0));
+            return OrderCanonicalCandidates(candidates.Where(candidate => candidate.Score > 0));
         }
 
         private static List<DanmuMatchCandidate> ScoreCandidates(
@@ -340,57 +383,120 @@ namespace Emby.Plugin.Danmu.Scraper
             for (var sourceOrder = 0; sourceOrder < scrapers.Count; sourceOrder++)
             {
                 var scraper = scrapers[sourceOrder];
+                if (scraper == null)
+                {
+                    continue;
+                }
+
                 var prefix = scraper.ProviderId + "\u001f";
                 candidates.AddRange(sources
-                    .Where(x => x.Key.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
-                    .Select(x => DanmuMatchScorer.Score(
-                        x.Value.Info,
+                    .Where(source => source.Key.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                    .Select(source => DanmuMatchScorer.Score(
+                        source.Value.Info,
                         scraper.ProviderId,
                         scraper.ProviderName,
                         sourceOrder,
                         seriesName,
                         seasonName,
                         expectedYear,
-                        expectedEpisodes,
-                        x.Value.AliasOnly)));
+                        expectedEpisodes)));
             }
 
-            return OrderCandidates(candidates);
+            return OrderCanonicalCandidates(candidates);
         }
 
         public static List<DanmuMatchCandidate> OrderCandidates(IEnumerable<DanmuMatchCandidate> candidates)
         {
-            var ordered = (candidates ?? Enumerable.Empty<DanmuMatchCandidate>())
-                .OrderByDescending(x => x.Score)
-                .ThenBy(x => x.SourceOrder)
-                .ThenByDescending(x => x.TitleScore)
-                .ThenByDescending(x => x.ParentTitleScore)
-                .ThenByDescending(x => x.KeywordScore)
-                .ThenByDescending(x => x.EpisodeScore)
-                .ThenByDescending(x => x.YearScore)
-                .ThenBy(x => x.SiteName, StringComparer.OrdinalIgnoreCase)
-                .ThenBy(x => x.Name, StringComparer.OrdinalIgnoreCase)
-                .ThenBy(x => x.Id, StringComparer.OrdinalIgnoreCase)
+            const int visibleLimit = 60;
+            var groups = OrderCanonicalCandidates(candidates)
+                .GroupBy(candidate => candidate.SourceOrder)
+                .OrderBy(group => group.Key)
+                .Select(group => group.ToList())
                 .ToList();
-            var selected = DanmuMatchScorer.SelectAutoCandidate(ordered);
-            if (selected == null)
+            var allocated = new int[groups.Count];
+            var count = 0;
+            for (var groupIndex = 0; groupIndex < groups.Count && count < visibleLimit; groupIndex++)
             {
-                return ordered.Take(60).ToList();
+                allocated[groupIndex] = 1;
+                count++;
             }
 
-            // The explicit selected fields remain authoritative, but placing the
-            // chosen site's rows first makes the configured decision visible to
-            // older clients that only render candidates.
-            return ordered
-                .OrderByDescending(x => x.SourceOrder == selected.SourceOrder)
-                .ThenByDescending(x => x.SourceOrder == selected.SourceOrder ? x.Score : 0)
-                .ThenByDescending(x => x.Score)
-                .ThenBy(x => x.SourceOrder)
-                .ThenBy(x => x.SiteName, StringComparer.OrdinalIgnoreCase)
-                .ThenBy(x => x.Name, StringComparer.OrdinalIgnoreCase)
-                .ThenBy(x => x.Id, StringComparer.OrdinalIgnoreCase)
-                .Take(60)
+            while (count < visibleLimit)
+            {
+                var added = false;
+                for (var groupIndex = 0; groupIndex < groups.Count && count < visibleLimit; groupIndex++)
+                {
+                    if (allocated[groupIndex] >= groups[groupIndex].Count)
+                    {
+                        continue;
+                    }
+
+                    allocated[groupIndex]++;
+                    count++;
+                    added = true;
+                }
+
+                if (!added)
+                {
+                    break;
+                }
+            }
+
+            var projected = new List<DanmuMatchCandidate>(count);
+            for (var groupIndex = 0; groupIndex < groups.Count; groupIndex++)
+            {
+                projected.AddRange(groups[groupIndex].Take(allocated[groupIndex]));
+            }
+
+            return projected;
+        }
+
+        public static List<DanmuMatchCandidate> OrderCanonicalCandidates(
+            IEnumerable<DanmuMatchCandidate> candidates)
+        {
+            return (candidates ?? Enumerable.Empty<DanmuMatchCandidate>())
+                .Where(candidate => candidate != null)
+                .OrderBy(candidate => candidate.SourceOrder)
+                .ThenByDescending(candidate => candidate.Score)
+                .ThenByDescending(candidate => candidate.TitleScore)
+                .ThenByDescending(candidate => candidate.ParentTitleScore)
+                .ThenByDescending(candidate => candidate.KeywordScore)
+                .ThenByDescending(candidate => candidate.EpisodeScore)
+                .ThenByDescending(candidate => candidate.YearScore)
+                .ThenBy(candidate => candidate.SiteName, StringComparer.OrdinalIgnoreCase)
+                .ThenBy(candidate => candidate.Name, StringComparer.OrdinalIgnoreCase)
+                .ThenBy(candidate => candidate.Id, StringComparer.OrdinalIgnoreCase)
                 .ToList();
+        }
+
+        private static void ClassifyResult(DanmuMatchSearchResult result)
+        {
+            if (result.WasCancelled)
+            {
+                result.Decision = "cancelled";
+                result.SelectedCandidate = null;
+                return;
+            }
+
+            var selected = DanmuMatchScorer.SelectAutoCandidate(result.CanonicalCandidates);
+            if (result.IsComplete)
+            {
+                result.Decision = selected != null
+                    ? "confident"
+                    : result.CanonicalCandidates.Count > 0 ? "manual" : "no_match";
+                result.SelectedCandidate = selected;
+                return;
+            }
+
+            if (result.CanonicalCandidates.Count == 0)
+            {
+                result.Decision = "retryable-incomplete";
+                result.SelectedCandidate = null;
+                return;
+            }
+
+            result.Decision = selected != null ? "partial-confident" : "partial-manual";
+            result.SelectedCandidate = selected;
         }
 
         private static string BuildKey(string providerId, string id)
@@ -401,38 +507,66 @@ namespace Emby.Plugin.Danmu.Scraper
         private static void AddDiscoveredSource(
             IDictionary<string, DiscoveredSearchInfo> sources,
             string providerId,
-            ScraperSearchInfo searchInfo,
-            bool aliasRound)
+            ScraperSearchInfo searchInfo)
         {
             var key = BuildKey(providerId, searchInfo.Id);
-            if (!sources.TryGetValue(key, out var existing))
+            sources[key] = new DiscoveredSearchInfo
             {
-                sources[key] = new DiscoveredSearchInfo
-                {
-                    Info = searchInfo,
-                    AliasOnly = aliasRound,
-                };
-                return;
+                Info = searchInfo,
+            };
+        }
+
+        private sealed class ProviderSearchOutcome
+        {
+            public ProviderSearchOutcome(int sourceOrder, AbstractScraper scraper)
+            {
+                SourceOrder = sourceOrder;
+                Scraper = scraper;
             }
 
-            if (!aliasRound)
+            public int SourceOrder { get; }
+            public AbstractScraper Scraper { get; }
+            public Dictionary<string, DiscoveredSearchInfo> Sources { get; } =
+                new Dictionary<string, DiscoveredSearchInfo>(StringComparer.OrdinalIgnoreCase);
+            public List<DanmuSearchCompletionDiagnostic> Diagnostics { get; } =
+                new List<DanmuSearchCompletionDiagnostic>();
+
+            public void AddDiagnostic(
+                string status,
+                string keyword,
+                long elapsedMilliseconds,
+                string message,
+                bool timedOut,
+                bool cancelled)
             {
-                existing.Info = searchInfo;
-                existing.AliasOnly = false;
+                Diagnostics.Add(new DanmuSearchCompletionDiagnostic
+                {
+                    Provider = Scraper?.ProviderId ?? string.Empty,
+                    Status = status,
+                    Message = string.IsNullOrWhiteSpace(keyword) ? message : keyword + ": " + message,
+                    ElapsedMilliseconds = elapsedMilliseconds,
+                    TimedOut = timedOut,
+                    Cancelled = cancelled,
+                });
             }
         }
 
         private sealed class DiscoveredSearchInfo
         {
             public ScraperSearchInfo Info { get; set; }
-            public bool AliasOnly { get; set; }
         }
     }
 
     public sealed class DanmuMatchSearchResult
     {
+        public List<DanmuMatchCandidate> CanonicalCandidates { get; set; } = new List<DanmuMatchCandidate>();
         public List<DanmuMatchCandidate> Candidates { get; set; } = new List<DanmuMatchCandidate>();
-
+        public DanmuMatchCandidate SelectedCandidate { get; set; }
+        public string Decision { get; set; } = string.Empty;
         public List<string> SearchErrors { get; set; } = new List<string>();
+        public List<DanmuSearchCompletionDiagnostic> CompletionDiagnostics { get; set; } =
+            new List<DanmuSearchCompletionDiagnostic>();
+        public bool IsComplete { get; set; } = true;
+        public bool WasCancelled { get; set; }
     }
 }

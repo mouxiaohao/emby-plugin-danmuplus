@@ -15,8 +15,18 @@ namespace Emby.Plugin.Danmu.Scraper
     /// </summary>
     public static class DanmuMatchScorer
     {
+        public const double SeasonCandidateTitleEligibilityFloor = 0.58;
+
         private static readonly Regex SeasonNumberRegex = new Regex(
             @"(?:第\s*[0-9一二三四五六七八九十百零〇两]+\s*季|season\s*\d+)",
+            RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+        private static readonly Regex GenericSeasonLabelRegex = new Regex(
+            @"^(?:(?:第\s*)?[0-9一二三四五六七八九十百零〇两]+\s*季|season\s*\d+|s\s*\d+|part\s*\d+|第?\s*[0-9一二三四五六七八九十百零〇两]+\s*(?:部|篇))$",
+            RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+        private static readonly Regex GenericSeasonNumberRegex = new Regex(
+            @"^(?:(?:第\s*)?[0-9一二三四五六七八九十百零〇两]+\s*季|season\s*\d+|s\s*\d+)$",
             RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
         private static readonly Regex SeparatorRegex = new Regex(
@@ -30,11 +40,12 @@ namespace Emby.Plugin.Danmu.Scraper
         {
             var result = new List<string>();
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            var keyword = ExtractSeasonKeyword(seriesName, seasonName);
+            var parentTitle = SanitizeSearchTerm(seriesName);
+            var keyword = ExtractSeasonKeyword(parentTitle, seasonName);
 
             if (!string.IsNullOrWhiteSpace(keywordOverride))
             {
-                AddKeyword(result, seen, keywordOverride);
+                AddKeyword(result, seen, SanitizeSearchTerm(keywordOverride));
                 return result;
             }
 
@@ -42,20 +53,22 @@ namespace Emby.Plugin.Danmu.Scraper
             // run each round against every enabled provider before moving on, so a
             // provider near the front of the configured list cannot win merely because
             // it happened to return a season-keyword result first.
-            AddKeyword(result, seen, seriesName);
-            if (!string.IsNullOrWhiteSpace(seriesName) && !string.IsNullOrWhiteSpace(keyword))
+            if (!IsIdentityBearingTitle(parentTitle))
             {
-                AddKeyword(result, seen, seriesName + " " + keyword);
+                return result;
             }
 
-            AddKeyword(result, seen, seasonName);
-            AddKeyword(result, seen, keyword);
+            AddKeyword(result, seen, parentTitle);
+            if (!string.IsNullOrWhiteSpace(keyword))
+            {
+                AddKeyword(result, seen, parentTitle + " " + keyword);
+            }
             return result;
         }
 
         public static string ExtractSeasonKeyword(string seriesName, string seasonName)
         {
-            var value = seasonName ?? string.Empty;
+            var value = SanitizeSearchTerm(seasonName);
             if (!string.IsNullOrWhiteSpace(seriesName))
             {
                 value = Regex.Replace(value, Regex.Escape(seriesName), string.Empty, RegexOptions.IgnoreCase);
@@ -64,12 +77,61 @@ namespace Emby.Plugin.Danmu.Scraper
             value = SeasonNumberRegex.Replace(value, string.Empty);
             value = value.Trim(' ', ':', '：', '-', '–', '—', '_', '·', '.', '。');
             var normalized = Normalize(value);
-            if (normalized.Length < 2 || normalized == "正片" || normalized == "本篇")
+            if (normalized.Length < 2 || normalized == "正片" || normalized == "本篇" ||
+                GenericSeasonNumberRegex.IsMatch(value))
             {
                 return string.Empty;
             }
 
             return value;
+        }
+
+        public static bool IsEligibleSeasonCandidate(
+            ScraperSearchInfo source,
+            string seriesName,
+            string seasonName,
+            string keywordOverride)
+        {
+            if (source == null || string.IsNullOrWhiteSpace(source.Id) ||
+                string.IsNullOrWhiteSpace(source.Name) || IsIdentifiableMovie(source.Category))
+            {
+                return false;
+            }
+
+            var title = Normalize(source.Name);
+            if (!string.IsNullOrWhiteSpace(keywordOverride))
+            {
+                // An explicit manual keyword is provider-discovery input.  Once a
+                // provider returns a structurally usable Season record, retain it
+                // for target-metadata scoring and manual selection; aliases and
+                // cross-language titles cannot be required to resemble the query.
+                return true;
+            }
+
+            var parent = SanitizeSearchTerm(seriesName);
+            if (!IsIdentityBearingTitle(parent))
+            {
+                return false;
+            }
+
+            var parentEvidence = GetTitleEvidence(parent, title);
+            if (parentEvidence >= SeasonCandidateTitleEligibilityFloor)
+            {
+                return true;
+            }
+
+            // A shared bare Part/Season number can never rescue insufficient
+            // parent-title evidence. Unusual translations remain discoverable
+            // through their explicit user keyword.
+            return false;
+        }
+
+        public static bool IsIdentifiableMovie(string category)
+        {
+            var normalized = Normalize(category);
+            return normalized.Contains("电影") || normalized.Contains("影片") ||
+                   normalized.Contains("movie") || normalized.Contains("film") ||
+                   normalized.Contains("cinema");
         }
 
         public static DanmuMatchCandidate Score(
@@ -80,8 +142,7 @@ namespace Emby.Plugin.Danmu.Scraper
             string seriesName,
             string seasonName,
             int? expectedYear,
-            int expectedEpisodes,
-            bool aliasDiscovered = false)
+            int expectedEpisodes)
         {
             var title = Normalize(source.Name);
             var parent = Normalize(seriesName);
@@ -111,22 +172,13 @@ namespace Emby.Plugin.Danmu.Scraper
 
             var yearScore = GetYearScore(expectedYear, source.Year);
             var episodeScore = GetEpisodeScore(expectedEpisodes, source.EpisodeSize);
-            var score = aliasDiscovered
-                ? titleScore * 0.35 + yearScore * 0.20 + episodeScore * 0.45
-                : !string.IsNullOrEmpty(seasonKeyword)
-                    ? titleScore * 0.45 + yearScore * 0.15 + episodeScore * 0.40
-                    : titleScore * 0.55 + yearScore * 0.15 + episodeScore * 0.30;
+            var score = !string.IsNullOrEmpty(seasonKeyword)
+                ? titleScore * 0.45 + yearScore * 0.15 + episodeScore * 0.40
+                : titleScore * 0.55 + yearScore * 0.15 + episodeScore * 0.30;
 
-            if (!aliasDiscovered && !string.IsNullOrEmpty(seasonKeyword) && keywordScore < 0.72)
+            if (!string.IsNullOrEmpty(seasonKeyword) && keywordScore < 0.72)
             {
                 score *= 0.72;
-            }
-
-            // Structural evidence may rescue an alternate title, but year/count
-            // alone must never make an unrelated candidate automatic.
-            if (aliasDiscovered && titleScore < 0.72)
-            {
-                score = Math.Min(score, 0.899);
             }
 
             if (!string.IsNullOrWhiteSpace(source.Category) && source.Category.Contains("电影"))
@@ -146,6 +198,8 @@ namespace Emby.Plugin.Danmu.Scraper
                 Year = source.Year,
                 EpisodeSize = source.EpisodeSize,
                 Score = Round(score),
+                MatchScore = Round(score),
+                ScoreOrigin = "search-confidence",
                 TitleScore = Round(titleScore),
                 ParentTitleScore = Round(parentScore),
                 KeywordScore = Round(keywordScore),
@@ -161,18 +215,11 @@ namespace Emby.Plugin.Danmu.Scraper
             string siteName,
             int sourceOrder,
             string movieName,
-            int? expectedYear,
-            bool aliasDiscovered = false)
+            int? expectedYear)
         {
             var titleScore = SimilarityAgainstTitle(Normalize(movieName), Normalize(source.Name));
             var yearScore = GetYearScore(expectedYear, source.Year);
-            var score = aliasDiscovered
-                ? titleScore * 0.70 + yearScore * 0.30
-                : titleScore * 0.82 + yearScore * 0.18;
-            if (aliasDiscovered && titleScore < 0.72)
-            {
-                score = Math.Min(score, 0.899);
-            }
+            var score = titleScore * 0.82 + yearScore * 0.18;
             if (IsIdentifiableNonMovie(source.Category))
             {
                 score = 0;
@@ -189,6 +236,8 @@ namespace Emby.Plugin.Danmu.Scraper
                 Year = source.Year,
                 EpisodeSize = source.EpisodeSize,
                 Score = Round(Clamp(score)),
+                MatchScore = Round(Clamp(score)),
+                ScoreOrigin = "search-confidence",
                 TitleScore = Round(titleScore),
                 ParentTitleScore = Round(titleScore),
                 YearScore = Round(yearScore),
@@ -223,8 +272,9 @@ namespace Emby.Plugin.Danmu.Scraper
         {
             // r6 deliberately has one confidence rule.  Provider order decides the
             // winning site, then score decides only within that one site.  The
-            // compatibility parameter is retained for callers compiled against r5;
-            // partial search must no longer make an automatic decision at all.
+            // compatibility parameter is retained for callers compiled against r5.
+            // Execution completeness is classified independently by the search
+            // result; this pure selector only evaluates the canonical evidence.
             var confident = (candidates ?? new List<DanmuMatchCandidate>())
                 .Where(x => x != null && x.Score >= 0.90)
                 .ToList();
@@ -260,11 +310,52 @@ namespace Emby.Plugin.Danmu.Scraper
             }
 
             // Providers and TMDB occasionally mix these homophones/variants.
-            var normalized = value.Trim().ToLowerInvariant()
+            var normalized = SanitizeSearchTerm(value).ToLowerInvariant()
                 .Replace('谭', '潭')
                 .Replace('臺', '台')
                 .Replace('裏', '里');
             return SeparatorRegex.Replace(normalized, string.Empty);
+        }
+
+        private static string SanitizeSearchTerm(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return string.Empty;
+            }
+
+            return new string(value.Where(character =>
+                    character != '\uFFFD' && character != '\u0000' && !char.IsControl(character))
+                .ToArray()).Trim();
+        }
+
+        private static bool IsIdentityBearingTitle(string value)
+        {
+            var normalized = Normalize(value);
+            return normalized.Length >= 2 && !GenericSeasonLabelRegex.IsMatch(value ?? string.Empty);
+        }
+
+        private static bool HasTitleEvidence(string identity, string normalizedTitle, double floor)
+        {
+            if (!IsIdentityBearingTitle(identity) || string.IsNullOrEmpty(normalizedTitle))
+            {
+                return false;
+            }
+
+            return GetTitleEvidence(identity, normalizedTitle) >= floor;
+        }
+
+        private static double GetTitleEvidence(string identity, string normalizedTitle)
+        {
+            var normalizedIdentity = Normalize(identity);
+            if (normalizedIdentity.Length == 0 || string.IsNullOrEmpty(normalizedTitle))
+            {
+                return 0;
+            }
+
+            return normalizedTitle.Contains(normalizedIdentity) || normalizedIdentity.Contains(normalizedTitle)
+                ? 1
+                : SimilarityAgainstTitle(normalizedIdentity, normalizedTitle);
         }
 
         private static void AddKeyword(List<string> result, HashSet<string> seen, string value)
