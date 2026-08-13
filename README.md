@@ -69,6 +69,14 @@ Emby 管理后台的“弹幕配置”提供以下调用方式：
 
 菜单适用于电视剧、季度、单集和电影的详情页、卡片或列表“更多”菜单。脚本只调用插件的 `plugin/danmu` API，不包含 Emby 账号、密码或弹弹 Play API Secret。
 
+### 智能匹配前端演示
+
+<img width="1326" height="895" alt="智能匹配整部剧界面" src="https://github.com/user-attachments/assets/d6dba7ef-783e-4866-833e-c4eeece563db" />
+
+<img width="1194" height="811" alt="智能匹配季度候选界面" src="https://github.com/user-attachments/assets/0decfc18-b4b5-4702-aabb-ec348d83624e" />
+
+<img width="991" height="774" alt="智能匹配下载进度界面" src="https://github.com/user-attachments/assets/e8408009-98ef-4ce3-9d2b-b858365bbca5" />
+
 ## 构建与测试
 
 需要 .NET SDK、Node.js 和 NuGet 网络访问：
