@@ -215,7 +215,12 @@ namespace Emby.Plugin.Danmu.BoundedSearchPolicyRegression
             }));
             var slow = new RecordingScraper("slow", new TaskCompletionSource<List<ScraperSearchInfo>>(
                 TaskCreationOptions.RunContinuationsAsynchronously).Task);
-            using (var operation = new CancellationTokenSource(TimeSpan.FromMilliseconds(70)))
+            // Keep the enclosing cancellation comfortably beyond the 20 ms
+            // provider timeout. On a loaded build host, tightly coalesced timer
+            // callbacks can otherwise make cancellation win before the timeout
+            // continuation is observed, testing scheduler jitter instead of the
+            // intended timeout-then-unstarted sequence.
+            using (var operation = new CancellationTokenSource(TimeSpan.FromMilliseconds(500)))
             {
                 var result = DanmuMatchSearchEngine.SearchSeasonAsync(
                     new AbstractScraper[] { fast, slow },
