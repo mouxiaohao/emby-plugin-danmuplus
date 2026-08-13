@@ -38,4 +38,3 @@ Expanded mapping details SHALL span the full virtual-season card width. Each row
 #### Scenario: Narrow viewport renders details
 - **WHEN** the dialog is rendered at 520 CSS pixels or less
 - **THEN** the detail region SHALL occupy the card width without collapsing into a narrow vertical character column or obscuring rematch/remove actions
-

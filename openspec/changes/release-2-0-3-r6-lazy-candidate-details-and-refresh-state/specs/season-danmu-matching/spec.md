@@ -39,4 +39,3 @@ The smart-match workflow SHALL maintain one force-refresh value for the dialog. 
 #### Scenario: Download execution starts
 - **WHEN** the user starts a single-target or multi-Season download
 - **THEN** the current value SHALL be snapshotted once, locked, and reused for every task in that execution
-

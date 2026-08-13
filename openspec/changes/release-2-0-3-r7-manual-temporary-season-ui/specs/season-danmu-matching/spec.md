@@ -40,4 +40,3 @@ An authoritative temporary-season preview SHALL carry the existing local library
 #### Scenario: A title is missing
 - **WHEN** either the local or source Episode title is empty or unavailable
 - **THEN** the mapping SHALL remain valid and the public presentation SHALL fall back to its season/Episode and source-number labels
-

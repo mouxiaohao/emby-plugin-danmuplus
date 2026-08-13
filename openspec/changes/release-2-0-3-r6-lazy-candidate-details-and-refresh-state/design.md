@@ -43,4 +43,3 @@ r6 may add the detail endpoint/DTO, dialog detail cache, detail button, and shar
 ## Rollback
 
 Restore the paired r5 DLL and CustomCssJS configuration together. No persistent-data migration is introduced by r6.
-

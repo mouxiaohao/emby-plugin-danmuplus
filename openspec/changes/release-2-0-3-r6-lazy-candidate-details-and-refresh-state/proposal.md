@@ -32,4 +32,3 @@ The rejected first r6 package was built from a polluted experimental workspace. 
 - A narrow authenticated read-only candidate-detail operation and DTOs.
 - Minimal additions to existing r5 candidate renderers and footer state.
 - Regression gates for all r5 scope and mapping-detail behavior before packaging.
-

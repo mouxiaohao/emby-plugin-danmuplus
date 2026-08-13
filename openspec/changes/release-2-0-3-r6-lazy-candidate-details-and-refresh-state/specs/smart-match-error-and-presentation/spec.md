@@ -43,4 +43,3 @@ Every pre-download smart-match footer SHALL show a lower-left checkbox with visi
 #### Scenario: Any pre-download level renders
 - **WHEN** a top-level, nested, loading, retry, or back-navigation screen is shown
 - **THEN** the footer SHALL contain the shared `强制刷新` checkbox and SHALL contain no freshness paragraph or close hint
-
