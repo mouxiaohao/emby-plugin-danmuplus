@@ -154,13 +154,13 @@ After that decision, the same candidate was redeployed through the verified r9 p
 | CustomCssJS configuration | `1b8d163e856a207340bd0262688a77425052fda201342f06efe737565333eb4d` |
 | Danmu configuration | `a3be897f9fb84fa19cba5b226cac0b5e2f942a5b2117a5379cca851ca407c973` |
 
-The service is active, public health reports Emby 4.9.5.0, the plugin entry point started and completed, and all six provider registrations appeared in the startup log. Final read-only smoke confirmed Bourne 1 resolves to parent title `谍影重重`, final year 2002, and `PartTitle=正片`; `妄想学生会＊` remains the unique automatic Dandan choice at 0.90 versus 0.85 for the marker-less sibling. No download was repeated after final deployment. Task 5.2 is complete under the documented residual-risk decision. Task 5.3 remains unchecked; no commit, push, tag, package, or release was made.
+The service is active, public health reports Emby 4.9.5.0, the plugin entry point started and completed, and all six provider registrations appeared in the startup log. Final read-only smoke confirmed Bourne 1 resolves to parent title `谍影重重`, final year 2002, and `PartTitle=正片`; `妄想学生会＊` remains the unique automatic Dandan choice at 0.90 versus 0.85 for the marker-less sibling. No download was repeated after final deployment. Task 5.2 is complete under the documented residual-risk decision.
 
-## Local 2.0.3r10 release candidate (pending remote approval)
+## Published 2.0.3r10 review release
 
 Release metadata is now `AssemblyVersion=2.0.3.0`, `FileVersion=2.0.3.10`, and `ProductVersion=2.0.3r10`. After version stamping, the complete 18-entry deterministic matrix passed again: all six main regression modes, ten focused .NET regression projects, the Node frontend suite, and the Release solution build. The build completed with zero errors and 131 existing warnings.
 
-Prepared local assets:
+Published assets:
 
 | Asset | Size | SHA-256 |
 | --- | ---: | --- |
@@ -172,4 +172,6 @@ Prepared local assets:
 
 The release-stamped DLL differs from the active live behavior-candidate hash solely because task 5.3 updates assembly/product metadata and the generated configuration cache token; it has passed the full local matrix but has not been redeployed. The verified r9 rollback directory, three backup hashes, ownership/mode restoration, atomic replacement, restart, and health requirements remain unchanged above.
 
-No Git commit, push, tag, GitHub Release, NAS mutation, or Emby mutation occurred during packaging. Task 5.3 remains unchecked pending final review and explicit remote-write authorization.
+The reviewed release commit is `0e22325b3df90362fc9034469c3cb0f385182db3` on `develop`. Annotated tag `v2.0.3r10` peels to that exact commit, and the published GitHub Release contains the four expected assets: DLL, frontend JavaScript, source ZIP, and `SHA256SUMS`. GitHub's uploaded DLL, JavaScript, and source ZIP digests match the hashes recorded above. The Release is neither a draft nor a prerelease.
+
+`main` remained unchanged during publication. The release is available for user review before the tagged `develop` commit and this completion record are merged to `main`. Task 5.3 is complete.
