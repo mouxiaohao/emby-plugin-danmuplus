@@ -27,6 +27,10 @@ namespace Emby.Plugin.Danmu.Scraper.Bilibili
 {
     public class BilibiliApi : AbstractApi
     {
+        internal const int TypedSearchPageLimit = 2;
+        internal const int TypedSearchRecordLimitPerType = 40;
+        internal const int SearchRecordLimit = 100;
+        private static readonly string[] TypedMediaSearchTypes = { "media_ft", "media_bangumi" };
         private static readonly Regex regBiliplusVideoInfo = new Regex(@"view\((.+?)\);", RegexOptions.Compiled);
 
         private readonly HttpClient _httpClient; // Use standard HttpClient
@@ -123,7 +127,7 @@ namespace Emby.Plugin.Danmu.Scraper.Bilibili
             if (!sessionEnsured)
             {
                 _logger.Warn($"SearchAsync: 未能建立有效的B站会话 (buvid3缺失)。跳过对关键词 '{keyword}' 的搜索。");
-                return new SearchResult(); // 返回空结果，不继续执行搜索
+                return new SearchResult { SessionAvailable = false }; // provider-wide session failure
             }
 
             keyword = HttpUtility.UrlEncode(keyword);
@@ -164,7 +168,13 @@ namespace Emby.Plugin.Danmu.Scraper.Bilibili
                             _logger.Info($"SearchAsync (all/v2) - 找到类型 '{group.ResultType}' 的结果 {group.Data.Count} 条。");
                             // Assuming Entity.Media class has fields like 'ApiType' (mapped from "type")
                             // and 'SeasonTypeName' that are correctly deserialized.
-                            finalSearchResult.Result.AddRange(group.Data);
+                            foreach (var media in group.Data)
+                            {
+                                // all/v2 carries the authoritative kind on the group,
+                                // whereas individual records commonly omit `type`.
+                                media.ApiType = group.ResultType;
+                                finalSearchResult.Result.Add(media);
+                            }
                         }
                     }
                     _logger.Info($"SearchAsync (all/v2) - 从综合搜索结果中提取到影视/番剧共 {finalSearchResult.Result.Count} 条。");
@@ -185,6 +195,169 @@ namespace Emby.Plugin.Danmu.Scraper.Bilibili
 
             this._memoryCache.Set<SearchResult>(cacheKey, finalSearchResult, expiredOption);
             return finalSearchResult;
+        }
+
+        /// <summary>
+        /// Supplements the aggregate response with bounded media-only typed
+        /// pages. Optional typed failures are returned as diagnostics while
+        /// aggregate and previously collected typed candidates remain usable.
+        /// </summary>
+        public async Task<SearchResult> SearchMergedAsync(
+            string keyword,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (string.IsNullOrWhiteSpace(keyword))
+            {
+                return new SearchResult { Result = new List<Entity.Media>() };
+            }
+
+            var cacheKey = $"search_merged_{keyword}";
+            if (_memoryCache.TryGetValue<SearchResult>(cacheKey, out var cached))
+            {
+                return cached;
+            }
+
+            var aggregate = await SearchAsync(keyword, cancellationToken).ConfigureAwait(false) ??
+                new SearchResult();
+            if (!ShouldAttemptTypedSearch(aggregate))
+            {
+                return aggregate;
+            }
+            var encodedKeyword = HttpUtility.UrlEncode(keyword ?? string.Empty);
+            var result = await MergeTypedAsync(
+                aggregate,
+                async (searchType, page, token) =>
+                {
+                    await LimitRequestFrequently(token).ConfigureAwait(false);
+                    var url = "https://api.bilibili.com/x/web-interface/search/type" +
+                        $"?search_type={searchType}&keyword={encodedKeyword}&page={page}" +
+                        "&order=totalrank&duration=0";
+                    using (var response = await _httpClient.GetAsync(url, token).ConfigureAwait(false))
+                    {
+                        response.EnsureSuccessStatusCode();
+                        var content = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+                        var typed = JsonSerializer.Deserialize<ApiResult<BiliSearchTypeData>>(
+                            content,
+                            _jsonOptions);
+                        if (typed?.Code != 0 || typed.Data == null)
+                        {
+                            throw new InvalidOperationException(
+                                $"typed search returned code {typed?.Code}: {typed?.Message}");
+                        }
+
+                        return typed.Data;
+                    }
+                },
+                cancellationToken).ConfigureAwait(false);
+
+            foreach (var diagnostic in result.Diagnostics)
+            {
+                _logger.Warn(
+                    "Typed media search failed without discarding candidates: type={0}, page={1}, error={2}",
+                    diagnostic.SearchType,
+                    diagnostic.Page,
+                    diagnostic.Message);
+            }
+            if (result.Diagnostics.Count == 0)
+            {
+                _memoryCache.Set(
+                    cacheKey,
+                    result,
+                    new MemoryCacheEntryOptions
+                    {
+                        AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(5)
+                    });
+            }
+
+            return result;
+        }
+
+        internal static bool ShouldAttemptTypedSearch(SearchResult aggregate)
+        {
+            return aggregate?.SessionAvailable == true;
+        }
+
+        internal static async Task<SearchResult> MergeTypedAsync(
+            SearchResult aggregate,
+            Func<string, int, CancellationToken, Task<BiliSearchTypeData>> fetchTypedPage,
+            CancellationToken cancellationToken)
+        {
+            var result = new SearchResult
+            {
+                Page = aggregate?.Page ?? 0,
+                PageSize = aggregate?.PageSize ?? 0,
+                NumPages = aggregate?.NumPages ?? 0,
+                Result = new List<Entity.Media>(),
+            };
+            var merged = new Dictionary<long, Entity.Media>();
+            foreach (var media in aggregate?.Result ?? new List<Entity.Media>())
+            {
+                if (BilibiliSearchResultMapper.IsAllowedAggregateMedia(media))
+                    MergeUsableMedia(merged, media);
+            }
+
+            foreach (var searchType in TypedMediaSearchTypes)
+            {
+                var acceptedForType = 0;
+                for (var page = 1;
+                    page <= TypedSearchPageLimit && acceptedForType < TypedSearchRecordLimitPerType &&
+                    merged.Count < SearchRecordLimit;
+                    page++)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    try
+                    {
+                        var typed = await fetchTypedPage(searchType, page, cancellationToken)
+                            .ConfigureAwait(false);
+                        var typedItems = typed?.Result ?? new List<Entity.Media>();
+                        foreach (var media in typedItems.Take(
+                            TypedSearchRecordLimitPerType - acceptedForType))
+                        {
+                            if (!BilibiliSearchResultMapper.IsAllowedTypedMedia(media, searchType))
+                                continue;
+                            media.ApiType = searchType;
+                            acceptedForType++;
+                            MergeUsableMedia(merged, media);
+                            if (merged.Count >= SearchRecordLimit) break;
+                        }
+
+                        if (typedItems.Count == 0 || typed.NumPages <= page ||
+                            acceptedForType >= TypedSearchRecordLimitPerType)
+                            break;
+                    }
+                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                    {
+                        throw;
+                    }
+                    catch (Exception ex)
+                    {
+                        result.Diagnostics.Add(new BilibiliSearchDiagnostic
+                        {
+                            SearchType = searchType,
+                            Page = page,
+                            Message = ex.Message,
+                        });
+                        break;
+                    }
+                }
+            }
+
+            result.Result = merged.Values.Take(SearchRecordLimit).ToList();
+            result.NumResults = result.Result.Count;
+            return result;
+        }
+
+        private static void MergeUsableMedia(IDictionary<long, Entity.Media> merged, Entity.Media media)
+        {
+            var combined = BilibiliSearchResultMapper.MergeByCanonicalIdentity(
+                merged.Values.Concat(new[] { media }),
+                SearchRecordLimit);
+            merged.Clear();
+            foreach (var item in combined)
+            {
+                merged[BilibiliSearchResultMapper.ResolveId(item)] = item;
+            }
         }
 
         /// <summary>
@@ -490,6 +663,14 @@ namespace Emby.Plugin.Danmu.Scraper.Bilibili
                     if (result.Result.Episodes.Any()) {
                         _logger.Debug($"GetEpisodeAsync - API为 EP ID {epId} 的请求返回了 {result.Result.Episodes.Count} 个剧集，将全部缓存。");
                         foreach (var episode in result.Result.Episodes) {
+                            episode.SourceMetadata = new Emby.Plugin.Danmu.Model.SourceMetadata
+                            {
+                                Title = !string.IsNullOrWhiteSpace(result.Result.Title)
+                                    ? result.Result.Title
+                                    : result.Result.SeasonTitle ?? string.Empty,
+                                // PGC PubTime is provider publication time, not a trustworthy work year.
+                                Year = null,
+                            };
                             var individualEpisodeCacheKey = $"episode_{episode.Id}";
                             // 注意：这里不过滤 BadgeType，因为 GetEpisodeAsync 的目的是获取特定 ep_id 的原始信息
                             this._memoryCache.Set<VideoEpisode?>(individualEpisodeCacheKey, episode, expiredOption);

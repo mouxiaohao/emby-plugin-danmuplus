@@ -580,7 +580,8 @@ async function main() {
         MappingProtocolVersion: 21, PlanGeneration: 7342,
         RequiresCompositeMapping: true,
         CompositeGroups: [{ IsTemporary: false, Site: "Dandan", CandidateId: "s1",
-            MatchScore: 0, Episodes: [{ ItemId: "a", ParentSeasonNumber: 2, EpisodeNumber: 1 }] },
+            MatchScore: 0, SourceMetadata: { Title: "Upstream Season", Year: 2024, Category: "Anime" },
+            Episodes: [{ ItemId: "a", ParentSeasonNumber: 2, EpisodeNumber: 1 }] },
             { IsTemporary: true, MatchScore: 0, ScoreOrigin: "search-confidence",
                 Episodes: [{ ItemId: "b", ParentSeasonNumber: 2, EpisodeNumber: 2 }] }]
     };
@@ -605,8 +606,13 @@ async function main() {
     */
     assert(mappedZeroCard && allVisibleText(mappedZeroCard).includes(
             "\u5339\u914d\u5206\uff1a0\uff08\u670d\u52a1\u7aef\u8bc4\u5206\uff09") &&
+        allVisibleText(mappedZeroCard).includes("Upstream Season\uff082024\uff09") &&
+        !allVisibleText(mappedZeroCard).includes("s1") &&
         unmatchedZeroCard && !allVisibleText(unmatchedZeroCard).includes("\u5339\u914d\u5206"),
-        "an explicit mapped zero score may render, but an unmatched temporary season must never render a score");
+        "a matched temporary card must render safe source title/year while hiding identity; unmatched cards show no score");
+    assert(hooks.sourceMetadataPublicLabel({ Title: "No Year" }) === "No Year" &&
+        hooks.sourceMetadataPublicLabel({ Title: "Invalid", Year: 42 }) === "Invalid",
+        "missing or invalid source years must be omitted instead of borrowing local season metadata");
     assert(scoreCards.every(card => card.querySelector(".danmuVirtualSeasonTitle").textContent.indexOf("\u4e34\u65f6\u5b63 ") === 0),
         "mapped and unmatched virtual ranges must use the same temporary-season title convention");
     unmatchedScoreDialog.forceClose();
@@ -1568,15 +1574,21 @@ async function main() {
             dialog,
             { Id: targetId, Type: type, Name: type + " title" },
             { EpisodeNumber: 3 },
-            { Site: "Fake", Id: "candidate", Name: "Candidate" },
+            { Site: "Fake", Id: "candidate", Name: "Candidate", SelectionEvidenceToken: "parent-proof" },
             type === "Episode" ? 4 : null,
             type === "Episode" ? "source-episode-exact" : null,
-            true);
+            true,
+            type === "Movie" ? "opaque-part-proof" : null);
         const startCall = apiCalls.find(call => call.option === "StartTrackedDownload");
         if (type === "Episode") {
             assert(startCall.parameters.sourceEpisodeId === "source-episode-exact" &&
                 !Object.prototype.hasOwnProperty.call(startCall.parameters, "commentId"),
                 "episode confirmation must submit the exact resolved sourceEpisodeId without CommentId or positional guessing");
+        } else {
+            assert(startCall.parameters.selectionEvidenceToken === "parent-proof" &&
+                startCall.parameters.moviePartToken === "opaque-part-proof" &&
+                !Object.prototype.hasOwnProperty.call(startCall.parameters, "partId"),
+                "Movie download must submit only scoped opaque evidence and never a raw part id");
         }
         let rows = dialog.body.querySelectorAll(".danmuEpisodeProgress");
         assert(rows.length === 1, type + " progress should render exactly one detailed item row");
@@ -1589,6 +1601,31 @@ async function main() {
     }
     await verifySingleTarget("Movie");
     await verifySingleTarget("Episode");
+
+    const safeMovieHeading = hooks.movieCandidateHeading({
+        SiteName: "哔哩哔哩", Name: "正片", Id: "raw-parent-id",
+        SourceMetadata: { Title: "父电影标题", Year: 2024, Category: "电影" }
+    }, null, "国语");
+    assert(safeMovieHeading === "哔哩哔哩 · 父电影标题（2024） · 电影 · 国语" &&
+        safeMovieHeading.indexOf("raw-parent-id") < 0 && safeMovieHeading.indexOf("正片") < 0,
+        "Movie presentation must separate parent source identity from PartTitle and hide raw ids");
+    const missingParentHeading = hooks.movieCandidateHeading({
+        SiteName: "Bilibili", Name: "wrong leaf masquerading as parent"
+    }, null, "正片");
+    assert(missingParentHeading === "Bilibili · 正片" &&
+        missingParentHeading.indexOf("wrong leaf") < 0 &&
+        missingParentHeading.split("正片").length === 2,
+        "Movie presentation without SourceTitle must use provider plus PartTitle exactly once");
+    const normalizedDuplicateHeading = hooks.movieCandidateHeading({
+        SiteName: "Bilibili", SourceMetadata: { Title: "ＦＥＡＴＵＲＥ   CUT" }
+    }, null, " feature cut ");
+    assert(normalizedDuplicateHeading === "Bilibili · ＦＥＡＴＵＲＥ   CUT",
+        "Movie presentation must deduplicate parent and part after NFKC, whitespace, and case normalization");
+    assert(hooks.moviePartChoices({ MovieParts: [
+        { Token: "opaque-a", PartTitle: "国语" },
+        { Token: "", PartTitle: "raw-id-only" }
+    ] }).length === 1,
+    "Movie selector must accept only server-issued opaque choices");
 
     apiCalls.length = 0;
     apiResponses.StartTrackedDownload = { TaskId: "", Status: "failed", Message: "single start failed" };

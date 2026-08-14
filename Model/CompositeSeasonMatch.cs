@@ -97,6 +97,7 @@ namespace Emby.Plugin.Danmu.Model
         public double MatchScore { get; set; }
         public string ScoreOrigin { get; set; } = string.Empty;
         public string SelectionEvidenceToken { get; set; } = string.Empty;
+        public SourceMetadata SourceMetadata { get; set; }
     }
 
     /// <summary>A contiguous gap in stable local order, presented as a temporary season.</summary>
@@ -168,5 +169,6 @@ namespace Emby.Plugin.Danmu.Model
         public double MatchScore { get; set; }
         public string ScoreOrigin { get; set; } = string.Empty;
         public string SelectionEvidenceToken { get; set; } = string.Empty;
+        public SourceMetadata SourceMetadata { get; set; }
     }
 }

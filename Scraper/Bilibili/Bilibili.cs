@@ -7,6 +7,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Xml;
 using Emby.Plugin.Danmu.Core.Extensions;
+using Emby.Plugin.Danmu.Model;
 using Emby.Plugin.Danmu.Scraper.Bilibili.Entity;
 using Emby.Plugin.Danmu.Scraper.Entity;
 using MediaBrowser.Controller.Entities;
@@ -33,33 +34,86 @@ namespace Emby.Plugin.Danmu.Scraper.Bilibili
             return dateTimeOffset.Year;
         }
 
-        private static int? TryGetYearFromSeasonDetail(VideoSeasonDetail seasonDetail, VideoSeason seasonInfo)
+        internal static List<ScraperMoviePart> BuildMovieParts(IEnumerable<VideoEpisode> episodes)
         {
-            var publishTime = seasonDetail?.Publish?.PubTime;
-            if (!string.IsNullOrWhiteSpace(publishTime) &&
-                DateTime.TryParse(publishTime, CultureInfo.InvariantCulture, DateTimeStyles.AllowWhiteSpaces, out var published))
+            var parts = new List<ScraperMoviePart>();
+            var seen = new HashSet<long>();
+            var index = 0;
+            foreach (var episode in episodes ?? Enumerable.Empty<VideoEpisode>())
             {
-                return published.Year;
+                if (episode == null || episode.Id <= 0 || episode.CId <= 0 ||
+                    !episode.AId.HasValue || episode.AId.Value <= 0 || !seen.Add(episode.Id))
+                {
+                    continue;
+                }
+
+                index++;
+                var title = !string.IsNullOrWhiteSpace(episode.LongTitle)
+                    ? episode.LongTitle.Trim()
+                    : (episode.Title ?? string.Empty).Trim();
+                parts.Add(new ScraperMoviePart
+                {
+                    Id = episode.Id.ToString(CultureInfo.InvariantCulture),
+                    Title = title,
+                    Index = index,
+                    IsDownloadable = true,
+                    IsExplicitNonMain = episode.BadgeType == 1 ||
+                        (episode.SectionType.HasValue && episode.SectionType.Value != 0) ||
+                        EpisodeContentClassifier.IsExplicitNonMain(episode.Badge) ||
+                        EpisodeContentClassifier.IsExplicitNonMain(title),
+                });
             }
 
-            var episodePubTime = seasonInfo?.Episodes?
-                .FirstOrDefault(episode => episode.PubTime > 0)?.PubTime;
-            return episodePubTime > 0 ? UnixTimeStampToYear(episodePubTime.Value) : (int?)null;
+            return parts;
         }
 
-        private async Task<string> ResolveMoviePgcEpisodeIdAsync(long seasonId, CancellationToken cancellationToken)
+        public override async Task<List<ScraperMoviePart>> GetMovieParts(
+            BaseItem item,
+            string parentId,
+            CancellationToken cancellationToken)
         {
-            if (seasonId <= 0)
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!(item is MediaBrowser.Controller.Entities.Movies.Movie) ||
+                !long.TryParse(parentId, out var seasonId) || seasonId <= 0)
             {
-                return string.Empty;
+                return new List<ScraperMoviePart>();
             }
 
             var season = await _api.GetSeasonAsync(seasonId, cancellationToken).ConfigureAwait(false);
-            var episode = season?.Episodes?.FirstOrDefault(x =>
-                x != null && x.Id > 0 && x.CId > 0 &&
-                !EpisodeContentClassifier.IsExplicitNonMain(
-                    !string.IsNullOrWhiteSpace(x.LongTitle) ? x.LongTitle : x.Title));
-            return episode?.Id > 0 ? episode.Id.ToString() : string.Empty;
+            return BuildMovieParts(season?.Episodes);
+        }
+
+        internal static ScraperMedia CreateExactMovieEpisodeMedia(string id, VideoEpisode exactEpisode)
+        {
+            if (exactEpisode == null || exactEpisode.CId <= 0 ||
+                !exactEpisode.AId.HasValue || exactEpisode.AId.Value <= 0)
+            {
+                return null;
+            }
+
+            var exactTitle = !string.IsNullOrWhiteSpace(exactEpisode.LongTitle)
+                ? exactEpisode.LongTitle
+                : exactEpisode.Title ?? string.Empty;
+            return new ScraperMedia
+            {
+                Id = id,
+                ProviderId = ScraperProviderId,
+                Title = exactTitle,
+                // PGC episode PubTime is a provider publication timestamp, not the work's release year.
+                Year = null,
+                EpisodeCount = 1,
+                CommentId = id,
+                Episodes = new List<ScraperEpisode>
+                {
+                    new ScraperEpisode
+                    {
+                        Id = id,
+                        CommentId = id,
+                        Title = exactTitle,
+                        EpisodeNumber = 1,
+                    },
+                },
+            };
         }
 
         public override int DefaultOrder => 1;
@@ -76,19 +130,28 @@ namespace Emby.Plugin.Danmu.Scraper.Bilibili
 
         public override async Task<List<ScraperSearchInfo>> Search(BaseItem item, CancellationToken cancellationToken)
         {
+            return (await SearchWithDiagnostics(item, cancellationToken).ConfigureAwait(false)).Candidates;
+        }
+
+        public override async Task<ScraperSearchResult> SearchWithDiagnostics(
+            BaseItem item,
+            CancellationToken cancellationToken)
+        {
             cancellationToken.ThrowIfCancellationRequested();
-            var list = new List<ScraperSearchInfo>();
+            var output = new ScraperSearchResult();
+            var list = output.Candidates;
             log.Info($"Bilibili.Search - 开始为 Emby 项目搜索: '{item.Name}', 类型: {item.GetType().Name}, 路径: '{item.Path}'");
             var isMovieItemType = item is MediaBrowser.Controller.Entities.Movies.Movie;
             var searchName = this.NormalizeSearchName(item.Name);
             log.Info($"Bilibili.Search - Emby 项目 '{item.Name}' 的标准化搜索名称: '{searchName}'");
-            var searchResult = await this._api.SearchAsync(searchName, cancellationToken).ConfigureAwait(false);
+            var searchResult = await this._api.SearchMergedAsync(searchName, cancellationToken).ConfigureAwait(false);
+            AddDiagnostics(output, searchResult);
             try
             {
                 if (searchResult == null || searchResult.Result == null)
                 {
                     log.Info($"Bilibili.Search - API 为 '{searchName}' 返回了 null 或空结果列表。");
-                    return list;
+                    return output;
                 }
 
                 foreach (var mediaItem in searchResult.Result) // 将 'video' 重命名为 'mediaItem' 以避免与 Entity.Video 混淆
@@ -101,6 +164,14 @@ namespace Emby.Plugin.Danmu.Scraper.Bilibili
                     // {
                     //    continue;
                     // }
+
+                    var kind = BilibiliSearchResultMapper.ResolveKind(mediaItem);
+                    if ((isMovieItemType && kind != BilibiliMediaKind.Movie) ||
+                        (!isMovieItemType && kind != BilibiliMediaKind.Season) ||
+                        !BilibiliSearchResultMapper.TryMap(mediaItem, out var mapped, out _))
+                    {
+                        continue;
+                    }
 
                     var id = mediaItem.MediaId.ToString(); // Default to MediaId
                     var title = mediaItem.Title;
@@ -129,40 +200,8 @@ namespace Emby.Plugin.Danmu.Scraper.Bilibili
                     }
 
                     // 使用 B站 API 返回的 SeasonTypeName进行比较
-                    if (isMovieItemType && mediaItem.SeasonTypeName != "电影") 
-                    {
-                        log.Info($"Bilibili.Search - 跳过B站项目 '{mediaItem.Title}' (季度类型: '{mediaItem.SeasonTypeName}') 因为 Emby 项目是电影但B站项目不是 '电影'. Emby 名称: '{item.Name}'");
-                        continue;
-                    }
-
-                    if (!isMovieItemType && mediaItem.SeasonTypeName == "电影")
-                    {
-                        log.Info($"Bilibili.Search - 跳过B站项目 '{mediaItem.Title}' (季度类型: '{mediaItem.SeasonTypeName}') 因为 Emby 项目不是电影但B站项目是 '电影'. Emby 名称: '{item.Name}'");
-                        continue;
-                    }
-
-                    if (isMovieItemType)
-                    {
-                        var seasonId = mediaItem.SeasonId > 0
-                            ? mediaItem.SeasonId
-                            : mediaItem.PgcSeasonId;
-                        id = await ResolveMoviePgcEpisodeIdAsync(seasonId, cancellationToken).ConfigureAwait(false);
-                        if (string.IsNullOrWhiteSpace(id))
-                        {
-                            log.Info("Bilibili.Search - 电影候选没有可验证的 PGC 正片 ep_id，跳过: {0}", title);
-                            continue;
-                        }
-                    }
-
                     log.Info($"Bilibili.Search - Found candidate for backend scoring: '{item.Name}'. Bili Title: '{title}', ID to use: '{id}', Bili Year: {pubYear}, Bili Type: '{mediaItem.SeasonTypeName ?? mediaItem.ApiType}'");
-                    list.Add(new ScraperSearchInfo()
-                    {
-                        Id = id, // Season uses season_id; Movie uses playable ep_id.
-                        Name = title,
-                        Category = mediaItem.SeasonTypeName ?? mediaItem.TypeName, // 如果 SeasonTypeName 可用，则优先使用
-                        Year = pubYear,
-                        EpisodeSize = episodeSize,
-                    });
+                    list.Add(mapped);
                 }
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -175,7 +214,7 @@ namespace Emby.Plugin.Danmu.Scraper.Bilibili
             }
 
             log.Info($"Bilibili.Search - Emby 项目 '{item.Name}' 的搜索已完成。找到 {list.Count} 个潜在的 ScraperSearchInfo 匹配项。");
-            return list;
+            return output;
         }
 
         public override Task<List<ScraperSearchInfo>> SearchForApi(string keyword)
@@ -187,22 +226,37 @@ namespace Emby.Plugin.Danmu.Scraper.Bilibili
             string keyword,
             CancellationToken cancellationToken)
         {
+            return (await SearchForApiWithDiagnostics(keyword, cancellationToken).ConfigureAwait(false)).Candidates;
+        }
+
+        public override async Task<ScraperSearchResult> SearchForApiWithDiagnostics(
+            string keyword,
+            CancellationToken cancellationToken)
+        {
             cancellationToken.ThrowIfCancellationRequested();
-            var candidates = new List<ScraperSearchInfo>();
+            var output = new ScraperSearchResult();
+            var candidates = output.Candidates;
             if (string.IsNullOrWhiteSpace(keyword))
             {
-                return candidates;
+                return output;
             }
 
             keyword = keyword.Trim();
             log.Info("Bilibili.SearchForApi - searching keyword '{0}'.", keyword);
-            var searchResult = await _api.SearchAsync(keyword, cancellationToken).ConfigureAwait(false);
+            var searchResult = await _api.SearchMergedAsync(keyword, cancellationToken).ConfigureAwait(false);
+            AddDiagnostics(output, searchResult);
             var mediaItems = searchResult?.Result ??
                 new List<Emby.Plugin.Danmu.Scraper.Bilibili.Entity.Media>();
             var skipped = 0;
 
             foreach (var mediaItem in mediaItems)
             {
+                if (BilibiliSearchResultMapper.ResolveKind(mediaItem) != BilibiliMediaKind.Season)
+                {
+                    skipped++;
+                    continue;
+                }
+
                 if (!BilibiliSearchResultMapper.TryMap(mediaItem, out var candidate, out var skipReason))
                 {
                     skipped++;
@@ -229,7 +283,19 @@ namespace Emby.Plugin.Danmu.Scraper.Bilibili
                 mediaItems.Count,
                 candidates.Count,
                 skipped);
-            return candidates;
+            return output;
+        }
+
+        private static void AddDiagnostics(ScraperSearchResult output, SearchResult searchResult)
+        {
+            foreach (var diagnostic in searchResult?.Diagnostics ?? new List<BilibiliSearchDiagnostic>())
+            {
+                output.Diagnostics.Add(new ScraperSearchDiagnostic
+                {
+                    Status = "partial_failure",
+                    Message = $"Bilibili {diagnostic.SearchType} page {diagnostic.Page}: {diagnostic.Message}",
+                });
+            }
         }
 
         public override async Task<string?> SearchMediaId(BaseItem item)
@@ -353,7 +419,8 @@ namespace Emby.Plugin.Danmu.Scraper.Bilibili
                             Id = id,
                             ProviderId = this.ProviderId,
                             Title = videoInfo.Title ?? string.Empty,
-                            Year = videoInfo.Pubdate > 0 ? UnixTimeStampToYear(videoInfo.Pubdate) : (int?)null,
+                            // BVID pubdate is an upload timestamp, not the work's release year.
+                            Year = null,
                             EpisodeCount = videoInfo.VideosCount > 0 ? videoInfo.VideosCount : (int?)null,
                         };
                         var aid = videoInfo.Aid ?? 0;
@@ -422,7 +489,7 @@ namespace Emby.Plugin.Danmu.Scraper.Bilibili
                 // else if (id.StartsWith("av", StringComparison.OrdinalIgnoreCase)) { /* TODO: 如果需要，处理 AVID */ }
                 else if (long.TryParse(id, out var numericId)) // 可能是 season_id 或 ep_id
                 {
-                    if (isMovieItemType || isEpisodeItemType)
+                    if (isEpisodeItemType)
                     {
                         var exactEpisode = await _api.GetEpisodeAsync(numericId, CancellationToken.None)
                             .ConfigureAwait(false);
@@ -433,36 +500,27 @@ namespace Emby.Plugin.Danmu.Scraper.Bilibili
                             return null;
                         }
 
-                        var exactTitle = !string.IsNullOrWhiteSpace(exactEpisode.LongTitle)
-                            ? exactEpisode.LongTitle
-                            : exactEpisode.Title ?? string.Empty;
-                        scraperMedia = new ScraperMedia
-                        {
-                            Id = id,
-                            ProviderId = ProviderId,
-                            Title = exactTitle,
-                            Year = exactEpisode.PubTime > 0
-                                ? UnixTimeStampToYear(exactEpisode.PubTime)
-                                : (int?)null,
-                            EpisodeCount = 1,
-                            CommentId = id,
-                            Episodes = new List<ScraperEpisode>
-                            {
-                                new ScraperEpisode
-                                {
-                                    Id = id,
-                                    CommentId = id,
-                                    Title = exactTitle,
-                                    EpisodeNumber = 1,
-                                },
-                            },
-                        };
+                        scraperMedia = CreateExactMovieEpisodeMedia(id, exactEpisode);
                         return scraperMedia;
                     }
 
                     log.Info($"Bilibili.GetMedia (数字ID: {numericId}): 假定为 season_id。正在为 Emby 项目 '{item.Name}' 调用 _api.GetSeasonAsync。");
                     // 首先尝试作为季度获取 (用于剧集/番剧)
                     var seasonInfo = await _api.GetSeasonAsync(numericId, CancellationToken.None).ConfigureAwait(false);
+                    if (isMovieItemType &&
+                        (seasonInfo?.Episodes == null || !seasonInfo.Episodes.Any()))
+                    {
+                        var exactEpisode = await _api.GetEpisodeAsync(numericId, CancellationToken.None)
+                            .ConfigureAwait(false);
+                        if (exactEpisode != null && exactEpisode.Id == numericId)
+                        {
+                            scraperMedia = CreateExactMovieEpisodeMedia(id, exactEpisode);
+                            if (scraperMedia != null)
+                            {
+                                return scraperMedia;
+                            }
+                        }
+                    }
                     if (seasonInfo != null && seasonInfo.Episodes != null && seasonInfo.Episodes.Any())
                     {
                         VideoSeasonDetail seasonDetail = null;
@@ -484,13 +542,18 @@ namespace Emby.Plugin.Danmu.Scraper.Bilibili
                             Title = !string.IsNullOrWhiteSpace(seasonDetail?.Title)
                                 ? seasonDetail.Title
                                 : seasonDetail?.SeasonTitle ?? string.Empty,
-                            Year = TryGetYearFromSeasonDetail(seasonDetail, seasonInfo),
+                            // publish.pub_time and episode pub_time describe provider publication, not production year.
+                            Year = null,
                             EpisodeCount = seasonDetail?.Total > 0
                                 ? seasonDetail.Total
                                 : seasonInfo.TotalCount > 0 ? seasonInfo.TotalCount : (int?)null,
                         }; // 使用原始 ID (season_id)
                         
-                        var episodesToProcess = seasonInfo.Episodes;
+                        var episodesToProcess = isMovieItemType
+                            ? seasonInfo.Episodes.Where(ep =>
+                                BuildMovieParts(new[] { ep }).Any(part => !part.IsExplicitNonMain))
+                                .GroupBy(ep => ep.Id).Select(group => group.First())
+                            : seasonInfo.Episodes;
 
                         foreach (var ep in episodesToProcess)
                         {
@@ -599,6 +662,11 @@ namespace Emby.Plugin.Danmu.Scraper.Bilibili
                             EpisodeNumber = matchingPage.Page > 0
                                 ? matchingPage.Page
                                 : EpisodeContentClassifier.TryGetEpisodeNumber(matchingPage.PartName),
+                            SourceMetadata = new SourceMetadata
+                            {
+                                Title = tupleVideo.Title ?? string.Empty,
+                                Year = null,
+                            },
                         };
                     }
 
@@ -617,6 +685,11 @@ namespace Emby.Plugin.Danmu.Scraper.Bilibili
                         CommentId = $"{tupleAid},{tupleCid}",
                         Title = matchingUgcEpisode.Title,
                         EpisodeNumber = EpisodeContentClassifier.TryGetEpisodeNumber(matchingUgcEpisode.Title),
+                        SourceMetadata = new SourceMetadata
+                        {
+                            Title = tupleVideo.Title ?? string.Empty,
+                            Year = null,
+                        },
                     };
                 }
 
@@ -630,7 +703,15 @@ namespace Emby.Plugin.Danmu.Scraper.Bilibili
                     var videoInfo = await _api.GetVideoByBvidAsync(id, CancellationToken.None).ConfigureAwait(false);
                     if (videoInfo?.Cid.HasValue == true && videoInfo.Cid.Value > 0)
                     {
-                        return new ScraperEpisode() { Id = id, CommentId = $"{videoInfo.Cid}", Title = videoInfo.Title };
+                        return new ScraperEpisode()
+                        {
+                            Id = id, CommentId = $"{videoInfo.Cid}", Title = videoInfo.Title,
+                            SourceMetadata = new SourceMetadata
+                            {
+                                Title = videoInfo.Title ?? string.Empty,
+                                Year = null,
+                            },
+                        };
                     }
 
                     if (videoInfo?.Pages != null && videoInfo.Pages.Any())
@@ -645,6 +726,11 @@ namespace Emby.Plugin.Danmu.Scraper.Bilibili
                             EpisodeNumber = firstPart.Page > 0
                                 ? firstPart.Page
                                 : EpisodeContentClassifier.TryGetEpisodeNumber(firstPart.PartName),
+                            SourceMetadata = new SourceMetadata
+                            {
+                                Title = videoInfo.Title ?? string.Empty,
+                                Year = null,
+                            },
                         };
                     } else {
                         log.Warn($"Bilibili.GetMediaEpisode (BVID: {id}): 无法获取 BVID '{id}' (Emby 项目 '{item?.Name ?? "未知项目"}') 的视频信息或分P。"); // 明确返回 null
@@ -680,6 +766,7 @@ namespace Emby.Plugin.Danmu.Scraper.Bilibili
                             CommentId = finalCommentId,
                             Title = episodeInfo.Title,
                             EpisodeNumber = EpisodeContentClassifier.TryGetEpisodeNumber(episodeInfo.Title),
+                            SourceMetadata = episodeInfo.SourceMetadata?.Clone(),
                         };
                     }
                     else

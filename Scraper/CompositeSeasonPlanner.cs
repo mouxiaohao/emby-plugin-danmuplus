@@ -32,6 +32,17 @@ namespace Emby.Plugin.Danmu.Scraper
             double matchScore, string scoreOrigin, string selectionEvidenceToken,
             out CompositeSeasonPlan plan, out string error)
         {
+            return TryApplyRemainingOwningSourceEpisodes(currentPlan, source, availableSourceEpisodes,
+                origin, matchScore, scoreOrigin, selectionEvidenceToken, null, out plan, out error);
+        }
+
+        public static bool TryApplyRemainingOwningSourceEpisodes(
+            CompositeSeasonPlan currentPlan, CompositeSeasonSourceIdentity source,
+            IEnumerable<CompositeSeasonSourceEpisode> availableSourceEpisodes, string origin,
+            double matchScore, string scoreOrigin, string selectionEvidenceToken,
+            SourceMetadata sourceMetadata,
+            out CompositeSeasonPlan plan, out string error)
+        {
             plan = currentPlan;
             error = string.Empty;
             var available = (availableSourceEpisodes ?? Enumerable.Empty<CompositeSeasonSourceEpisode>()).ToList();
@@ -64,6 +75,7 @@ namespace Emby.Plugin.Danmu.Scraper
                     MatchScore = matchScore,
                     ScoreOrigin = scoreOrigin ?? string.Empty,
                     SelectionEvidenceToken = selectionEvidenceToken ?? string.Empty,
+                    SourceMetadata = sourceMetadata?.Clone(),
                 };
                 if (!TryApplySegment(plan, request, out plan, out var applied, out error)) return false;
                 offset += applied;
@@ -86,6 +98,17 @@ namespace Emby.Plugin.Danmu.Scraper
             double matchScore, string scoreOrigin, string selectionEvidenceToken,
             out CompositeSeasonPlan plan, out string error)
         {
+            return TryApplyRemainingSourceEpisodes(currentPlan, source, availableSourceEpisodes,
+                origin, matchScore, scoreOrigin, selectionEvidenceToken, null, out plan, out error);
+        }
+
+        public static bool TryApplyRemainingSourceEpisodes(
+            CompositeSeasonPlan currentPlan, CompositeSeasonSourceIdentity source,
+            IEnumerable<CompositeSeasonSourceEpisode> availableSourceEpisodes, string origin,
+            double matchScore, string scoreOrigin, string selectionEvidenceToken,
+            SourceMetadata sourceMetadata,
+            out CompositeSeasonPlan plan, out string error)
+        {
             plan = currentPlan;
             error = string.Empty;
             var available = (availableSourceEpisodes ?? Enumerable.Empty<CompositeSeasonSourceEpisode>()).ToList();
@@ -105,6 +128,7 @@ namespace Emby.Plugin.Danmu.Scraper
                     MatchScore = matchScore,
                     ScoreOrigin = scoreOrigin ?? string.Empty,
                     SelectionEvidenceToken = selectionEvidenceToken ?? string.Empty,
+                    SourceMetadata = sourceMetadata?.Clone(),
                 };
                 if (!TryApplySegment(plan, request, out plan, out var applied, out error)) return false;
                 offset += applied;
@@ -393,6 +417,7 @@ namespace Emby.Plugin.Danmu.Scraper
                     MatchScore = request.MatchScore,
                     ScoreOrigin = request.ScoreOrigin ?? string.Empty,
                     SelectionEvidenceToken = request.SelectionEvidenceToken ?? string.Empty,
+                    SourceMetadata = request.SourceMetadata?.Clone(),
                 });
             }
 
@@ -664,6 +689,7 @@ namespace Emby.Plugin.Danmu.Scraper
                 SourceEpisodeNumber = mapping.SourceEpisodeNumber, Origin = mapping.Origin,
                 MatchScore = mapping.MatchScore, ScoreOrigin = mapping.ScoreOrigin,
                 SelectionEvidenceToken = mapping.SelectionEvidenceToken,
+                SourceMetadata = mapping.SourceMetadata?.Clone(),
             };
         }
 

@@ -63,6 +63,23 @@ namespace Emby.Plugin.Danmu.Scraper
             out bool exhausted,
             out string error)
         {
+            return TryNormalizeAndContinueSource(currentPlan, source, sourceEpisodes, origin,
+                matchScore, scoreOrigin, selectionEvidenceToken, null, out plan, out exhausted, out error);
+        }
+
+        public static bool TryNormalizeAndContinueSource(
+            CompositeSeasonPlan currentPlan,
+            CompositeSeasonSourceIdentity source,
+            IEnumerable<CompositeSeasonSourceEpisode> sourceEpisodes,
+            string origin,
+            double matchScore,
+            string scoreOrigin,
+            string selectionEvidenceToken,
+            SourceMetadata sourceMetadata,
+            out CompositeSeasonPlan plan,
+            out bool exhausted,
+            out string error)
+        {
             plan = currentPlan;
             exhausted = false;
             error = string.Empty;
@@ -91,6 +108,7 @@ namespace Emby.Plugin.Danmu.Scraper
                 MatchScore = mapping.MatchScore,
                 ScoreOrigin = mapping.ScoreOrigin,
                 SelectionEvidenceToken = mapping.SelectionEvidenceToken,
+                SourceMetadata = mapping.SourceMetadata?.Clone(),
             }).ToList();
             foreach (var mapping in normalizedMappings.Where(mapping =>
                          string.Equals(mapping.Origin, "episode-provider-id", StringComparison.OrdinalIgnoreCase) &&
@@ -114,7 +132,7 @@ namespace Emby.Plugin.Danmu.Scraper
             var available = verifiedEpisodes.Where(episode => !consumedIds.Contains(episode.EpisodeId)).ToList();
             if (available.Count > 0 && plan.UnmatchedRuns.Count > 0 &&
                 !CompositeSeasonPlanner.TryApplyRemainingSourceEpisodes(plan, source, available, origin,
-                    matchScore, scoreOrigin, selectionEvidenceToken, out plan, out error))
+                    matchScore, scoreOrigin, selectionEvidenceToken, sourceMetadata, out plan, out error))
             {
                 return false;
             }
@@ -354,7 +372,21 @@ namespace Emby.Plugin.Danmu.Scraper
                 Origin = "episode-provider-id",
                 MatchScore = 1,
                 ScoreOrigin = "exact-episode-id",
+                SourceMetadata = GetSourceMetadata(media),
             };
+        }
+
+        public static SourceMetadata GetSourceMetadata(ScraperMedia media)
+        {
+            if (media == null) return null;
+            if (media.SourceMetadata?.HasValue == true) return media.SourceMetadata.Clone();
+            var metadata = new SourceMetadata
+            {
+                Title = media.Title ?? string.Empty,
+                Year = media.Year,
+                Category = media.Category ?? string.Empty,
+            };
+            return metadata.HasValue ? metadata : null;
         }
 
         public static List<DanmuCompositeSeasonGroup> ToGroups(
@@ -419,6 +451,7 @@ namespace Emby.Plugin.Danmu.Scraper
                 MatchScore = first.MatchScore,
                 ScoreOrigin = first.ScoreOrigin ?? string.Empty,
                 SelectionEvidenceToken = first.SelectionEvidenceToken ?? string.Empty,
+                SourceMetadata = first.SourceMetadata?.Clone(),
                 Episodes = mappings.Select(mapping => new DanmuCompositeEpisode
                 {
                     ItemId = mapping.LocalEpisodeItemId,

@@ -51,6 +51,7 @@ namespace Emby.Plugin.Danmu.RegressionTests
             RejectsForeignAndStaleTemporaryRangesWithoutMutatingThePlan();
             VerifiesControllerParityMetadataAndDialogResetContracts();
             PreservesServerCandidateScoreAcrossOwningPlansAndGroups();
+            PreservesSourceMetadataAcrossEveryBindingEntryPoint();
             ProjectsBoundedSourceEpisodeNamesWithoutChangingPlanAuthority();
             PreservesExactBindingScoreIntoSelectedCandidate();
         }
@@ -988,6 +989,80 @@ namespace Emby.Plugin.Danmu.RegressionTests
                    !groupModel.Contains("EmitDefaultValue") &&
                    groupModel.Contains("public double? MatchScore { get; set; }"),
                 "Emby/ServiceStack must see a plain nullable score: mapped values serialize, temporary nulls use its default omission policy");
+        }
+
+        private static void PreservesSourceMetadataAcrossEveryBindingEntryPoint()
+        {
+            var metadataJson = System.Text.Json.JsonSerializer.Serialize(
+                new SourceMetadata { Title = "Visible", Year = 2024, Category = "Anime" });
+            Assert(!metadataJson.Contains("HasValue", StringComparison.OrdinalIgnoreCase),
+                "SourceMetadata payloads must expose only title, year, and category");
+            var fidelityProperty = typeof(DanmuMatchCandidate).GetProperty("FidelityTitleEvidence");
+            Assert(fidelityProperty.GetCustomAttributes(typeof(System.Text.Json.Serialization.JsonIgnoreAttribute), true).Any() &&
+                   fidelityProperty.GetCustomAttributes(typeof(System.Runtime.Serialization.IgnoreDataMemberAttribute), true).Any(),
+                "internal fidelity evidence must be hidden from both System.Text.Json and Emby/ServiceStack-style payload serializers");
+            var metadata = new SourceMetadata { Title = "Upstream Season", Year = 2024, Category = "Anime" };
+            var source = new CompositeSeasonSourceIdentity
+            {
+                ProviderId = "DandanID", MediaId = "upstream-season", MediaLookupId = "lookup-season",
+            };
+            var sourceEpisodes = new[]
+            {
+                Source("source-1", "comment-1", 1), Source("source-2", "comment-2", 2),
+            };
+            var owningLocal = LocalEpisodes(1, 2);
+            owningLocal.ForEach(episode =>
+            {
+                episode.Ownership = CompositeSeasonOwnershipKind.Owning;
+                episode.ParentSeasonNumber = 1;
+            });
+
+            Assert(CompositeSeasonPlanner.TryCreatePlan(owningLocal, null, out var automatic, out var error), error);
+            Assert(CompositeSeasonPlanner.TryApplyRemainingOwningSourceEpisodes(
+                automatic, source, sourceEpisodes, "automatic-primary", .95, "search-confidence", "auto-token",
+                metadata, out automatic, out error), error);
+            AssertMetadata(automatic, "automatic");
+
+            Assert(CompositeSeasonPlanner.TryCreatePlan(LocalEpisodes(1, 2), null, out var manual, out error), error);
+            Assert(CompositeSeasonPlanner.TryApplySegment(manual, new CompositeSeasonSegmentRequest
+            {
+                LocalStartEpisodeItemId = "local-1", RequestedEpisodeCount = 2, Source = source,
+                SourceEpisodes = sourceEpisodes.ToList(), SourceStartEpisodeId = "source-1",
+                Origin = "manual", SourceMetadata = metadata,
+            }, out manual, out _, out error), error);
+            AssertMetadata(manual, "manual");
+
+            Assert(CompositeSeasonPlanner.TryCreatePlan(LocalEpisodes(1, 2), null, out var supplemental, out error), error);
+            Assert(CompositeSeasonMatchService.TryNormalizeAndContinueSource(
+                supplemental, source, sourceEpisodes, "automatic-residual", .9, "search-confidence", "supp-token",
+                metadata, out supplemental, out _, out error), error);
+            AssertMetadata(supplemental, "supplementary");
+
+            var directMedia = new ScraperMedia
+            {
+                Id = source.MediaId, Title = metadata.Title, Year = metadata.Year, Category = metadata.Category,
+                Episodes = new List<ScraperEpisode>
+                {
+                    new ScraperEpisode { Id = "source-1", CommentId = "comment-1", EpisodeNumber = 1 },
+                },
+            };
+            var directMapping = CompositeSeasonMatchService.CreateDirectMapping(
+                "local-1", source.ProviderId, directMedia, source.MediaLookupId);
+            Assert(CompositeSeasonPlanner.TryCreatePlan(LocalEpisodes(1, 1), new[] { directMapping },
+                out var direct, out error), error);
+            AssertMetadata(direct, "direct temporary");
+
+            void AssertMetadata(CompositeSeasonPlan plan, string entryPoint)
+            {
+                Assert(plan.Mappings.All(mapping => mapping.SourceMetadata?.Title == metadata.Title &&
+                    mapping.SourceMetadata.Year == metadata.Year && mapping.SourceMetadata.Category == metadata.Category),
+                    entryPoint + " mappings must preserve selected source metadata");
+                var group = CompositeSeasonMatchService.ToGroups(plan, Enumerable.Empty<Episode>())
+                    .Single(item => !item.IsTemporary);
+                Assert(group.SourceMetadata?.Title == metadata.Title && group.SourceMetadata.Year == metadata.Year &&
+                       group.SourceMetadata.Category == metadata.Category,
+                    entryPoint + " segment-to-collection reconstruction must preserve source metadata");
+            }
         }
 
         private static void ProjectsBoundedSourceEpisodeNamesWithoutChangingPlanAuthority()

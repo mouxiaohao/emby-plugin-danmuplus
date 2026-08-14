@@ -66,6 +66,9 @@ namespace Emby.Plugin.Danmu.Core.Controllers
         [DataMember(Name="candidateEvidence")]
         public string CandidateEvidence { get; set; } = string.Empty;
 
+        [DataMember(Name="moviePartToken")]
+        public string MoviePartToken { get; set; } = string.Empty;
+
         [DataMember(Name="generation")]
         public string Generation { get; set; } = string.Empty;
 
@@ -618,6 +621,13 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 Site = request?.Site ?? string.Empty,
                 CandidateId = request?.CandidateId ?? string.Empty,
             };
+            var movie = string.IsNullOrWhiteSpace(request?.Id)
+                ? null
+                : _libraryManager.GetItemById(request.Id) as Movie;
+            if (movie != null)
+            {
+                return await GetSelectedMoviePartPreview(movie, request, response).ConfigureAwait(false);
+            }
             var episode = string.IsNullOrWhiteSpace(request?.Id)
                 ? null
                 : _libraryManager.GetItemById(request.Id) as Episode;
@@ -688,6 +698,86 @@ namespace Emby.Plugin.Danmu.Core.Controllers
             }
         }
 
+        private async Task<DanmuSelectedCandidateDetailPreview> GetSelectedMoviePartPreview(
+            Movie movie,
+            DanmuParams request,
+            DanmuSelectedCandidateDetailPreview response)
+        {
+            var scraper = _scraperManager.All().FirstOrDefault(candidate =>
+                string.Equals(candidate.ProviderId, request?.Site, StringComparison.OrdinalIgnoreCase));
+            if (scraper == null || string.IsNullOrWhiteSpace(request?.CandidateId) ||
+                !CandidateEvidence.TryResolve(request.SelectionEvidenceToken,
+                    movie.Id.ToString(), request.Site, request.CandidateId, out var candidateEvidence))
+            {
+                response.Status = "invalid_or_stale_evidence";
+                response.Message = "Movie candidate evidence is invalid or expired.";
+                return response;
+            }
+
+            response.ItemId = movie.Id.ToString();
+            response.Site = scraper.ProviderId;
+            response.SiteName = scraper.ProviderName;
+            try
+            {
+                var detailExecution = await BoundedSearchPolicy.Shared.ExecuteAsync(
+                    scraper.ProviderId,
+                    ignored => scraper.GetMedia(movie, request.CandidateId),
+                    CancellationToken.None).ConfigureAwait(false);
+                if (detailExecution.Status != BoundedSearchExecutionStatus.Completed ||
+                    detailExecution.Result == null)
+                {
+                    response.Status = "unresolved";
+                    response.Message = "Movie detail could not be verified.";
+                    return response;
+                }
+
+                var partExecution = await BoundedSearchPolicy.Shared.ExecuteAsync(
+                    scraper.ProviderId,
+                    token => scraper.GetMovieParts(movie, request.CandidateId, token),
+                    CancellationToken.None).ConfigureAwait(false);
+                var parts = partExecution.Status == BoundedSearchExecutionStatus.Completed
+                    ? MoviePartPolicy.GetUsableParts(partExecution.Result)
+                    : new List<ScraperMoviePart>();
+                var detailMetadata = CompositeSeasonMatchService.GetSourceMetadata(detailExecution.Result);
+                response.SourceMetadata = SourceMetadata.MergeDetailWithSnapshot(
+                    detailMetadata, candidateEvidence.SourceMetadata);
+                for (var index = 0; index < parts.Count; index++)
+                {
+                    var part = parts[index];
+                    var token = CandidateEvidence.RegisterMoviePart(
+                        request.SelectionEvidenceToken,
+                        movie.Id.ToString(),
+                        scraper.ProviderId,
+                        request.CandidateId,
+                        part);
+                    if (string.IsNullOrWhiteSpace(token)) continue;
+                    var isDefault = response.MovieParts.Count == 0;
+                    response.MovieParts.Add(new DanmuMoviePartChoice
+                    {
+                        Token = token,
+                        PartTitle = part.Title ?? string.Empty,
+                        Index = part.Index,
+                        Selected = isDefault,
+                    });
+                }
+
+                response.PartTitle = response.MovieParts.FirstOrDefault(choice => choice.Selected)?.PartTitle ??
+                    string.Empty;
+                response.Status = "ready";
+                response.Message = response.MovieParts.Count > 1
+                    ? "Movie parts are ready for optional selection."
+                    : "Movie candidate is ready.";
+                return response;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "[{0}] Movie part preview failed: movie={1}", scraper.Name, movie.Name);
+                response.Status = "unresolved";
+                response.Message = "Movie part preview could not be resolved.";
+                return response;
+            }
+        }
+
         /// <summary>
         /// Resolves one selected Episode candidate without confusing an
         /// Episode-local ProviderId lookup token with a Season/media id.
@@ -741,6 +831,7 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                     request.Keyword,
                     rematch,
                     cancellationToken).ConfigureAwait(false);
+                StampCandidateEvidence(movie, result.Target.Candidates);
                 result.CanStart = result.Target.AutoSelected;
                 result.Status = result.Target.Status;
                 result.Message = result.Target.Message;
@@ -1421,7 +1512,9 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 _logger,
                 BoundedSearchPolicy.Shared,
                 cancellationToken,
-                parentCancellationToken == default(CancellationToken) ? cancellationToken : parentCancellationToken)
+                parentCancellationToken == default(CancellationToken) ? cancellationToken : parentCancellationToken,
+                new[] { parent?.OriginalTitle },
+                new[] { latest.OriginalTitle })
                 .ConfigureAwait(false);
             result.Candidates = search.Candidates;
             StampSeasonCandidateEvidence(latest, result.Candidates);
@@ -1599,7 +1692,9 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 _scraperManager.All(), parent?.Name ?? string.Empty, latest.Name ?? string.Empty,
                 latest.ProductionYear, range.Episodes.Count, searchKeyword, _logger,
                 BoundedSearchPolicy.Shared, cancellationToken,
-                parentCancellationToken == default(CancellationToken) ? cancellationToken : parentCancellationToken)
+                parentCancellationToken == default(CancellationToken) ? cancellationToken : parentCancellationToken,
+                new[] { parent?.OriginalTitle },
+                new[] { latest.OriginalTitle })
                 .ConfigureAwait(false);
             response.Keyword = searchKeyword;
             response.Candidates = search.Candidates;
@@ -1909,6 +2004,17 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 DecisionReason = string.IsNullOrWhiteSpace(candidate.DecisionReason)
                     ? decisionReason ?? string.Empty
                     : candidate.DecisionReason,
+                SourceMetadata = candidate.SourceMetadata?.Clone(),
+                PartTitle = candidate.PartTitle,
+                MovieParts = candidate.MovieParts == null
+                    ? new List<DanmuMoviePartChoice>()
+                    : candidate.MovieParts.Select(part => new DanmuMoviePartChoice
+                    {
+                        Token = part.Token,
+                        PartTitle = part.PartTitle,
+                        Index = part.Index,
+                        Selected = part.Selected,
+                    }).ToList(),
             };
         }
 
@@ -1939,7 +2045,8 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 candidate.MatchScore = score;
                 candidate.ScoreOrigin = origin;
                 candidate.SelectionEvidenceToken = CandidateEvidence.Register(
-                    target.Id.ToString(), candidate.Site, candidate.Id, score, origin);
+                    target.Id.ToString(), candidate.Site, candidate.Id, score, origin,
+                    candidate.SourceMetadata);
             }
         }
 
@@ -2226,6 +2333,27 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 return result;
             }
 
+            if (!CandidateEvidence.TryResolve(request.SelectionEvidenceToken,
+                    movie.Id.ToString(), scraper.ProviderId, request.CandidateId, out _))
+            {
+                result.Message = "电影候选证据已失效，请重新预览";
+                return result;
+            }
+
+            DanmuMoviePartEvidence selectedPart = null;
+            if (!string.IsNullOrWhiteSpace(request.MoviePartToken) &&
+                !CandidateEvidence.TryResolveMoviePart(
+                    request.MoviePartToken,
+                    request.SelectionEvidenceToken,
+                    movie.Id.ToString(),
+                    scraper.ProviderId,
+                    request.CandidateId,
+                    out selectedPart))
+            {
+                result.Message = "电影正片版本选择已失效或不属于当前候选";
+                return result;
+            }
+
             try
             {
                 var media = await scraper.GetMedia(movie, request.CandidateId).ConfigureAwait(false);
@@ -2233,6 +2361,12 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 {
                     result.Message = "电影候选已失效或无法读取";
                     return result;
+                }
+
+                if (selectedPart != null)
+                {
+                    media.SelectedMoviePartId = selectedPart.PartId;
+                    media.PartTitle = selectedPart.PartTitle;
                 }
 
                 var providerValue = string.IsNullOrWhiteSpace(media.Id) ? request.CandidateId : media.Id;
@@ -2458,6 +2592,9 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                     MatchScore = selectionEvidence.MatchScore,
                     ScoreOrigin = selectionEvidence.ScoreOrigin,
                     SelectionEvidenceToken = selection.SelectionEvidenceToken,
+                    SourceMetadata = SourceMetadata.MergeDetailWithSnapshot(
+                        CompositeSeasonMatchService.GetSourceMetadata(media),
+                        selectionEvidence.SourceMetadata),
                 };
                 var beforeLocalIds = new HashSet<string>(plan.Mappings.Select(x => x.LocalEpisodeItemId),
                     StringComparer.OrdinalIgnoreCase);
@@ -2470,6 +2607,7 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                     if (!CompositeSeasonPlanner.TryApplyRemainingOwningSourceEpisodes(
                             plan, request.Source, sourceEpisodes, request.Origin,
                             request.MatchScore, request.ScoreOrigin, request.SelectionEvidenceToken,
+                            request.SourceMetadata,
                             out plan, out error))
                     {
                         build.Error = error;
@@ -2508,6 +2646,7 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                         MatchScore = mapping.MatchScore,
                         ScoreOrigin = mapping.ScoreOrigin,
                         SelectionEvidenceToken = mapping.SelectionEvidenceToken,
+                        SourceMetadata = mapping.SourceMetadata?.Clone(),
                     }));
             }
 
@@ -2543,6 +2682,7 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 SourceStartEpisodeNumber = selection.SourceStartEpisodeNumber,
                 MatchOrigin = selection.MatchOrigin ?? string.Empty,
                 SelectionEvidenceToken = selection.SelectionEvidenceToken ?? string.Empty,
+                ServerSourceMetadata = selection.ServerSourceMetadata?.Clone(),
             };
         }
 
@@ -2837,6 +2977,30 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 return failed;
             }
 
+            if (!CandidateEvidence.TryResolve(request.SelectionEvidenceToken,
+                    movie.Id.ToString(), scraper.ProviderId, request.CandidateId,
+                    out var candidateEvidence))
+            {
+                failed.SiteName = scraper.ProviderName;
+                failed.Message = "电影候选证据已失效，请重新预览";
+                return failed;
+            }
+
+            DanmuMoviePartEvidence selectedPart = null;
+            if (!string.IsNullOrWhiteSpace(request.MoviePartToken) &&
+                !CandidateEvidence.TryResolveMoviePart(
+                    request.MoviePartToken,
+                    request.SelectionEvidenceToken,
+                    movie.Id.ToString(),
+                    scraper.ProviderId,
+                    request.CandidateId,
+                    out selectedPart))
+            {
+                failed.SiteName = scraper.ProviderName;
+                failed.Message = "电影正片版本选择已失效或不属于当前候选";
+                return failed;
+            }
+
             ScraperMedia media;
             try
             {
@@ -2846,6 +3010,15 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                     failed.SiteName = scraper.ProviderName;
                     failed.Message = "电影候选已失效或无法读取";
                     return failed;
+                }
+
+                media.SourceMetadata = SourceMetadata.MergeDetailWithSnapshot(
+                    CompositeSeasonMatchService.GetSourceMetadata(media),
+                    candidateEvidence.SourceMetadata);
+                if (selectedPart != null)
+                {
+                    media.SelectedMoviePartId = selectedPart.PartId;
+                    media.PartTitle = selectedPart.PartTitle;
                 }
 
             }
@@ -2859,6 +3032,8 @@ namespace Emby.Plugin.Danmu.Core.Controllers
 
             var task = CreateSingleTargetTask(movie, request, scraper, "Movie", null);
             task.CandidateId = string.IsNullOrWhiteSpace(media.Id) ? request.CandidateId : media.Id;
+            task.PartTitle = media.PartTitle ?? string.Empty;
+            task.SelectedMoviePartId = media.SelectedMoviePartId ?? string.Empty;
             return QueueSingleTargetDownload(
                 task,
                 movie,
@@ -3528,6 +3703,8 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 {
                     throw new DanmuDownloadErrorException("弹幕来源无法读取电影信息");
                 }
+                media.SelectedMoviePartId = task.SelectedMoviePartId ?? string.Empty;
+                media.PartTitle = task.PartTitle ?? string.Empty;
             }
             catch (Exception ex)
             {
@@ -3652,6 +3829,7 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                     Site = task.Site,
                     SiteName = task.SiteName,
                     CandidateId = task.CandidateId,
+                    PartTitle = task.PartTitle,
                     MatchOrigin = task.MatchOrigin,
                     MappingProtocolVersion = task.MappingProtocolVersion,
                     PlanGeneration = task.PlanGeneration,

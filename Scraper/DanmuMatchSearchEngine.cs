@@ -27,7 +27,9 @@ namespace Emby.Plugin.Danmu.Scraper
             int? expectedYear,
             int expectedEpisodes,
             string keywordOverride,
-            ILogger logger)
+            ILogger logger,
+            IEnumerable<string> localSeriesTitleAliases = null,
+            IEnumerable<string> localSeasonTitleAliases = null)
         {
             using (var automaticDeadline = new CancellationTokenSource(
                 BoundedSearchPolicy.Shared.Options.AutomaticOperationTimeout))
@@ -41,7 +43,10 @@ namespace Emby.Plugin.Danmu.Scraper
                     keywordOverride,
                     logger,
                     BoundedSearchPolicy.Shared,
-                    automaticDeadline.Token).ConfigureAwait(false);
+                    automaticDeadline.Token,
+                    automaticDeadline.Token,
+                    localSeriesTitleAliases,
+                    localSeasonTitleAliases).ConfigureAwait(false);
             }
         }
 
@@ -84,7 +89,9 @@ namespace Emby.Plugin.Danmu.Scraper
             ILogger logger,
             BoundedSearchPolicy policy,
             CancellationToken executionCancellationToken,
-            CancellationToken parentCancellationToken)
+            CancellationToken parentCancellationToken,
+            IEnumerable<string> localSeriesTitleAliases = null,
+            IEnumerable<string> localSeasonTitleAliases = null)
         {
             var scrapers = (scraperSource ?? Enumerable.Empty<AbstractScraper>()).ToList();
             var keywords = DanmuMatchScorer.BuildSearchKeywords(seriesName, seasonName, keywordOverride)
@@ -95,9 +102,11 @@ namespace Emby.Plugin.Danmu.Scraper
             var outcomes = await ExecutePlannedCallsAsync(
                 scrapers,
                 keywords,
-                (scraper, keyword, cancellationToken) => scraper.SearchForApi(keyword, cancellationToken),
+                (scraper, keyword, cancellationToken) =>
+                    scraper.SearchForApiWithDiagnostics(keyword, cancellationToken),
                 searchInfo => DanmuMatchScorer.IsEligibleSeasonCandidate(
-                    searchInfo, seriesName, seasonName, keywordOverride),
+                    searchInfo, seriesName, seasonName, keywordOverride,
+                    localSeriesTitleAliases, localSeasonTitleAliases),
                 policy,
                 executionCancellationToken,
                 logger,
@@ -120,7 +129,9 @@ namespace Emby.Plugin.Danmu.Scraper
                 seriesName,
                 seasonName,
                 expectedYear,
-                expectedEpisodes);
+                expectedEpisodes,
+                localSeriesTitleAliases,
+                localSeasonTitleAliases);
             result.Candidates = OrderCandidates(result.CanonicalCandidates);
             ClassifyResult(result);
             return result;
@@ -163,11 +174,11 @@ namespace Emby.Plugin.Danmu.Scraper
             var outcomes = await ExecutePlannedCallsAsync(
                 scrapers,
                 keywords,
-                (scraper, keyword, cancellationToken) => scraper.Search(new Movie
-                {
-                    Name = keyword.Trim(),
-                    ProductionYear = expectedYear,
-                }, cancellationToken),
+                (scraper, keyword, cancellationToken) => scraper.SearchWithDiagnostics(new Movie
+                    {
+                        Name = keyword.Trim(),
+                        ProductionYear = expectedYear,
+                    }, cancellationToken),
                 searchInfo => searchInfo != null &&
                               !string.IsNullOrWhiteSpace(searchInfo.Id) &&
                               !string.IsNullOrWhiteSpace(searchInfo.Name) &&
@@ -177,7 +188,12 @@ namespace Emby.Plugin.Danmu.Scraper
                 logger,
                 "movie").ConfigureAwait(false);
             var result = ToResult(outcomes, cancellationToken);
-            result.CanonicalCandidates = ScoreMovieCandidates(MergeSources(outcomes), scrapers, movieName, expectedYear);
+            var localAliases = string.IsNullOrWhiteSpace(keywordOverride) ||
+                               string.Equals(keywordOverride?.Trim(), movie?.Name, StringComparison.OrdinalIgnoreCase)
+                ? new[] { movie?.OriginalTitle }
+                : Enumerable.Empty<string>();
+            result.CanonicalCandidates = ScoreMovieCandidates(
+                MergeSources(outcomes), scrapers, movieName, expectedYear, localAliases);
             result.Candidates = OrderCandidates(result.CanonicalCandidates);
             ClassifyResult(result);
             return result;
@@ -186,7 +202,7 @@ namespace Emby.Plugin.Danmu.Scraper
         private static async Task<List<ProviderSearchOutcome>> ExecutePlannedCallsAsync(
             IList<AbstractScraper> scrapers,
             IList<string> keywords,
-            Func<AbstractScraper, string, CancellationToken, Task<List<ScraperSearchInfo>>> search,
+            Func<AbstractScraper, string, CancellationToken, Task<ScraperSearchResult>> search,
             Func<ScraperSearchInfo, bool> include,
             BoundedSearchPolicy policy,
             CancellationToken cancellationToken,
@@ -219,7 +235,7 @@ namespace Emby.Plugin.Danmu.Scraper
             AbstractScraper scraper,
             int sourceOrder,
             IEnumerable<string> keywords,
-            Func<AbstractScraper, string, CancellationToken, Task<List<ScraperSearchInfo>>> search,
+            Func<AbstractScraper, string, CancellationToken, Task<ScraperSearchResult>> search,
             Func<ScraperSearchInfo, bool> include,
             BoundedSearchPolicy policy,
             CancellationToken cancellationToken,
@@ -254,12 +270,24 @@ namespace Emby.Plugin.Danmu.Scraper
                 switch (execution.Status)
                 {
                     case BoundedSearchExecutionStatus.Completed:
-                        foreach (var searchInfo in execution.Result ?? new List<ScraperSearchInfo>())
+                        var providerResult = execution.Result ?? new ScraperSearchResult();
+                        foreach (var searchInfo in providerResult.Candidates)
                         {
                             if (include(searchInfo))
                             {
                                 AddDiscoveredSource(outcome.Sources, scraper.ProviderId, searchInfo);
                             }
+                        }
+
+                        foreach (var diagnostic in providerResult.Diagnostics)
+                        {
+                            outcome.AddDiagnostic(
+                                diagnostic.Status,
+                                keyword,
+                                stopwatch.ElapsedMilliseconds,
+                                diagnostic.Message,
+                                diagnostic.TimedOut,
+                                diagnostic.Cancelled);
                         }
 
                         outcome.AddDiagnostic("completed", keyword, stopwatch.ElapsedMilliseconds, string.Empty, false, false);
@@ -345,7 +373,8 @@ namespace Emby.Plugin.Danmu.Scraper
             Dictionary<string, DiscoveredSearchInfo> sources,
             IList<AbstractScraper> scrapers,
             string movieName,
-            int? expectedYear)
+            int? expectedYear,
+            IEnumerable<string> localTitleAliases)
         {
             var candidates = new List<DanmuMatchCandidate>();
             for (var sourceOrder = 0; sourceOrder < scrapers.Count; sourceOrder++)
@@ -365,7 +394,8 @@ namespace Emby.Plugin.Danmu.Scraper
                         scraper.ProviderName,
                         sourceOrder,
                         movieName,
-                        expectedYear)));
+                        expectedYear,
+                        localTitleAliases)));
             }
 
             return OrderCanonicalCandidates(candidates.Where(candidate => candidate.Score > 0));
@@ -377,7 +407,9 @@ namespace Emby.Plugin.Danmu.Scraper
             string seriesName,
             string seasonName,
             int? expectedYear,
-            int expectedEpisodes)
+            int expectedEpisodes,
+            IEnumerable<string> localSeriesTitleAliases,
+            IEnumerable<string> localSeasonTitleAliases)
         {
             var candidates = new List<DanmuMatchCandidate>();
             for (var sourceOrder = 0; sourceOrder < scrapers.Count; sourceOrder++)
@@ -399,7 +431,9 @@ namespace Emby.Plugin.Danmu.Scraper
                         seriesName,
                         seasonName,
                         expectedYear,
-                        expectedEpisodes)));
+                        expectedEpisodes,
+                        localSeriesTitleAliases,
+                        localSeasonTitleAliases)));
             }
 
             return OrderCanonicalCandidates(candidates);

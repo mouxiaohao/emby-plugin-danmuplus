@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using System.Runtime.Serialization;
+using System.Text.Json.Serialization;
 
 namespace Emby.Plugin.Danmu.Scraper.Bilibili.Entity
 {
@@ -19,5 +20,19 @@ namespace Emby.Plugin.Danmu.Scraper.Bilibili.Entity
         
         [DataMember(Name="result")]
         public List<Media> Result { get; set; }
+
+        public List<BilibiliSearchDiagnostic> Diagnostics { get; set; } =
+            new List<BilibiliSearchDiagnostic>();
+
+        [JsonIgnore]
+        [IgnoreDataMember]
+        public bool SessionAvailable { get; set; } = true;
+    }
+
+    public sealed class BilibiliSearchDiagnostic
+    {
+        public string SearchType { get; set; }
+        public int Page { get; set; }
+        public string Message { get; set; }
     }
 }

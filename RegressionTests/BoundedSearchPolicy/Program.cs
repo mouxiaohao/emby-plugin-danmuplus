@@ -90,7 +90,8 @@ namespace Emby.Plugin.Danmu.BoundedSearchPolicyRegression
                     relativePath + " legacy API search must delegate to the cancellation-aware overload");
                 Assert(source.Contains("CancellationToken cancellationToken)"),
                     relativePath + " must override the cancellation-aware API search contract");
-                Assert(source.Contains("SearchAsync(keyword, cancellationToken)"),
+                Assert(source.Contains("SearchAsync(keyword, cancellationToken)") ||
+                       source.Contains("SearchMergedAsync(keyword, cancellationToken)"),
                     relativePath + " must forward the caller token to its provider API search");
             }
         }

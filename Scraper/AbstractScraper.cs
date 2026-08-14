@@ -52,6 +52,17 @@ namespace Emby.Plugin.Danmu.Scraper
             return Search(item);
         }
 
+        public virtual async Task<ScraperSearchResult> SearchWithDiagnostics(
+            BaseItem item,
+            CancellationToken cancellationToken)
+        {
+            return new ScraperSearchResult
+            {
+                Candidates = await Search(item, cancellationToken).ConfigureAwait(false) ??
+                    new List<ScraperSearchInfo>()
+            };
+        }
+
         /// <summary>
         /// 搜索匹配的影片id
         /// </summary>
@@ -66,6 +77,20 @@ namespace Emby.Plugin.Danmu.Scraper
         /// <param name="id">影片id</param>
         /// <returns>影片信息</returns>
         public abstract Task<ScraperMedia> GetMedia(BaseItem item, string id);
+
+        /// <summary>
+        /// Enumerates independently downloadable Movie leaves for optional
+        /// post-match selection. Providers opt in only when Id can be passed
+        /// back to GetMediaEpisode(Movie, Id); the default exposes no choices.
+        /// </summary>
+        public virtual Task<List<ScraperMoviePart>> GetMovieParts(
+            BaseItem item,
+            string parentId,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return Task.FromResult(new List<ScraperMoviePart>());
+        }
 
         /// <summary>
         /// 需要更新弹幕时调用
@@ -102,6 +127,17 @@ namespace Emby.Plugin.Danmu.Scraper
         {
             cancellationToken.ThrowIfCancellationRequested();
             return SearchForApi(keyword);
+        }
+
+        public virtual async Task<ScraperSearchResult> SearchForApiWithDiagnostics(
+            string keyword,
+            CancellationToken cancellationToken)
+        {
+            return new ScraperSearchResult
+            {
+                Candidates = await SearchForApi(keyword, cancellationToken).ConfigureAwait(false) ??
+                    new List<ScraperSearchInfo>()
+            };
         }
 
         /// <summary>

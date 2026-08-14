@@ -33,6 +33,21 @@ namespace Emby.Plugin.Danmu.RegressionTests
     {
         private static int Main(string[] args)
         {
+            if (args != null && args.Contains("--movie-part-core", StringComparer.Ordinal))
+            {
+                MergesServerOwnedCandidateMetadataFieldByField();
+                FiltersAndSecuresMoviePartEvidence();
+                Console.WriteLine("Movie part core regression checks passed.");
+                return 0;
+            }
+
+            if (args != null && args.Contains("--bilibili-search", StringComparer.Ordinal))
+            {
+                BilibiliSearchTests.Run();
+                Console.WriteLine("Bilibili search regression checks passed.");
+                return 0;
+            }
+
             if (args != null && args.Contains("--composite-season-state", StringComparer.Ordinal))
             {
                 CompositeSeasonStateTests.Run();
@@ -59,6 +74,8 @@ namespace Emby.Plugin.Danmu.RegressionTests
             MapsLiveActionSeasonAndCleansTitle();
             UsesIdentifierFallbackOrder();
             OmitsMalformedRecords();
+            BilibiliSearchTests.Run();
+            IqiyiSourceMetadataTests.Run();
             OrdersAndSelectsCrossProviderTies();
             PreservesSameSiteHighestScoreTieAmbiguity();
             SelectsCloseHighConfidenceCandidatesBySitePriority();
@@ -67,6 +84,8 @@ namespace Emby.Plugin.Danmu.RegressionTests
             UsesOneMovieSearchTermAndPreservesStandardProvenance();
             IsolatesMovieProviderFailures();
             VerifiesLazyCandidateDetailContract();
+            MergesServerOwnedCandidateMetadataFieldByField();
+            FiltersAndSecuresMoviePartEvidence();
             ResolvesProviderIdsBySiteThenHierarchy();
             EnforcesItemLocalProviderScopes();
             DiscoversCandidatesWithBoundedTitleClauses();
@@ -610,11 +629,199 @@ namespace Emby.Plugin.Danmu.RegressionTests
                 "detail inspection must remain evidence-gated, target-bound, and independent of collection/segment protocols");
         }
 
+        private static void MergesServerOwnedCandidateMetadataFieldByField()
+        {
+            var snapshot = new SourceMetadata
+            {
+                Title = "Search title",
+                Year = 2014,
+                Category = "Search category",
+            };
+            var registry = new DanmuCandidateEvidenceRegistry();
+            var token = registry.Register(
+                "item-1", "DandanID", "candidate-1", 0.9, "search-confidence", snapshot);
+            snapshot.Year = 1999;
+            Assert(registry.TryResolve(token, "item-1", "DandanID", "candidate-1", out var evidence) &&
+                   evidence.SourceMetadata?.Year == 2014,
+                "candidate metadata evidence must be a server-owned clone");
+
+            var merged = SourceMetadata.MergeDetailWithSnapshot(
+                new SourceMetadata { Title = "Exact title", Category = "Exact category" },
+                evidence.SourceMetadata);
+            Assert(merged?.Title == "Exact title" && merged.Year == 2014 &&
+                   merged.Category == "Exact category",
+                "non-empty exact detail must win field-by-field while snapshot fills only missing year");
+            var trustworthyExactYear = SourceMetadata.MergeDetailWithSnapshot(
+                new SourceMetadata { Title = "Exact title", Year = 2020 },
+                new SourceMetadata { Title = "Search title", Year = 2014 });
+            Assert(trustworthyExactYear?.Year == 2020,
+                "a trustworthy exact production year must win over a conflicting candidate snapshot");
+            var noBrowserPath = typeof(DanmuCompositeSeasonSelection).GetProperty("SourceMetadata") == null;
+            Assert(noBrowserPath,
+                "browser composite selections must not accept SourceMetadata as authoritative input");
+            var automaticSelectionJson = JsonSerializer.Serialize(new DanmuCompositeSeasonSelection
+            {
+                ServerSourceMetadata = new SourceMetadata { Title = "server-only", Year = 2014 },
+            });
+            Assert(!automaticSelectionJson.Contains("server-only", StringComparison.Ordinal) &&
+                   !automaticSelectionJson.Contains("ServerSourceMetadata", StringComparison.Ordinal),
+                "automatic planning metadata snapshots must remain server-only");
+        }
+
+        private static void FiltersAndSecuresMoviePartEvidence()
+        {
+            var parts = MoviePartPolicy.GetUsableParts(new[]
+            {
+                new ScraperMoviePart { Id = "main-a", Title = "国语", Index = 1, IsDownloadable = true },
+                new ScraperMoviePart { Id = "trailer", Title = "Official Trailer", Index = 2, IsDownloadable = true },
+                new ScraperMoviePart { Id = "bonus", Title = "制作花絮", Index = 3, IsDownloadable = true },
+                new ScraperMoviePart { Id = "main-b", Title = "版本 B", Index = 4, IsDownloadable = true },
+                new ScraperMoviePart { Id = "main-b", Title = "duplicate", Index = 5, IsDownloadable = true },
+                new ScraperMoviePart { Id = "unstable", Title = "unstable", Index = 6, IsDownloadable = false },
+            });
+            Assert(parts.Select(part => part.Id).SequenceEqual(new[] { "main-a", "main-b" }),
+                "explicit extras must be filtered before stable first selection while indistinguishable usable parts remain");
+            var indistinguishable = MoviePartPolicy.GetUsableParts(new[]
+            {
+                new ScraperMoviePart { Id = "opaque-1", Title = "版本", IsDownloadable = true },
+                new ScraperMoviePart { Id = "opaque-2", Title = "版本", IsDownloadable = true },
+            });
+            Assert(indistinguishable.Count == 2 && indistinguishable[0].Id == "opaque-1",
+                "all-indistinguishable usable parts must retain stable order and must not block the default first part");
+            var single = MoviePartPolicy.GetUsableParts(new[]
+            {
+                new ScraperMoviePart { Id = "only-main", Title = "正片", IsDownloadable = true },
+                new ScraperMoviePart { Id = "only-extra", Title = "Interview", IsDownloadable = true },
+            });
+            Assert(single.Count == 1 && single[0].Id == "only-main",
+                "one usable part after filtering must remain the implicit default without a fabricated alternative");
+            var oversized = MoviePartPolicy.GetUsableParts(Enumerable.Range(0, 10000)
+                .Select(index => new ScraperMoviePart
+                {
+                    Id = "part-" + index,
+                    Title = "版本 " + index,
+                    Index = index,
+                    IsDownloadable = true,
+                }));
+            Assert(oversized.Count == MoviePartPolicy.MaximumUsableParts &&
+                   oversized.Select(part => part.Id).SequenceEqual(
+                       Enumerable.Range(0, MoviePartPolicy.MaximumUsableParts).Select(index => "part-" + index)),
+                "usable Movie choices must be stably capped before evidence registration");
+
+            var registry = new DanmuCandidateEvidenceRegistry();
+            var parentToken = registry.Register("movie-1", "BilibiliID", "parent-1", 0.95,
+                "search-confidence", new SourceMetadata { Title = "Parent Movie", Year = 2024 });
+            var firstToken = registry.RegisterMoviePart(
+                parentToken, "movie-1", "BilibiliID", "parent-1", parts[0]);
+            var otherParentToken = registry.Register("movie-1", "BilibiliID", "parent-1", 0.95,
+                "search-confidence");
+            var resolvesSelected = registry.TryResolveMoviePart(
+                firstToken, parentToken, "movie-1", "BilibiliID", "parent-1", out var selected);
+            Assert(!string.IsNullOrWhiteSpace(firstToken) && resolvesSelected &&
+                   selected.PartId == "main-a" &&
+                   !registry.TryResolveMoviePart(firstToken, parentToken, "movie-2", "BilibiliID", "parent-1", out _) &&
+                   !registry.TryResolveMoviePart(firstToken, parentToken, "movie-1", "OtherID", "parent-1", out _) &&
+                   !registry.TryResolveMoviePart(firstToken, parentToken, "movie-1", "BilibiliID", "parent-2", out _) &&
+                   !registry.TryResolveMoviePart(firstToken, otherParentToken, "movie-1", "BilibiliID", "parent-1", out _) &&
+                   !registry.TryResolveMoviePart("tampered-unregistered", parentToken, "movie-1", "BilibiliID", "parent-1", out _),
+                "Movie part evidence must be scoped to parent token, item, provider, and candidate");
+            selected.ExpiresUtc = DateTime.UtcNow.AddSeconds(-1);
+            Assert(!registry.TryResolveMoviePart(firstToken, parentToken, "movie-1", "BilibiliID", "parent-1", out _),
+                "expired Movie part evidence must fail closed without timing-dependent sleeps");
+            Assert(string.IsNullOrWhiteSpace(registry.RegisterMoviePart(
+                    parentToken, "movie-1", "BilibiliID", "parent-1",
+                    new ScraperMoviePart
+                    {
+                        Id = "excluded", Title = "预告", IsDownloadable = true, IsExplicitNonMain = true,
+                    })),
+                "an explicitly excluded Movie part must never receive selectable evidence");
+
+            var publicJson = JsonSerializer.Serialize(new DanmuMoviePartChoice
+            {
+                Token = firstToken,
+                PartTitle = "国语",
+                Index = 1,
+                Selected = true,
+            });
+            Assert(!publicJson.Contains("main-a", StringComparison.Ordinal),
+                "public Movie part payload must never serialize the raw provider leaf id");
+            var taskJson = JsonSerializer.Serialize(new DanmuDownloadTaskResult
+            {
+                SelectedMoviePartId = "main-a",
+                PartTitle = "国语",
+            });
+            Assert(!taskJson.Contains("main-a", StringComparison.Ordinal),
+                "download task payload must hide the server-owned selected Movie leaf id");
+            var selectedIdProperty = typeof(ScraperMedia).GetProperty(nameof(ScraperMedia.SelectedMoviePartId));
+            var rawPartIdProperty = typeof(ScraperMoviePart).GetProperty(nameof(ScraperMoviePart.Id));
+            Assert(selectedIdProperty.GetCustomAttribute<System.Text.Json.Serialization.JsonIgnoreAttribute>() != null &&
+                   selectedIdProperty.GetCustomAttribute<System.Runtime.Serialization.IgnoreDataMemberAttribute>() != null &&
+                   rawPartIdProperty.GetCustomAttribute<System.Text.Json.Serialization.JsonIgnoreAttribute>() != null &&
+                   rawPartIdProperty.GetCustomAttribute<System.Runtime.Serialization.IgnoreDataMemberAttribute>() != null &&
+                   !JsonSerializer.Serialize(new ScraperMedia { SelectedMoviePartId = "raw-selected-leaf" })
+                       .Contains("raw-selected-leaf", StringComparison.Ordinal) &&
+                   !JsonSerializer.Serialize(new ScraperMoviePart { Id = "raw-provider-leaf" })
+                       .Contains("raw-provider-leaf", StringComparison.Ordinal),
+                "raw Movie leaf identities must be hidden from System.Text.Json and IgnoreDataMember serializers");
+
+            var explicitMedia = new ScraperMedia
+            {
+                Id = "parent", CommentId = "legacy-default", SelectedMoviePartId = "chosen-leaf",
+            };
+            var chosenEpisode = DanmuMovieMatchHelper.ResolveEpisodeForDownload(
+                explicitMedia, new ScraperEpisode { Id = "chosen-leaf", CommentId = "chosen-comment" }, "chosen-leaf");
+            Assert(chosenEpisode.CommentId == "chosen-comment",
+                "a verified non-default Movie leaf must use its resolved CommentId");
+            foreach (var invalidLookup in new[]
+            {
+                new { Episode = (ScraperEpisode)null, Failure = (Exception)null },
+                new { Episode = new ScraperEpisode { Id = "chosen-leaf", CommentId = "" }, Failure = (Exception)null },
+                new { Episode = (ScraperEpisode)null, Failure = (Exception)new InvalidOperationException("leaf disappeared") },
+            })
+            {
+                var failedClosed = false;
+                try
+                {
+                    DanmuMovieMatchHelper.ResolveEpisodeForDownload(
+                        explicitMedia, invalidLookup.Episode, "chosen-leaf", invalidLookup.Failure);
+                }
+                catch (DanmuDownloadErrorException)
+                {
+                    failedClosed = true;
+                }
+                Assert(failedClosed,
+                    "an explicit Movie leaf that is null, empty, or throws must fail closed without legacy fallback");
+            }
+            var legacyFallback = DanmuMovieMatchHelper.ResolveEpisodeForDownload(
+                new ScraperMedia { Id = "parent", CommentId = "legacy-default" }, null, "parent",
+                new InvalidOperationException("legacy detail unavailable"));
+            Assert(legacyFallback.CommentId == "legacy-default",
+                "the legacy default fallback must remain available only when no explicit Movie leaf is selected");
+
+            var root = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", ".."));
+            var controller = File.ReadAllText(Path.Combine(root, "Core", "Controllers", "DanmuController.cs"));
+            var movieDownload = controller.IndexOf(
+                "private async Task<DanmuDownloadTaskResult> StartTrackedMovieDownload", StringComparison.Ordinal);
+            var evidenceCheck = controller.IndexOf("TryResolveMoviePart(", movieDownload, StringComparison.Ordinal);
+            var explicitFailure = controller.IndexOf(
+                "电影正片版本选择已失效或不属于当前候选", evidenceCheck, StringComparison.Ordinal);
+            var explicitReturn = controller.IndexOf("return failed;", explicitFailure, StringComparison.Ordinal);
+            var providerAccess = controller.IndexOf("scraper.GetMedia(movie, request.CandidateId)", movieDownload,
+                StringComparison.Ordinal);
+            Assert(movieDownload >= 0 && evidenceCheck > movieDownload &&
+                   explicitFailure > evidenceCheck && explicitReturn > explicitFailure &&
+                   providerAccess > explicitReturn,
+                "an explicit Movie part choice must be rejected before any provider access and must never silently fall back");
+        }
+
         private static void ResolvesProviderIdsBySiteThenHierarchy()
         {
             var early = new FakeScraper("EarlyID", null, false, new Dictionary<string, ScraperMedia>
             {
-                ["season-id"] = new ScraperMedia { Id = "season-id" },
+                ["season-id"] = new ScraperMedia
+                {
+                    Id = "season-id", Title = "Upstream Movie", Year = 2024, Category = "Movie",
+                },
                 ["current-id"] = new ScraperMedia { Id = "current-id" },
             });
             var late = new FakeScraper("LateID", null, false, new Dictionary<string, ScraperMedia>
@@ -631,7 +838,11 @@ namespace Emby.Plugin.Danmu.RegressionTests
                     new BaseItem[] { current, season },
                     null)
                 .GetAwaiter().GetResult();
-            Assert(crossSite.Candidate?.Id == "season-id" && crossSite.MatchOrigin == "provider-id",
+            Assert(crossSite.Candidate?.Id == "season-id" && crossSite.MatchOrigin == "provider-id" &&
+                   crossSite.Candidate.SourceMetadata?.Title == "Upstream Movie" &&
+                   crossSite.Candidate.SourceMetadata.Year == 2024 &&
+                   crossSite.Candidate.SourceMetadata.Category == "Movie" &&
+                   early.SearchCalls == 0 && early.ApiKeywords.Count == 0,
                 "the earlier enabled site must beat a later current-item ProviderId");
 
             current.ProviderIds["EarlyID"] = "current-id";
@@ -655,6 +866,11 @@ namespace Emby.Plugin.Danmu.RegressionTests
                         Id = "episode-provider-id",
                         CommentId = "episode-comment-id",
                         EpisodeNumber = 3,
+                        Title = "Episode Three",
+                        SourceMetadata = new SourceMetadata
+                        {
+                            Title = "Upstream Parent Season", Year = 2023, Category = "Anime",
+                        },
                     },
                     ["episode-without-number"] = new ScraperEpisode
                     {
@@ -674,7 +890,12 @@ namespace Emby.Plugin.Danmu.RegressionTests
                     null)
                 .GetAwaiter().GetResult();
             Assert(episodeDecision.Candidate?.Id == "episode-provider-id" &&
-                   episodeDecision.Media?.Episodes.Single().CommentId == "episode-comment-id",
+                   episodeDecision.Media?.Episodes.Single().CommentId == "episode-comment-id" &&
+                   episodeDecision.Candidate.SourceMetadata?.Title == "Upstream Parent Season" &&
+                   episodeDecision.Candidate.SourceMetadata.Year == 2023 &&
+                   episodeDecision.Candidate.SourceMetadata.Category == "Anime" &&
+                   episodeDecision.Candidate.SourceMetadata.Title != "Episode Three" &&
+                   episodeScraper.SearchCalls == 0 && episodeScraper.ApiKeywords.Count == 0,
                 "Episode ProviderIds must resolve through GetMediaEpisode rather than the season-media API");
             var directMedia = DanmuProviderIdResolver.ResolveDirectEpisodeMediaAsync(
                     episodeScraper, episodeItem, "episode-provider-id", 3)
@@ -693,7 +914,9 @@ namespace Emby.Plugin.Danmu.RegressionTests
                 .GetAwaiter().GetResult();
             Assert(noNumberDecision.Candidate?.Id == "episode-without-number" &&
                    noNumberDecision.Media?.Episodes.Single().EpisodeNumber == 1 &&
-                   noNumberDecision.ResolvedScopeType == "Episode",
+                   noNumberDecision.ResolvedScopeType == "Episode" &&
+                   (noNumberDecision.Candidate?.SourceMetadata == null ||
+                    !noNumberDecision.Candidate.SourceMetadata.HasValue),
                 "an exact Episode ProviderId must remain usable without a local IndexNumber");
 
             var noCommentEpisode = new Episode { Name = "episode without comment", IndexNumber = 1 };
@@ -861,6 +1084,12 @@ namespace Emby.Plugin.Danmu.RegressionTests
             Assert(engine.Contains("// Movies intentionally have one standard metadata term.") &&
                    !engine.Contains("var clauses = DanmuTitleClauseExtractor.Extract(movieName"),
                 "Movie search must issue exactly one standard or explicit metadata term without a second hop");
+            var libraryEvents = File.ReadAllText(Path.Combine(
+                repositoryRoot, "LibraryManagerEventsHelper.cs")).Replace("\r\n", "\n");
+            Assert(libraryEvents.Contains("residualSeasonName, season.ProductionYear") &&
+                   libraryEvents.Contains("IsDistinctSeasonIdentity(") &&
+                   !libraryEvents.Contains("seriesTitle, season.ProductionYear, run.Episodes.Count, seriesTitle"),
+                "residual automatic search must keep the Series keyword override while passing only a distinct real Season identity for rank-2 fidelity");
             Assert(resolver.Contains("GetSingleEpisodeDirectScopes(Episode episode)") &&
                    resolver.Contains("new BaseItem[] { episode }") &&
                    controller.Contains("DanmuProviderIdResolver.GetSingleEpisodeDirectScopes(latest)"),
@@ -930,10 +1159,11 @@ namespace Emby.Plugin.Danmu.RegressionTests
                 AppContext.BaseDirectory, "..", "..", "..", ".."));
             var bilibili = File.ReadAllText(Path.Combine(
                 repositoryRoot, "Scraper", "Bilibili", "Bilibili.cs"));
-            Assert(bilibili.Contains("if (isMovieItemType || isEpisodeItemType)") &&
-                   bilibili.Contains("exactEpisode.Id != numericId") &&
-                   bilibili.Contains("_api.GetEpisodeAsync(numericId"),
-                "Movie and Episode exact matching must validate their own ep_id instead of treating it as season_id");
+            Assert(bilibili.Contains("if (isEpisodeItemType)") &&
+                   bilibili.Contains("var seasonInfo = await _api.GetSeasonAsync(numericId") &&
+                   bilibili.Contains("if (isMovieItemType &&") &&
+                   bilibili.Contains("var exactEpisode = await _api.GetEpisodeAsync(numericId"),
+                "Movie parent IDs must resolve as season identity while legacy exact ep_id remains a verified fallback");
         }
 
         private static void ExposesBilibiliAndMgtvExternalIds()
@@ -1085,10 +1315,12 @@ namespace Emby.Plugin.Danmu.RegressionTests
             var directEpisode = DanmuProviderIdResolver.ResolveAsync(
                     new[] { scraper }, new BaseItem[] { episode }, null)
                 .GetAwaiter().GetResult();
-            Assert(directEpisode.Candidate?.Name == "Upstream episode title" &&
+            Assert(directEpisode.Candidate != null &&
+                   directEpisode.Candidate.SourceMetadata == null &&
                    directEpisode.Candidate.EpisodeSize == 1 &&
-                   directEpisode.Media?.Episodes.Count == 1,
-                "direct Episode identifiers must expose the direct upstream title and one-item media result");
+                   directEpisode.Media?.Episodes.Count == 1 &&
+                   directEpisode.Media.Episodes[0].Title == "Upstream episode title",
+                "direct Episode identifiers must keep the one-item download result without presenting an episode title as the parent SourceTitle");
 
             var fallback = new FakeScraper("FallbackID", null, false,
                 new Dictionary<string, ScraperMedia>
@@ -1144,14 +1376,16 @@ namespace Emby.Plugin.Danmu.RegressionTests
                    dandan.Contains(": anime.EpisodeCount"),
                 "Dandan exact Anime details must retain their explicit upstream metadata");
             Assert(bilibili.Contains("Title = videoInfo.Title") &&
-                   bilibili.Contains("Year = videoInfo.Pubdate") &&
+                   !bilibili.Contains("Year = videoInfo.Pubdate") &&
+                   !bilibili.Contains("Year = tupleVideo.Pubdate") &&
+                   !bilibili.Contains("TryGetYearFromSeasonDetail") &&
                    bilibili.Contains("EpisodeCount = videoInfo.VideosCount") &&
                    bilibili.Contains("GetSeasonDetailAsync(numericId") &&
                    bilibili.Contains("Title = !string.IsNullOrWhiteSpace(seasonDetail?.Title)") &&
                    bilibili.Contains("seasonDetail?.Total > 0") &&
                    !bilibili.Contains("Title = ep.Title ?? item.Name") &&
                    !bilibili.Contains("Title = item?.Name"),
-                "Bilibili exact details must retain known values without inventing a category or local title");
+                "Bilibili exact details must retain known values without treating publication/upload timestamps as production year");
             Assert(iqiyi.Contains("media.Title = video.VideoName") &&
                    iqiyi.Contains("media.Category = video.channelName") &&
                    iqiyi.Contains("media.EpisodeCount = video.VideoCount") &&
@@ -1160,10 +1394,11 @@ namespace Emby.Plugin.Danmu.RegressionTests
             foreach (var source in new[] { mgtv, tencent, youku })
             {
                 Assert(source.Contains("media.EpisodeCount = media.Episodes.Count") &&
-                       !source.Contains("media.Title =") &&
-                       !source.Contains("media.Year =") &&
-                       !source.Contains("media.Category ="),
-                    "providers with episode-list-only exact details must expose the usable count and keep unsupported metadata unknown");
+                       source.Contains("media.Title = video.Title") &&
+                       source.Contains("media.Year = video.Year") &&
+                       (source.Contains("media.Category = video.TypeName") ||
+                        source.Contains("media.Category = video.Type")),
+                    "providers whose exact collection detail exposes title/year/category must return those available fields");
             }
         }
 
@@ -1232,11 +1467,12 @@ namespace Emby.Plugin.Danmu.RegressionTests
                     new[] { tupleScraper }, new BaseItem[] { tupleEpisode }, null)
                 .GetAwaiter().GetResult();
             Assert(tupleDecision.Candidate?.Id == "123,456" &&
-                   tupleDecision.Candidate.Name == "Verified upstream part" &&
+                   tupleDecision.Candidate.SourceMetadata == null &&
                    tupleDecision.Media?.Episodes.Single().Id == "123,456" &&
                    tupleDecision.Media.Episodes.Single().CommentId == "123,456" &&
+                   tupleDecision.Media.Episodes.Single().Title == "Verified upstream part" &&
                    tupleScraper.MediaCalls == 0 && tupleScraper.SearchCalls == 0,
-                "a verified Bilibili aid,cid episode must round-trip through exact candidate creation without media lookup or search");
+                "a verified Bilibili aid,cid episode must round-trip without presenting its episode title as parent SourceTitle or triggering search");
         }
 
         private static void MapsEpisodeSourceNumbersSafely()
@@ -1306,8 +1542,11 @@ namespace Emby.Plugin.Danmu.RegressionTests
             var apiSource = File.ReadAllText(Path.Combine(repositoryRoot, "Scraper", "Bilibili", "BilibiliApi.cs"));
             Assert(biliSource.Contains("GetSeasonDetailAsync(numericId") &&
                    biliSource.Contains("seasonDetail?.Total > 0") &&
-                   biliSource.Contains("TryGetYearFromSeasonDetail"),
-                "exact Bilibili Season resolution must use same-ID detail metadata and its declared total");
+                   !biliSource.Contains("TryGetYearFromSeasonDetail") &&
+                   !biliSource.Contains("Year = videoInfo.Pubdate") &&
+                   !biliSource.Contains("Year = tupleVideo.Pubdate") &&
+                   !apiSource.Contains("Year = result.Result.PubTime"),
+                "exact Bilibili resolution must use same-ID detail metadata without mapping publication/upload timestamps to work Year");
             Assert(biliSource.Contains("VideoSeasonDetail seasonDetail = null") &&
                    biliSource.Contains("exact metadata detail unavailable; retaining ep/list media") &&
                    biliSource.Contains("must not discard ep/list's exact downloadable media"),

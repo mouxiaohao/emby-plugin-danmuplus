@@ -4,8 +4,10 @@ using System.Threading;
 using System.Threading.Tasks;
 using MediaBrowser.Controller.Entities;
 using System.Collections.Generic;
+using System.Linq;
 using Emby.Plugin.Danmu.Core.Extensions;
 using Emby.Plugin.Danmu.Core.Singleton;
+using Emby.Plugin.Danmu.Model;
 using Emby.Plugin.Danmu.Scraper.Entity;
 using Emby.Plugin.Danmu.Scraper.Youku.Entity;
 using MediaBrowser.Common.Net;
@@ -139,6 +141,9 @@ namespace Emby.Plugin.Danmu.Scraper.Youku
             var isMovieItemType = item is MediaBrowser.Controller.Entities.Movies.Movie;
             var media = new ScraperMedia();
             media.ProviderId = this.ProviderId; // 设置 ProviderId
+            media.Title = video.Title ?? string.Empty;
+            media.Year = video.Year;
+            media.Category = video.Type ?? string.Empty;
             if (video.Videos != null && video.Videos.Count > 0)
             {
                 foreach (var ep in video.Videos)
@@ -169,7 +174,7 @@ namespace Emby.Plugin.Danmu.Scraper.Youku
 
             if (isMovieItemType)
             {
-                media.Id = HttpUtility.UrlEncode(media.Episodes.Count > 0 ? $"{media.Episodes[0].Id}" : "");
+                media.Id = HttpUtility.UrlEncode(id);
                 media.CommentId = media.Episodes.Count > 0 ? $"{media.Episodes[0].CommentId}" : "";
             }
             else
@@ -178,6 +183,52 @@ namespace Emby.Plugin.Danmu.Scraper.Youku
             }
 
             return media;
+        }
+
+        internal static List<ScraperMoviePart> BuildMovieParts(IEnumerable<YoukuEpisode> episodes)
+        {
+            var parts = new List<ScraperMoviePart>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var index = 0;
+            foreach (var episode in episodes ?? Enumerable.Empty<YoukuEpisode>())
+            {
+                if (episode == null || string.IsNullOrWhiteSpace(episode.ID) ||
+                    !seen.Add(episode.ID.Trim()))
+                {
+                    continue;
+                }
+
+                index++;
+                var title = !string.IsNullOrWhiteSpace(episode.Title)
+                    ? episode.Title.Trim()
+                    : (episode.RCTitle ?? string.Empty).Trim();
+                parts.Add(new ScraperMoviePart
+                {
+                    Id = episode.ID.Trim(),
+                    Title = title,
+                    Index = index,
+                    IsDownloadable = true,
+                    IsExplicitNonMain = EpisodeContentClassifier.IsExplicitNonMain(episode.Title) ||
+                        EpisodeContentClassifier.IsExplicitNonMain(episode.RCTitle),
+                });
+            }
+            return parts;
+        }
+
+        public override async Task<List<ScraperMoviePart>> GetMovieParts(
+            BaseItem item,
+            string parentId,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!(item is MediaBrowser.Controller.Entities.Movies.Movie) || string.IsNullOrWhiteSpace(parentId))
+            {
+                return new List<ScraperMoviePart>();
+            }
+
+            var video = await _api.GetVideoAsync(HttpUtility.UrlDecode(parentId), cancellationToken)
+                .ConfigureAwait(false);
+            return BuildMovieParts(video?.Videos);
         }
 
         public override async Task<ScraperEpisode?> GetMediaEpisode(BaseItem item, string id)
@@ -196,6 +247,31 @@ namespace Emby.Plugin.Danmu.Scraper.Youku
                 return null;
             }
 
+            SourceMetadata sourceMetadata = null;
+            if (!string.IsNullOrWhiteSpace(sourceEpisode.ShowId))
+            {
+                var parent = await _api.GetVideoAsync(sourceEpisode.ShowId, CancellationToken.None)
+                    .ConfigureAwait(false);
+                if (parent != null)
+                {
+                    sourceMetadata = new SourceMetadata
+                    {
+                        Title = parent.Title ?? sourceEpisode.ShowTitle ?? string.Empty,
+                        Year = parent.Year,
+                        Category = parent.Type ?? sourceEpisode.Category ?? string.Empty,
+                    };
+                }
+            }
+
+            if (sourceMetadata == null && !string.IsNullOrWhiteSpace(sourceEpisode.ShowTitle))
+            {
+                sourceMetadata = new SourceMetadata
+                {
+                    Title = sourceEpisode.ShowTitle,
+                    Category = sourceEpisode.Category ?? string.Empty,
+                };
+            }
+
             return new ScraperEpisode()
             {
                 Id = sourceEpisode.ID,
@@ -203,6 +279,7 @@ namespace Emby.Plugin.Danmu.Scraper.Youku
                 Title = sourceEpisode.Title,
                 EpisodeNumber = EpisodeContentClassifier.TryGetPositiveNumber(sourceEpisode.Seq) ??
                     EpisodeContentClassifier.TryGetEpisodeNumber(sourceEpisode.Title),
+                SourceMetadata = sourceMetadata,
             };
         }
 

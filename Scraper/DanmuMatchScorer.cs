@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text;
 using System.Text.RegularExpressions;
 using Emby.Plugin.Danmu.Core.Extensions;
 using Emby.Plugin.Danmu.Model;
@@ -16,6 +17,9 @@ namespace Emby.Plugin.Danmu.Scraper
     public static class DanmuMatchScorer
     {
         public const double SeasonCandidateTitleEligibilityFloor = 0.58;
+        public const double AutomaticConfidenceThreshold = 0.90;
+        public const double FidelityBridgeBaseFloor = 0.85;
+        public const double FidelityBridgeBonus = 0.05;
 
         private static readonly Regex SeasonNumberRegex = new Regex(
             @"(?:第\s*[0-9一二三四五六七八九十百零〇两]+\s*季|season\s*\d+)",
@@ -31,6 +35,10 @@ namespace Emby.Plugin.Danmu.Scraper
 
         private static readonly Regex SeparatorRegex = new Regex(
             @"[\s\p{P}\p{S}]+",
+            RegexOptions.Compiled);
+
+        private static readonly Regex WhitespaceRegex = new Regex(
+            @"\s+",
             RegexOptions.Compiled);
 
         public static List<string> BuildSearchKeywords(
@@ -90,7 +98,9 @@ namespace Emby.Plugin.Danmu.Scraper
             ScraperSearchInfo source,
             string seriesName,
             string seasonName,
-            string keywordOverride)
+            string keywordOverride,
+            IEnumerable<string> localSeriesTitleAliases = null,
+            IEnumerable<string> localSeasonTitleAliases = null)
         {
             if (source == null || string.IsNullOrWhiteSpace(source.Id) ||
                 string.IsNullOrWhiteSpace(source.Name) || IsIdentifiableMovie(source.Category))
@@ -98,7 +108,8 @@ namespace Emby.Plugin.Danmu.Scraper
                 return false;
             }
 
-            var title = Normalize(source.Name);
+            var sourceTitles = GetSourceTitles(source).Select(Normalize)
+                .Where(value => value.Length > 0).ToList();
             if (!string.IsNullOrWhiteSpace(keywordOverride))
             {
                 // An explicit manual keyword is provider-discovery input.  Once a
@@ -114,7 +125,11 @@ namespace Emby.Plugin.Danmu.Scraper
                 return false;
             }
 
-            var parentEvidence = GetTitleEvidence(parent, title);
+            var parentEvidence = BestSimilarity(
+                new[] { parent }
+                    .Concat(localSeriesTitleAliases ?? Enumerable.Empty<string>())
+                    .Concat(localSeasonTitleAliases ?? Enumerable.Empty<string>()),
+                sourceTitles);
             if (parentEvidence >= SeasonCandidateTitleEligibilityFloor)
             {
                 return true;
@@ -142,23 +157,35 @@ namespace Emby.Plugin.Danmu.Scraper
             string seriesName,
             string seasonName,
             int? expectedYear,
-            int expectedEpisodes)
+            int expectedEpisodes,
+            IEnumerable<string> localSeriesTitleAliases = null,
+            IEnumerable<string> localSeasonTitleAliases = null)
         {
-            var title = Normalize(source.Name);
+            var sourceTitles = GetSourceTitles(source).Select(Normalize)
+                .Where(value => value.Length > 0).ToList();
             var parent = Normalize(seriesName);
             var seasonKeyword = Normalize(ExtractSeasonKeyword(seriesName, seasonName));
             var combined = Normalize((seriesName ?? string.Empty) + (seasonKeyword ?? string.Empty));
 
-            var parentScore = SimilarityAgainstTitle(parent, title);
-            var keywordScore = SimilarityAgainstTitle(seasonKeyword, title);
-            var combinedScore = SimilarityAgainstTitle(combined, title);
+            var localParents = new[] { seriesName, seasonName }
+                .Concat(localSeriesTitleAliases ?? Enumerable.Empty<string>())
+                .Concat(localSeasonTitleAliases ?? Enumerable.Empty<string>());
+            var parentScore = BestSimilarity(localParents, sourceTitles);
+            var keywordScore = BestSimilarity(new[] { seasonKeyword }, sourceTitles);
+            var combinedScore = Math.Max(
+                BestSimilarity(new[] { combined }, sourceTitles),
+                BestSimilarity(
+                    (localSeriesTitleAliases ?? Enumerable.Empty<string>())
+                        .Concat(localSeasonTitleAliases ?? Enumerable.Empty<string>()),
+                    sourceTitles));
             double titleScore;
 
             if (!string.IsNullOrEmpty(seasonKeyword))
             {
-                if (title.Contains(seasonKeyword))
+                if (sourceTitles.Any(title => title.Contains(seasonKeyword)))
                 {
-                    titleScore = 0.78 + (title.Contains(parent) && !string.IsNullOrEmpty(parent) ? 0.22 : 0.22 * parentScore);
+                    titleScore = 0.78 + (sourceTitles.Any(title => title.Contains(parent)) &&
+                        !string.IsNullOrEmpty(parent) ? 0.22 : 0.22 * parentScore);
                 }
                 else
                 {
@@ -187,6 +214,12 @@ namespace Emby.Plugin.Danmu.Scraper
             }
 
             score = Clamp(score);
+            var fidelityTitleEvidence = GetSeasonFidelityTitleEvidence(
+                seriesName,
+                seasonName,
+                localSeriesTitleAliases,
+                localSeasonTitleAliases,
+                GetSourceTitles(source));
             return new DanmuMatchCandidate
             {
                 Id = source.Id ?? string.Empty,
@@ -206,6 +239,8 @@ namespace Emby.Plugin.Danmu.Scraper
                 YearScore = Round(yearScore),
                 EpisodeScore = Round(episodeScore),
                 Reason = BuildReason(parentScore, keywordScore, yearScore, episodeScore),
+                FidelityTitleEvidence = fidelityTitleEvidence,
+                SourceMetadata = CloneSourceMetadata(source),
             };
         }
 
@@ -215,15 +250,22 @@ namespace Emby.Plugin.Danmu.Scraper
             string siteName,
             int sourceOrder,
             string movieName,
-            int? expectedYear)
+            int? expectedYear,
+            IEnumerable<string> localTitleAliases = null)
         {
-            var titleScore = SimilarityAgainstTitle(Normalize(movieName), Normalize(source.Name));
+            var titleScore = BestSimilarity(
+                new[] { movieName }.Concat(localTitleAliases ?? Enumerable.Empty<string>()),
+                GetSourceTitles(source).Select(Normalize));
             var yearScore = GetYearScore(expectedYear, source.Year);
             var score = titleScore * 0.82 + yearScore * 0.18;
             if (IsIdentifiableNonMovie(source.Category))
             {
                 score = 0;
             }
+
+            var fidelityTitleEvidence = Math.Min(1, GetFidelityTitleEvidence(
+                new[] { movieName }.Concat(localTitleAliases ?? Enumerable.Empty<string>()),
+                GetSourceTitles(source)));
 
             return new DanmuMatchCandidate
             {
@@ -244,6 +286,8 @@ namespace Emby.Plugin.Danmu.Scraper
                 Reason = titleScore >= 0.95 && yearScore >= 0.95
                     ? "电影名和年份吻合"
                     : titleScore >= 0.95 ? "电影名吻合" : "需要人工确认",
+                FidelityTitleEvidence = fidelityTitleEvidence,
+                SourceMetadata = CloneSourceMetadata(source),
             };
         }
 
@@ -275,8 +319,16 @@ namespace Emby.Plugin.Danmu.Scraper
             // compatibility parameter is retained for callers compiled against r5.
             // Execution completeness is classified independently by the search
             // result; this pure selector only evaluates the canonical evidence.
-            var confident = (candidates ?? new List<DanmuMatchCandidate>())
-                .Where(x => x != null && x.Score >= 0.90)
+            var available = (candidates ?? new List<DanmuMatchCandidate>())
+                .Where(x => x != null)
+                .ToList();
+            foreach (var candidate in available)
+            {
+                candidate.MatchScore = Round(GetEffectiveConfidence(candidate, available));
+            }
+
+            var confident = available
+                .Where(x => x.MatchScore >= AutomaticConfidenceThreshold)
                 .ToList();
             if (confident.Count == 0)
             {
@@ -297,9 +349,38 @@ namespace Emby.Plugin.Danmu.Scraper
 
         private static DanmuMatchCandidate SelectUniqueHighest(IList<DanmuMatchCandidate> candidates)
         {
-            var highestScore = candidates.Max(x => x.Score);
-            var winners = candidates.Where(x => x.Score == highestScore).ToList();
+            var highestScore = candidates.Max(x => x.MatchScore);
+            var scoreWinners = candidates.Where(x => x.MatchScore == highestScore).ToList();
+            var highestFidelityEvidence = scoreWinners.Max(x => x.FidelityTitleEvidence);
+            var winners = scoreWinners
+                .Where(x => x.FidelityTitleEvidence == highestFidelityEvidence)
+                .ToList();
             return winners.Count == 1 ? winners[0] : null;
+        }
+
+        public static double GetEffectiveConfidence(
+            DanmuMatchCandidate candidate,
+            IEnumerable<DanmuMatchCandidate> candidates)
+        {
+            if (candidate == null || candidate.Score < FidelityBridgeBaseFloor ||
+                candidate.Score >= AutomaticConfidenceThreshold ||
+                candidate.Score + FidelityBridgeBonus < AutomaticConfidenceThreshold ||
+                candidate.FidelityTitleEvidence != 2)
+            {
+                return Clamp(candidate?.Score ?? 0);
+            }
+
+            var sameBaseProviderGroup = (candidates ?? Enumerable.Empty<DanmuMatchCandidate>())
+                .Where(peer => peer != null && peer.SourceOrder == candidate.SourceOrder &&
+                               peer.Score == candidate.Score)
+                .ToList();
+            var isUniqueSeasonExact = sameBaseProviderGroup.Count(peer =>
+                peer.FidelityTitleEvidence == 2) == 1;
+            var hasLowerFidelityPeer = sameBaseProviderGroup.Any(peer =>
+                peer.FidelityTitleEvidence < candidate.FidelityTitleEvidence);
+            return isUniqueSeasonExact && hasLowerFidelityPeer
+                ? AutomaticConfidenceThreshold
+                : Clamp(candidate.Score);
         }
 
         public static string Normalize(string value)
@@ -315,6 +396,128 @@ namespace Emby.Plugin.Danmu.Scraper
                 .Replace('臺', '台')
                 .Replace('裏', '里');
             return SeparatorRegex.Replace(normalized, string.Empty);
+        }
+
+        /// <summary>
+        /// Produces the exact-comparison title channel. Compatibility-equivalent
+        /// Unicode characters share a representation, while punctuation and symbols
+        /// retain their normalized type, count, and order.
+        /// </summary>
+        public static string NormalizeFidelity(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return string.Empty;
+            }
+
+            var normalized = SanitizeSearchTerm(value)
+                .Normalize(NormalizationForm.FormKC)
+                .ToLowerInvariant();
+            return WhitespaceRegex.Replace(normalized, string.Empty);
+        }
+
+        private static int GetFidelityTitleEvidence(
+            IEnumerable<string> localTitles,
+            IEnumerable<string> sourceTitles)
+        {
+            var localForms = BuildTitleForms(localTitles);
+            var sourceForms = BuildTitleForms(sourceTitles);
+            return localForms
+                .Join(
+                    sourceForms,
+                    local => local.Loose,
+                    source => source.Loose,
+                    (local, source) => string.Equals(
+                        local.Fidelity,
+                        source.Fidelity,
+                        StringComparison.Ordinal)
+                        ? local.Fidelity
+                        : string.Empty,
+                    StringComparer.Ordinal)
+                .Where(fidelity => fidelity.Length > 0)
+                .Distinct(StringComparer.Ordinal)
+                .Count();
+        }
+
+        private static int GetSeasonFidelityTitleEvidence(
+            string seriesName,
+            string seasonName,
+            IEnumerable<string> localSeriesTitleAliases,
+            IEnumerable<string> localSeasonTitleAliases,
+            IEnumerable<string> sourceTitles)
+        {
+            var seasonTitles = new[] { seasonName }
+                .Concat(localSeasonTitleAliases ?? Enumerable.Empty<string>())
+                .Where(IsIdentityBearingTitle)
+                .ToList();
+            if (GetFidelityTitleEvidence(seasonTitles, sourceTitles) > 0)
+            {
+                return 2;
+            }
+
+            var parentTitles = new[] { seriesName }
+                .Concat(localSeriesTitleAliases ?? Enumerable.Empty<string>())
+                .Where(IsIdentityBearingTitle);
+            return GetFidelityTitleEvidence(parentTitles, sourceTitles) > 0 ? 1 : 0;
+        }
+
+        private static List<TitleForm> BuildTitleForms(IEnumerable<string> titles)
+        {
+            return (titles ?? Enumerable.Empty<string>())
+                .Select(title => new TitleForm
+                {
+                    Loose = Normalize(title),
+                    Fidelity = NormalizeFidelity(title),
+                })
+                .Where(form => form.Loose.Length > 0 && form.Fidelity.Length > 0)
+                .GroupBy(form => form.Fidelity, StringComparer.Ordinal)
+                .Select(group => group.First())
+                .ToList();
+        }
+
+        private static IEnumerable<string> GetSourceTitles(ScraperSearchInfo source)
+        {
+            if (source == null)
+            {
+                return Enumerable.Empty<string>();
+            }
+
+            return new[] { source.Name, source.SourceMetadata?.Title }
+                .Concat(source.Aliases ?? new List<string>());
+        }
+
+        private static double BestSimilarity(
+            IEnumerable<string> localTitles,
+            IEnumerable<string> normalizedSourceTitles)
+        {
+            var local = (localTitles ?? Enumerable.Empty<string>())
+                .Select(Normalize).Where(value => value.Length > 0).ToList();
+            var source = (normalizedSourceTitles ?? Enumerable.Empty<string>())
+                .Where(value => !string.IsNullOrEmpty(value)).ToList();
+            return local.Count == 0 || source.Count == 0
+                ? 0
+                : local.Max(left => source.Max(right => SimilarityAgainstTitle(left, right)));
+        }
+
+        private static SourceMetadata CloneSourceMetadata(ScraperSearchInfo source)
+        {
+            if (source?.SourceMetadata != null)
+            {
+                return source.SourceMetadata.Clone();
+            }
+
+            return new SourceMetadata
+            {
+                Title = source?.Name ?? string.Empty,
+                Year = source?.Year,
+                Category = source?.Category ?? string.Empty,
+            };
+        }
+
+        private sealed class TitleForm
+        {
+            public string Loose { get; set; } = string.Empty;
+            public string Fidelity { get; set; } = string.Empty;
         }
 
         private static string SanitizeSearchTerm(string value)

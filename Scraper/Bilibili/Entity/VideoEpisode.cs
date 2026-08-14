@@ -1,5 +1,6 @@
 using System.Runtime.Serialization;
 using System.Text.Json.Serialization;
+using Emby.Plugin.Danmu.Model;
 
 namespace Emby.Plugin.Danmu.Scraper.Bilibili.Entity
 {
@@ -51,5 +52,8 @@ namespace Emby.Plugin.Danmu.Scraper.Bilibili.Entity
 
         [JsonPropertyName("section_type")]
         public int? SectionType { get; set; }
+
+        [JsonIgnore]
+        public SourceMetadata SourceMetadata { get; set; }
     }
 }

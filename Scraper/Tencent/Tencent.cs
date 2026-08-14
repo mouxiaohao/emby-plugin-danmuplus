@@ -4,6 +4,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Emby.Plugin.Danmu.Core.Extensions;
+using Emby.Plugin.Danmu.Model;
 using Emby.Plugin.Danmu.Scraper.Entity;
 using Emby.Plugin.Danmu.Scraper.Tencent.Entity;
 using MediaBrowser.Common.Net;
@@ -141,11 +142,9 @@ namespace Emby.Plugin.Danmu.Scraper.Tencent
             var media = new ScraperMedia();
             media.Id = id;
             media.ProviderId = this.ProviderId; // 设置 ProviderId
-            if (isMovieItemType && video.EpisodeList != null && video.EpisodeList.Count > 0)
-            {
-                media.CommentId = $"{video.EpisodeList[0].Vid}";
-            }
-
+            media.Title = video.Title ?? string.Empty;
+            media.Year = video.Year;
+            media.Category = video.TypeName ?? string.Empty;
             if (video.EpisodeList != null && video.EpisodeList.Count > 0)
             {
                 foreach (var ep in video.EpisodeList)
@@ -169,9 +168,58 @@ namespace Emby.Plugin.Danmu.Scraper.Tencent
             {
                 // Exact-ID details reliably establish only this usable episode list.
                 media.EpisodeCount = media.Episodes.Count;
+                if (isMovieItemType)
+                {
+                    media.CommentId = media.Episodes[0].CommentId;
+                }
             }
 
             return media;
+        }
+
+        internal static List<ScraperMoviePart> BuildMovieParts(
+            string parentId,
+            IEnumerable<TencentEpisode> episodes)
+        {
+            var parts = new List<ScraperMoviePart>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var index = 0;
+            foreach (var episode in episodes ?? Enumerable.Empty<TencentEpisode>())
+            {
+                if (episode == null || string.IsNullOrWhiteSpace(parentId) ||
+                    string.IsNullOrWhiteSpace(episode.Vid) || !seen.Add(episode.Vid.Trim()))
+                {
+                    continue;
+                }
+
+                index++;
+                var title = (episode.Title ?? string.Empty).Trim();
+                parts.Add(new ScraperMoviePart
+                {
+                    Id = parentId.Trim() + "|" + episode.Vid.Trim(),
+                    Title = title,
+                    Index = index,
+                    IsDownloadable = true,
+                    IsExplicitNonMain = string.Equals(episode.IsTrailer, "1", StringComparison.Ordinal) ||
+                        EpisodeContentClassifier.IsExplicitNonMain(title),
+                });
+            }
+            return parts;
+        }
+
+        public override async Task<List<ScraperMoviePart>> GetMovieParts(
+            BaseItem item,
+            string parentId,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!(item is MediaBrowser.Controller.Entities.Movies.Movie) || string.IsNullOrWhiteSpace(parentId))
+            {
+                return new List<ScraperMoviePart>();
+            }
+
+            var video = await _api.GetVideoAsync(parentId, cancellationToken).ConfigureAwait(false);
+            return BuildMovieParts(parentId, video?.EpisodeList);
         }
 
         public override async Task<ScraperEpisode?> GetMediaEpisode(BaseItem item, string id)
@@ -179,16 +227,30 @@ namespace Emby.Plugin.Danmu.Scraper.Tencent
             var isMovieItemType = item is MediaBrowser.Controller.Entities.Movies.Movie;
             if (isMovieItemType)
             {
-                var video = await _api.GetVideoAsync(id, CancellationToken.None).ConfigureAwait(false);
+                var separator = id?.IndexOf('|') ?? -1;
+                var parentId = separator > 0 ? id.Substring(0, separator) : id;
+                var selectedVid = separator > 0 && separator + 1 < id.Length
+                    ? id.Substring(separator + 1)
+                    : string.Empty;
+                var video = await _api.GetVideoAsync(parentId, CancellationToken.None).ConfigureAwait(false);
                 if (video == null || video.EpisodeList == null || video.EpisodeList.Count <= 0)
                 {
                     return null;
                 }
 
-                var firstEpisode = video.EpisodeList[0];
+                var firstEpisode = string.IsNullOrWhiteSpace(selectedVid)
+                    ? video.EpisodeList.FirstOrDefault(ep => ep != null &&
+                        !string.Equals(ep.IsTrailer, "1", StringComparison.Ordinal) &&
+                        !EpisodeContentClassifier.IsExplicitNonMain(ep.Title))
+                    : video.EpisodeList.FirstOrDefault(ep => ep != null &&
+                        string.Equals(ep.Vid, selectedVid, StringComparison.OrdinalIgnoreCase));
+                if (firstEpisode == null || string.IsNullOrWhiteSpace(firstEpisode.Vid))
+                {
+                    return null;
+                }
                 return new ScraperEpisode()
                 {
-                    Id = id,
+                    Id = firstEpisode.Vid,
                     CommentId = $"{firstEpisode.Vid}",
                     Title = firstEpisode.Title,
                     EpisodeNumber = EpisodeContentClassifier.TryGetEpisodeNumber(firstEpisode.Title),
@@ -221,6 +283,12 @@ namespace Emby.Plugin.Danmu.Scraper.Tencent
                 CommentId = sourceEpisode.Vid,
                 Title = sourceEpisode.Title,
                 EpisodeNumber = EpisodeContentClassifier.TryGetEpisodeNumber(sourceEpisode.Title),
+                SourceMetadata = new SourceMetadata
+                {
+                    Title = seasonVideo.Title ?? string.Empty,
+                    Year = seasonVideo.Year,
+                    Category = seasonVideo.TypeName ?? string.Empty,
+                },
             };
         }
 
