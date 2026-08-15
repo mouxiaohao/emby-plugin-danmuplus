@@ -144,7 +144,13 @@ namespace Emby.Plugin.Danmu.Scraper.Bilibili
             var isMovieItemType = item is MediaBrowser.Controller.Entities.Movies.Movie;
             var searchName = this.NormalizeSearchName(item.Name);
             log.Info($"Bilibili.Search - Emby 项目 '{item.Name}' 的标准化搜索名称: '{searchName}'");
-            var searchResult = await this._api.SearchMergedAsync(searchName, cancellationToken).ConfigureAwait(false);
+            // media_ft is reserved for actual Movie items.  Every non-Movie
+            // path (Series, Season, and Episode included) is Bangumi-only;
+            // genre classification must never widen that request profile.
+            var searchResult = await this._api.SearchMergedAsync(
+                searchName,
+                cancellationToken,
+                BilibiliApi.GetTypedSearchTypesForItem(isMovieItemType)).ConfigureAwait(false);
             AddDiagnostics(output, searchResult);
             try
             {
@@ -233,6 +239,17 @@ namespace Emby.Plugin.Danmu.Scraper.Bilibili
             string keyword,
             CancellationToken cancellationToken)
         {
+            // A context-free keyword search is used for Series/Season/Episode
+            // matching and must never assume Movie semantics.
+            return await SearchForApiWithDiagnostics(keyword, cancellationToken, false)
+                .ConfigureAwait(false);
+        }
+
+        public override async Task<ScraperSearchResult> SearchForApiWithDiagnostics(
+            string keyword,
+            CancellationToken cancellationToken,
+            bool allowMovieTypedSearch)
+        {
             cancellationToken.ThrowIfCancellationRequested();
             var output = new ScraperSearchResult();
             var candidates = output.Candidates;
@@ -243,7 +260,13 @@ namespace Emby.Plugin.Danmu.Scraper.Bilibili
 
             keyword = keyword.Trim();
             log.Info("Bilibili.SearchForApi - searching keyword '{0}'.", keyword);
-            var searchResult = await _api.SearchMergedAsync(keyword, cancellationToken).ConfigureAwait(false);
+            // This is the keyword path used by Series/Season/Episode smart
+            // matching.  The legacy flag is intentionally ignored: only the
+            // concrete Movie item path above may request media_ft.
+            var searchResult = await _api.SearchMergedAsync(
+                keyword,
+                cancellationToken,
+                BilibiliApi.GetTypedSearchTypesForItem(false)).ConfigureAwait(false);
             AddDiagnostics(output, searchResult);
             var mediaItems = searchResult?.Result ??
                 new List<Emby.Plugin.Danmu.Scraper.Bilibili.Entity.Media>();
@@ -284,6 +307,31 @@ namespace Emby.Plugin.Danmu.Scraper.Bilibili
                 candidates.Count,
                 skipped);
             return output;
+        }
+
+        private static bool IsAnimationItem(BaseItem item)
+        {
+            var current = item;
+            for (var depth = 0; current != null && depth < 3; depth++)
+            {
+                var genresProperty = current.GetType().GetProperty("Genres");
+                var genres = genresProperty?.GetValue(current, null) as System.Collections.IEnumerable;
+                foreach (var value in genres ?? new object[0])
+                {
+                    var genre = value as string;
+                    if (!string.IsNullOrWhiteSpace(genre) &&
+                        (genre.IndexOf("动画", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                         genre.IndexOf("anime", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                         genre.IndexOf("animation", StringComparison.OrdinalIgnoreCase) >= 0))
+                    {
+                        return true;
+                    }
+                }
+
+                current = current.GetParent();
+            }
+
+            return false;
         }
 
         private static void AddDiagnostics(ScraperSearchResult output, SearchResult searchResult)

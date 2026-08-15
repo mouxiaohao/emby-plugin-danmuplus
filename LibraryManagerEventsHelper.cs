@@ -988,7 +988,8 @@ namespace Emby.Plugin.Danmu
                                 null,
                                 _logger,
                                 new[] { series?.OriginalTitle },
-                                new[] { season.OriginalTitle }).ConfigureAwait(false);
+                                new[] { season.OriginalTitle },
+                                season).ConfigureAwait(false);
 
                             if (!SeasonPlanGenerationCoordinator.Shared.IsCurrent(
                                     season.Id.ToString(), automaticGeneration))
@@ -1776,6 +1777,7 @@ namespace Emby.Plugin.Danmu
                     {
                         Status = "skipped",
                         Message = "重复已跳过",
+                        SkipReason = SevenDayReplayPolicy.RecentFileSkipReason,
                         ProviderId = saveItemProviderId ? scraper.ProviderId : string.Empty,
                         ProviderWriteGeneration = providerWriteGeneration,
                     };
@@ -1966,11 +1968,13 @@ namespace Emby.Plugin.Danmu
                 throw new DanmuDownloadErrorException("弹幕来源没有可持久化的有效内容");
             }
 
-            // 下载弹幕xml文件
+            // Write alongside the final file, then atomically replace it. A
+            // forced seven-day replay must never truncate a valid recent XML
+            // when a disk or permission failure occurs midway through writing.
             var danmuPath = Path.Combine(item.ContainingFolderPath, item.GetDanmuXmlPath(scraper.ProviderId));
             try
             {
-                await this._fileSystem.WriteAllBytesAsync(danmuPath, bytes, CancellationToken.None).ConfigureAwait(false);
+                await WriteDanmuAtomicallyAsync(_fileSystem, danmuPath, bytes).ConfigureAwait(false);
             }
             catch (Exception e)
             {
@@ -2009,6 +2013,46 @@ namespace Emby.Plugin.Danmu
 
                 var assPath = Path.Combine(item.ContainingFolderPath, item.FileNameWithoutExtension + ".chs[" + scraper.ProviderId + "_danmu].ass");
                 Danmaku2Ass.Bilibili.GetInstance().Create(bytes, assConfig, assPath);
+            }
+        }
+
+        private static async Task WriteDanmuAtomicallyAsync(IFileSystem fileSystem, string danmuPath, byte[] bytes)
+        {
+            if (fileSystem == null) throw new ArgumentNullException(nameof(fileSystem));
+            if (string.IsNullOrWhiteSpace(danmuPath)) throw new ArgumentException("A target path is required.", nameof(danmuPath));
+            if (bytes == null || bytes.Length == 0) throw new ArgumentException("Content is required.", nameof(bytes));
+
+            var temporaryPath = danmuPath + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            try
+            {
+                await fileSystem.WriteAllBytesAsync(temporaryPath, bytes, CancellationToken.None).ConfigureAwait(false);
+                if (!File.Exists(temporaryPath) || new FileInfo(temporaryPath).Length != bytes.Length)
+                {
+                    throw new IOException("The temporary danmu file could not be completely verified.");
+                }
+
+                if (File.Exists(danmuPath))
+                {
+                    try
+                    {
+                        File.Replace(temporaryPath, danmuPath, null);
+                    }
+                    catch (PlatformNotSupportedException ex)
+                    {
+                        throw new IOException("The host filesystem does not support atomic danmu replacement.", ex);
+                    }
+                }
+                else
+                {
+                    File.Move(temporaryPath, danmuPath);
+                }
+            }
+            finally
+            {
+                if (File.Exists(temporaryPath))
+                {
+                    File.Delete(temporaryPath);
+                }
             }
         }
 

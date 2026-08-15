@@ -171,6 +171,10 @@ namespace Emby.Plugin.Danmu.Core.Controllers
             new DanmuCandidateEvidenceRegistry();
         private static readonly ConcurrentDictionary<string, CancellationTokenSource> DownloadTaskCancellations =
             new ConcurrentDictionary<string, CancellationTokenSource>(StringComparer.OrdinalIgnoreCase);
+        // A seven-day replay is a new task, so task-level cancellation alone
+        // cannot prevent it racing the original task's single-episode retry.
+        private static readonly ConcurrentDictionary<string, SemaphoreSlim> EpisodeRetryLocks =
+            new ConcurrentDictionary<string, SemaphoreSlim>(StringComparer.OrdinalIgnoreCase);
         private static readonly SemaphoreSlim TrackedDownloadQueue = new SemaphoreSlim(1, 1);
         private static readonly SearchOperationRegistry SearchOperations =
             new SearchOperationRegistry(BoundedSearchPolicy.Shared.Options);
@@ -270,6 +274,11 @@ namespace Emby.Plugin.Danmu.Core.Controllers
             if (DanmuDispatchOption.RetryTrackedEpisode.Equals(danmuParams.Option))
             {
                 return await RetryTrackedEpisode(danmuParams).ConfigureAwait(false);
+            }
+
+            if (DanmuDispatchOption.ReplaySevenDaySkipped.Equals(danmuParams.Option))
+            {
+                return await ReplaySevenDaySkipped(danmuParams.TaskId).ConfigureAwait(false);
             }
 
             if (DanmuDispatchOption.StopAllTrackedDownloads.Equals(danmuParams.Option))
@@ -1307,9 +1316,9 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 result.SelectedId = selected.Id;
                 result.SelectedSite = selected.Site;
                 result.SelectedSiteName = selected.SiteName;
-                result.MatchOrigin = "scored";
+                result.MatchOrigin = search.UsedTmdbAlias ? "tmdb-alias" : "scored";
                 result.DecisionReason = search.IsComplete
-                    ? "confident-site-priority" : "partial-confident";
+                    ? (search.UsedTmdbAlias ? "tmdb-alias-high-confidence" : "confident-site-priority") : "partial-confident";
             }
             else if (result.Candidates.Count == 0)
             {
@@ -1514,7 +1523,8 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 cancellationToken,
                 parentCancellationToken == default(CancellationToken) ? cancellationToken : parentCancellationToken,
                 new[] { parent?.OriginalTitle },
-                new[] { latest.OriginalTitle })
+                new[] { latest.OriginalTitle },
+                latest)
                 .ConfigureAwait(false);
             result.Candidates = search.Candidates;
             StampSeasonCandidateEvidence(latest, result.Candidates);
@@ -1551,9 +1561,9 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 result.SelectedId = selected.Id;
                 result.SelectedSite = selected.Site;
                 result.SelectedSiteName = selected.SiteName;
-                result.MatchOrigin = "scored";
+                result.MatchOrigin = search.UsedTmdbAlias ? "tmdb-alias" : "scored";
                 result.DecisionReason = search.IsComplete
-                    ? "confident-site-priority" : "partial-confident";
+                    ? (search.UsedTmdbAlias ? "tmdb-alias-high-confidence" : "confident-site-priority") : "partial-confident";
                 if (!metadataOnly)
                 {
                     await PopulateCompositePreviewIfRequired(latest, result, selected, "scored",
@@ -1694,7 +1704,8 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 BoundedSearchPolicy.Shared, cancellationToken,
                 parentCancellationToken == default(CancellationToken) ? cancellationToken : parentCancellationToken,
                 new[] { parent?.OriginalTitle },
-                new[] { latest.OriginalTitle })
+                new[] { latest.OriginalTitle },
+                latest)
                 .ConfigureAwait(false);
             response.Keyword = searchKeyword;
             response.Candidates = search.Candidates;
@@ -2813,6 +2824,11 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                         ? mapping.Source.MediaLookupId
                         : mapping.Source.MediaId,
                     SourceEpisodeId = mapping.SourceEpisodeId,
+                    // Composite mappings are built by resolving the selected
+                    // Season/media candidate.  Preserve that scope even when
+                    // the selected candidate itself originated from a
+                    // provider-id decision.
+                    SourceScopeType = "Season",
                     MatchOrigin = mapping.Origin,
                     Status = "pending",
                     Message = "等待下载",
@@ -2872,8 +2888,7 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                             // Direct Episode ProviderIds identify an upstream
                             // episode, not a media/season. Keep that path exact
                             // instead of calling GetMedia with an episode id.
-                            var isDirectMapping = string.Equals(
-                                episodeResult.MatchOrigin, "episode-provider-id", StringComparison.OrdinalIgnoreCase);
+                            var isDirectMapping = IsDirectEpisodeProviderMapping(episodeResult);
                             var media = isDirectMapping
                                 ? await DanmuProviderIdResolver.ResolveDirectEpisodeMediaAsync(
                                     scraper, episode, episodeResult.SourceCandidateId, 1).ConfigureAwait(false)
@@ -2909,6 +2924,7 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                             {
                                 episodeResult.Status = outcome.Status;
                                 episodeResult.Message = outcome.Message;
+                                episodeResult.SkipReason = outcome.SkipReason ?? string.Empty;
                                 if (outcome.Status == "success") task.Succeeded++;
                                 else if (outcome.Status == "partial") task.Partial++;
                                 else task.Skipped++;
@@ -3109,6 +3125,8 @@ namespace Emby.Plugin.Danmu.Core.Controllers
             // is not a safe substitute when a provider uses a distinct id.
             task.CandidateId = request.CandidateId;
             task.MatchOrigin = isDirectEpisodeProviderId ? "provider-id" : string.Empty;
+            task.Episodes[0].MatchOrigin = task.MatchOrigin;
+            task.Episodes[0].SourceScopeType = isDirectEpisodeProviderId ? "Episode" : "Season";
             return QueueSingleTargetDownload(
                 task,
                 episode,
@@ -3163,9 +3181,15 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                         SourceEpisodeId = request.SourceEpisodeId ?? string.Empty,
                         SourceSite = scraper.ProviderId,
                         SourceCandidateId = request.CandidateId ?? string.Empty,
+                        // A normal episode match stores the selected Season
+                        // candidate.  StartTrackedSingleEpisodeDownload
+                        // upgrades this to Episode only after it verifies an
+                        // exact Episode ProviderId on the local item.
+                        SourceScopeType = "Season",
                         EpisodeName = item.Name ?? string.Empty,
                         Status = "pending",
                         Message = "等待下载",
+                        MatchOrigin = string.Empty,
                     },
                 },
             };
@@ -3205,6 +3229,7 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                     {
                         itemResult.Status = outcome.Status;
                         itemResult.Message = outcome.Message;
+                        itemResult.SkipReason = outcome.SkipReason ?? string.Empty;
                         UpdateCompletedTaskSummary(task);
                         task.Message = $"处理完成：成功 {task.Succeeded}，部分缺失 {task.Partial}，重复已跳过 {task.Skipped}，失败 {task.Failed}";
                     }
@@ -3401,6 +3426,411 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 .ConfigureAwait(false);
         }
 
+        private sealed class FrozenReplayPreparation
+        {
+            public AbstractScraper Scraper { get; set; }
+            public ScraperMedia Media { get; set; }
+        }
+
+        private async Task<DanmuDownloadTaskResult> ReplaySevenDaySkipped(string taskId)
+        {
+            if (string.IsNullOrWhiteSpace(taskId) || !DownloadTasks.TryGetValue(taskId, out var requestedTask))
+            {
+                return new DanmuDownloadTaskResult
+                {
+                    TaskId = taskId ?? string.Empty,
+                    Status = "not_found",
+                    Message = "找不到原下载任务，可能是 Emby 已重启",
+                };
+            }
+
+            if (!string.IsNullOrWhiteSpace(requestedTask.ReplayOriginTaskId))
+            {
+                var rejectedChild = Snapshot(requestedTask);
+                rejectedChild.Status = "not_eligible";
+                rejectedChild.ErrorCode = "origin_task_required";
+                rejectedChild.Message = "只能使用原下载任务发起七天跳过重放";
+                return rejectedChild;
+            }
+
+            var origin = ResolveReplayOrigin(requestedTask);
+            DanmuDownloadTaskResult child;
+            var replayEpisodeLeases = new Dictionary<string, SemaphoreSlim>(StringComparer.OrdinalIgnoreCase);
+            lock (origin)
+            {
+                if (!SevenDayReplayPolicy.IsTerminal(origin.Status))
+                {
+                    var rejected = Snapshot(origin);
+                    rejected.ErrorCode = "origin_not_terminal";
+                    rejected.Message = "原下载任务尚未结束，不能重放七天内跳过的剧集";
+                    return rejected;
+                }
+
+                if (!string.IsNullOrWhiteSpace(origin.ReplayChildTaskId) &&
+                    DownloadTasks.TryGetValue(origin.ReplayChildTaskId, out var existingChild))
+                {
+                    return Snapshot(existingChild);
+                }
+
+                var acceptedItemIds = GetAcceptedReplayLineageItemIds(origin.TaskId);
+                var frozenEpisodes = SevenDayReplayPolicy.FreezeEligibleEpisodes(
+                    origin.Episodes, acceptedItemIds);
+                var availableEpisodes = new List<DanmuEpisodeDownloadResult>();
+                foreach (var episode in frozenEpisodes)
+                {
+                    if (!TryAcquireEpisodeRetryLease(episode.ItemId, out var lease))
+                    {
+                        continue;
+                    }
+
+                    replayEpisodeLeases[episode.ItemId] = lease;
+                    availableEpisodes.Add(episode);
+                }
+                frozenEpisodes = availableEpisodes;
+                origin.ReplayEligibleCount = frozenEpisodes.Count;
+                origin.ReplayEligible = frozenEpisodes.Count > 0;
+                if (frozenEpisodes.Count == 0)
+                {
+                    var ineligible = Snapshot(origin);
+                    ineligible.Status = "not_eligible";
+                    ineligible.ErrorCode = "no_replayable_seven_day_skips";
+                    ineligible.Message = "原任务没有可重放的七天内文件跳过记录";
+                    return ineligible;
+                }
+
+                child = CreateSevenDayReplayTask(origin, frozenEpisodes);
+                // Link before the background task starts, making concurrent
+                // requests idempotently observe this exact child task.
+                origin.ReplayChildTaskId = child.TaskId;
+                DownloadTasks[child.TaskId] = child;
+            }
+
+            return QueueSevenDayReplay(origin, child, replayEpisodeLeases);
+        }
+
+        private static DanmuDownloadTaskResult ResolveReplayOrigin(DanmuDownloadTaskResult task)
+        {
+            var current = task;
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            while (current != null && !string.IsNullOrWhiteSpace(current.ReplayOriginTaskId) &&
+                   seen.Add(current.TaskId ?? string.Empty) &&
+                   DownloadTasks.TryGetValue(current.ReplayOriginTaskId, out var parent))
+            {
+                current = parent;
+            }
+            return current ?? task;
+        }
+
+        private static HashSet<string> GetAcceptedReplayLineageItemIds(string originTaskId)
+        {
+            var accepted = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var candidate in DownloadTasks.Values)
+            {
+                if (candidate == null || string.Equals(candidate.TaskId, originTaskId, StringComparison.OrdinalIgnoreCase) ||
+                    !string.Equals(ResolveReplayOrigin(candidate).TaskId, originTaskId, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                lock (candidate)
+                {
+                    foreach (var episode in candidate.Episodes.Where(episode =>
+                                 string.Equals(episode.Status, "success", StringComparison.OrdinalIgnoreCase) ||
+                                 string.Equals(episode.Status, "partial", StringComparison.OrdinalIgnoreCase)))
+                    {
+                        accepted.Add(episode.ItemId ?? string.Empty);
+                    }
+                }
+            }
+            return accepted;
+        }
+
+        private static DanmuDownloadTaskResult CreateSevenDayReplayTask(
+            DanmuDownloadTaskResult origin,
+            IEnumerable<DanmuEpisodeDownloadResult> frozenEpisodes)
+        {
+            var replayEpisodes = (frozenEpisodes ?? Enumerable.Empty<DanmuEpisodeDownloadResult>())
+                .Select(SevenDayReplayPolicy.CloneEpisode)
+                .Where(episode => episode != null)
+                .ToList();
+            foreach (var episode in replayEpisodes)
+            {
+                episode.Status = "pending";
+                episode.Message = "等待重放";
+                episode.SkipReason = string.Empty;
+            }
+
+            return new DanmuDownloadTaskResult
+            {
+                TaskId = Guid.NewGuid().ToString("N"),
+                TargetItemId = origin.TargetItemId,
+                TargetItemName = origin.TargetItemName,
+                TargetItemType = "SevenDayReplay",
+                SourceEpisodeNumber = origin.SourceEpisodeNumber,
+                SeasonId = origin.SeasonId,
+                SeriesId = origin.SeriesId,
+                SeasonName = origin.SeasonName,
+                SeasonNumber = origin.SeasonNumber,
+                SeasonYear = origin.SeasonYear,
+                Site = origin.Site,
+                SiteName = origin.SiteName,
+                CandidateId = origin.CandidateId,
+                MatchOrigin = origin.MatchOrigin,
+                IsCompositePlan = origin.IsCompositePlan,
+                MappingProtocolVersion = origin.MappingProtocolVersion,
+                PlanGeneration = origin.PlanGeneration,
+                SeasonProviderValue = origin.SeasonProviderValue,
+                SeasonStructureFingerprint = origin.SeasonStructureFingerprint,
+                SeasonPlanFingerprint = origin.SeasonPlanFingerprint,
+                ReplayOriginTaskId = origin.TaskId,
+                ReplayKind = SevenDayReplayPolicy.ReplayKind,
+                Status = "queued",
+                Message = "等待七天跳过重放队列",
+                Total = replayEpisodes.Count,
+                ForceRefresh = true,
+                Episodes = replayEpisodes,
+            };
+        }
+
+        private DanmuDownloadTaskResult QueueSevenDayReplay(
+            DanmuDownloadTaskResult origin,
+            DanmuDownloadTaskResult task,
+            IReadOnlyDictionary<string, SemaphoreSlim> episodeLeases)
+        {
+            var cancellation = new CancellationTokenSource();
+            DownloadTaskCancellations[task.TaskId] = cancellation;
+            _ = Task.Run(async () =>
+            {
+                var enteredQueue = false;
+                CompositeSeasonProviderWriteLease compositeLease = null;
+                var replayProviderTasks = new Dictionary<string, Task<DanmuEpisodeDownloadOutcome>>(
+                    StringComparer.OrdinalIgnoreCase);
+                try
+                {
+                    var season = ResolveSeason(new DanmuParams
+                    {
+                        Id = task.SeasonId,
+                        SeriesId = task.SeriesId,
+                        SeasonName = task.SeasonName,
+                        SeasonNumber = task.SeasonNumber,
+                        SeasonYear = task.SeasonYear,
+                    });
+                    if (season == null)
+                    {
+                        throw new DanmuDownloadErrorException("重放失败：找不到原季度媒体项");
+                    }
+
+                    compositeLease = _libraryManagerEventsHelper.BeginCompositeSeasonWrite(season, task.IsCompositePlan);
+                    await TrackedDownloadQueue.WaitAsync(cancellation.Token).ConfigureAwait(false);
+                    enteredQueue = true;
+                    lock (task)
+                    {
+                        task.Status = "running";
+                        task.Message = "正在强制重放七天内跳过的弹幕";
+                    }
+
+                    foreach (var episodeResult in task.Episodes)
+                    {
+                        cancellation.Token.ThrowIfCancellationRequested();
+                        if (!Guid.TryParse(episodeResult.ItemId, out var episodeId) ||
+                            !(_libraryManager.GetItemById(episodeId) is Episode episode))
+                        {
+                            lock (task)
+                            {
+                                episodeResult.Status = "failed";
+                                episodeResult.Message = "重放失败：找不到原剧集媒体项";
+                            }
+                            continue;
+                        }
+
+                        try
+                        {
+                            lock (task)
+                            {
+                                episodeResult.Status = "running";
+                                episodeResult.Message = "正在强制重新下载";
+                            }
+                            var preparation = await PrepareFrozenReplayAsync(season, episode, episodeResult)
+                                .ConfigureAwait(false);
+                            var providerTask = _libraryManagerEventsHelper.DownloadEpisodeForProgress(
+                                episode, preparation.Media, preparation.Scraper, true, 1);
+                            replayProviderTasks[episodeResult.ItemId] = providerTask;
+                            var outcome = await AwaitSingleTargetDownload(
+                                providerTask,
+                                cancellation.Token, task).ConfigureAwait(false);
+                            NormalizeFrozenReplayProviderOutcome(episodeResult, outcome);
+                            await PersistProviderIdAfterAcceptedOutcome(episode, outcome).ConfigureAwait(false);
+                            lock (task)
+                            {
+                                episodeResult.Status = outcome.Status;
+                                episodeResult.Message = outcome.Message;
+                                episodeResult.SkipReason = outcome.SkipReason ?? string.Empty;
+                            }
+                        }
+                        catch (Exception ex) when (!(ex is OperationCanceledException))
+                        {
+                            _logger.LogError(ex, "七天跳过重放失败: season={0}, episode={1}",
+                                season.Name, episode.IndexNumber);
+                            lock (task)
+                            {
+                                episodeResult.Status = "failed";
+                                episodeResult.Message = ex.Message;
+                            }
+                        }
+                    }
+                }
+                catch (OperationCanceledException)
+                {
+                    lock (task)
+                    {
+                        foreach (var episode in task.Episodes.Where(episode => episode.Status == "pending" || episode.Status == "running"))
+                        {
+                            episode.Status = "cancelled";
+                            episode.Message = "重放已强制停止";
+                        }
+                        task.Status = "cancelled";
+                        task.Message = "七天跳过重放已停止";
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "七天跳过重放任务失败: task={0}", task.TaskId);
+                    lock (task)
+                    {
+                        foreach (var episode in task.Episodes.Where(episode => episode.Status == "pending" || episode.Status == "running"))
+                        {
+                            episode.Status = "failed";
+                            episode.Message = ex.Message;
+                        }
+                        task.Status = "failed";
+                        task.Message = "七天跳过重放失败：" + ex.Message;
+                    }
+                }
+                finally
+                {
+                    _libraryManagerEventsHelper.CompleteCompositeSeasonWrite(compositeLease);
+                    lock (task)
+                    {
+                        RecalculateTaskCounts(task);
+                        if (!string.Equals(task.Status, "cancelled", StringComparison.OrdinalIgnoreCase) &&
+                            !string.Equals(task.Status, "failed", StringComparison.OrdinalIgnoreCase))
+                        {
+                            UpdateCompletedTaskSummary(task);
+                        }
+                    }
+                    RefreshReplayEligibility(origin);
+                    if (enteredQueue) TrackedDownloadQueue.Release();
+                    if (DownloadTaskCancellations.TryRemove(task.TaskId, out var removedCancellation))
+                    {
+                        removedCancellation.Dispose();
+                    }
+                    foreach (var episodeLease in episodeLeases ??
+                             new Dictionary<string, SemaphoreSlim>(StringComparer.OrdinalIgnoreCase))
+                    {
+                        replayProviderTasks.TryGetValue(episodeLease.Key, out var providerTask);
+                        SingleTargetDownloadArbiter.ReleaseLeaseWhenProviderSettles(
+                            providerTask, episodeLease.Value);
+                    }
+                }
+            });
+
+            return Snapshot(task);
+        }
+
+        private async Task<FrozenReplayPreparation> PrepareFrozenReplayAsync(
+            Season season,
+            Episode episode,
+            DanmuEpisodeDownloadResult episodeResult)
+        {
+            if (string.IsNullOrWhiteSpace(episodeResult.SourceSite) ||
+                string.IsNullOrWhiteSpace(episodeResult.SourceCandidateId) ||
+                string.IsNullOrWhiteSpace(episodeResult.SourceEpisodeId))
+            {
+                throw new DanmuDownloadErrorException("重放失败：原任务缺少已验证的来源剧集证据");
+            }
+
+            var scraper = _scraperManager.All().FirstOrDefault(candidate => string.Equals(
+                candidate.ProviderId, episodeResult.SourceSite, StringComparison.OrdinalIgnoreCase));
+            if (scraper == null)
+            {
+                throw new DanmuDownloadErrorException("重放失败：原弹幕来源已不可用");
+            }
+
+            var isDirectMapping = IsDirectEpisodeProviderMapping(episodeResult);
+            if (!isDirectMapping && !IsSeasonProviderMapping(episodeResult))
+            {
+                throw new DanmuDownloadErrorException("重放失败：原任务缺少已冻结的来源范围类型");
+            }
+            var resolved = isDirectMapping
+                ? await DanmuProviderIdResolver.ResolveDirectEpisodeMediaAsync(
+                    scraper, episode, episodeResult.SourceCandidateId, 1).ConfigureAwait(false)
+                : await scraper.GetMedia(season, episodeResult.SourceCandidateId).ConfigureAwait(false);
+            var sourceEpisode = (resolved?.Episodes ?? new List<ScraperEpisode>()).FirstOrDefault(candidate =>
+                candidate != null && string.Equals(candidate.Id, episodeResult.SourceEpisodeId,
+                    StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(candidate.CommentId));
+            if (sourceEpisode == null)
+            {
+                throw new DanmuDownloadErrorException("重放失败：来源剧集已变更，无法验证原映射");
+            }
+
+            return new FrozenReplayPreparation
+            {
+                Scraper = scraper,
+                Media = new ScraperMedia
+                {
+                    Id = resolved.Id,
+                    ProviderId = scraper.ProviderId,
+                    Episodes = new List<ScraperEpisode>
+                    {
+                        new ScraperEpisode
+                        {
+                            Id = sourceEpisode.Id,
+                            CommentId = sourceEpisode.CommentId,
+                            EpisodeNumber = 1,
+                            Title = sourceEpisode.Title,
+                        },
+                    },
+                },
+            };
+        }
+
+        private static bool IsDirectEpisodeProviderMapping(DanmuEpisodeDownloadResult episode)
+        {
+            return string.Equals(episode?.SourceScopeType, "Episode", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool IsSeasonProviderMapping(DanmuEpisodeDownloadResult episode)
+        {
+            return string.Equals(episode?.SourceScopeType, "Season", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static void NormalizeFrozenReplayProviderOutcome(
+            DanmuEpisodeDownloadResult episode,
+            DanmuEpisodeDownloadOutcome outcome)
+        {
+            if (outcome == null || !outcome.FilePersisted || !IsDirectEpisodeProviderMapping(episode)) return;
+            outcome.ProviderId = episode.SourceSite;
+            outcome.ProviderValue = episode.SourceCandidateId;
+        }
+
+        private static bool TryAcquireEpisodeRetryLease(string episodeItemId, out SemaphoreSlim lease)
+        {
+            lease = EpisodeRetryLocks.GetOrAdd(episodeItemId ?? string.Empty, ignored => new SemaphoreSlim(1, 1));
+            return lease.Wait(0);
+        }
+
+        private static void RefreshReplayEligibility(DanmuDownloadTaskResult origin)
+        {
+            if (origin == null) return;
+            lock (origin)
+            {
+                var frozen = SevenDayReplayPolicy.FreezeEligibleEpisodes(
+                    origin.Episodes, GetAcceptedReplayLineageItemIds(origin.TaskId));
+                origin.ReplayEligibleCount = frozen.Count;
+                origin.ReplayEligible = frozen.Count > 0;
+            }
+        }
+
         private async Task<DanmuDownloadTaskResult> RetryTrackedEpisode(DanmuParams request)
         {
             if (string.IsNullOrWhiteSpace(request.TaskId) ||
@@ -3460,6 +3890,8 @@ namespace Emby.Plugin.Danmu.Core.Controllers
             }
 
             var isCompositeTask = string.Equals(task.TargetItemType, "CompositeSeason", StringComparison.OrdinalIgnoreCase);
+            var isSevenDayReplayTask = string.Equals(task.TargetItemType, "SevenDayReplay", StringComparison.OrdinalIgnoreCase);
+            var useFrozenEpisodeSource = isCompositeTask || isSevenDayReplayTask;
             var retryBuild = isCompositeTask
                 ? await BuildCompositePlanAsync(
                     season, task.SeasonPlanSelections, false, task.SeasonPlanExcludedItemIds)
@@ -3483,60 +3915,32 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 }
                 return Snapshot(task);
             }
-            var requiresCompositeTransition = isCompositeTask && task.IsCompositePlan;
-            var sourceSite = isCompositeTask ? episodeResult.SourceSite : task.Site;
-            var scraper = _scraperManager.All().FirstOrDefault(x =>
-                string.Equals(x.ProviderId, sourceSite, StringComparison.OrdinalIgnoreCase));
-            var candidateId = isCompositeTask
-                ? episodeResult.SourceCandidateId
-                : task.CandidateId;
-            if (scraper == null || string.IsNullOrWhiteSpace(candidateId))
-            {
-                lock (task)
-                {
-                    task.Message = "重试失败：原弹幕来源或季度绑定已经失效";
-                }
-                return Snapshot(task);
-            }
-
+            var requiresCompositeTransition = task.IsCompositePlan;
+            AbstractScraper scraper = null;
             ScraperMedia media;
             try
             {
-                if (isCompositeTask)
+                if (useFrozenEpisodeSource)
                 {
-                    var isDirectMapping = string.Equals(
-                        episodeResult.MatchOrigin, "episode-provider-id", StringComparison.OrdinalIgnoreCase);
-                    var resolved = isDirectMapping
-                        ? await DanmuProviderIdResolver.ResolveDirectEpisodeMediaAsync(
-                            scraper, episode, candidateId, 1).ConfigureAwait(false)
-                        : await scraper.GetMedia(season, candidateId).ConfigureAwait(false);
-                    var sourceEpisode = (resolved?.Episodes ?? new List<ScraperEpisode>()).FirstOrDefault(x =>
-                        x != null && string.Equals(x.Id, episodeResult.SourceEpisodeId, StringComparison.OrdinalIgnoreCase) &&
-                        !string.IsNullOrWhiteSpace(x.CommentId));
-                    if (sourceEpisode == null)
-                    {
-                        throw new DanmuDownloadErrorException("来源剧集已变更，无法验证原映射。");
-                    }
-                    media = new ScraperMedia
-                    {
-                        Id = resolved.Id,
-                        ProviderId = scraper.ProviderId,
-                        Episodes = new List<ScraperEpisode>
-                        {
-                            new ScraperEpisode
-                            {
-                                Id = sourceEpisode.Id,
-                                CommentId = sourceEpisode.CommentId,
-                                EpisodeNumber = 1,
-                                Title = sourceEpisode.Title,
-                            },
-                        },
-                    };
+                    var preparation = await PrepareFrozenReplayAsync(season, episode, episodeResult)
+                        .ConfigureAwait(false);
+                    scraper = preparation.Scraper;
+                    media = preparation.Media;
                 }
                 else
                 {
-                    var isDirectMapping = string.Equals(
-                        task.MatchOrigin, "provider-id", StringComparison.OrdinalIgnoreCase);
+                    scraper = _scraperManager.All().FirstOrDefault(x =>
+                        string.Equals(x.ProviderId, task.Site, StringComparison.OrdinalIgnoreCase));
+                    var candidateId = task.CandidateId;
+                    if (scraper == null || string.IsNullOrWhiteSpace(candidateId))
+                    {
+                        throw new DanmuDownloadErrorException("重试失败：原弹幕来源或季度绑定已经失效");
+                    }
+                    var isDirectMapping = IsDirectEpisodeProviderMapping(episodeResult);
+                    if (!isDirectMapping && !IsSeasonProviderMapping(episodeResult))
+                    {
+                        throw new DanmuDownloadErrorException("重试失败：原任务缺少已冻结的来源范围类型");
+                    }
                     var resolved = isDirectMapping
                         ? await DanmuProviderIdResolver.ResolveDirectEpisodeMediaAsync(
                             scraper,
@@ -3566,10 +3970,20 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 return Snapshot(task);
             }
 
+            if (!TryAcquireEpisodeRetryLease(episode.Id.ToString(), out var episodeRetryLease))
+            {
+                lock (task)
+                {
+                    task.Message = "该剧集已有重试或七天跳过重放正在执行，请稍后再试";
+                }
+                return Snapshot(task);
+            }
+
             var cancellation = new CancellationTokenSource();
             if (!DownloadTaskCancellations.TryAdd(task.TaskId, cancellation))
             {
                 cancellation.Dispose();
+                episodeRetryLease.Release();
                 lock (task)
                 {
                     task.Message = "该季度已有下载或重试正在执行，请稍后再试";
@@ -3590,6 +4004,7 @@ namespace Emby.Plugin.Danmu.Core.Controllers
             {
                 var enteredQueue = false;
                 CompositeSeasonProviderWriteLease compositeLease = null;
+                Task<DanmuEpisodeDownloadOutcome> providerTask = null;
                 try
                 {
                     if (requiresCompositeTransition)
@@ -3610,20 +4025,28 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                         task.Message = $"正在重试第 {episode.IndexNumber ?? 0} 集：{episode.Name}";
                     }
 
+                    providerTask = _libraryManagerEventsHelper.DownloadEpisodeForProgress(
+                        episode,
+                        media,
+                        scraper,
+                        true,
+                        useFrozenEpisodeSource ? 1 : task.SourceEpisodeNumber);
                     var outcome = await AwaitSingleTargetDownload(
-                        _libraryManagerEventsHelper.DownloadEpisodeForProgress(
-                            episode,
-                            media,
-                            scraper,
-                            true,
-                            isCompositeTask ? 1 : task.SourceEpisodeNumber),
+                        providerTask,
                         cancellation.Token,
                         task).ConfigureAwait(false);
+                    // Retry reuses the per-episode frozen evidence as well.
+                    // Only an Episode-scoped direct ProviderId may replace the
+                    // downloader's resolved episode binding with the original
+                    // direct identifier; a Season/media candidate must never
+                    // be copied onto the Episode.
+                    NormalizeFrozenReplayProviderOutcome(episodeResult, outcome);
                     await PersistProviderIdAfterAcceptedOutcome(episode, outcome).ConfigureAwait(false);
                     lock (task)
                     {
                         episodeResult.Status = outcome.Status;
                         episodeResult.Message = outcome.Message;
+                        episodeResult.SkipReason = outcome.SkipReason ?? string.Empty;
                     }
                 }
                 catch (OperationCanceledException)
@@ -3660,6 +4083,7 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                     {
                         removedCancellation.Dispose();
                     }
+                    SingleTargetDownloadArbiter.ReleaseLeaseWhenProviderSettles(providerTask, episodeRetryLease);
                 }
             });
 
@@ -3747,9 +4171,11 @@ namespace Emby.Plugin.Danmu.Core.Controllers
         private static void UpdateCompletedTaskSummary(DanmuDownloadTaskResult task)
         {
             RecalculateTaskCounts(task);
+            task.ReplayEligibleCount = task.Episodes.Count(SevenDayReplayPolicy.IsRecentFileSkip);
             task.Status = task.Failed > 0
                 ? "completed_with_errors"
                 : (task.Partial > 0 ? "completed_with_warnings" : "completed");
+            task.ReplayEligible = task.ReplayEligibleCount > 0;
             task.Message = $"本季处理完成：成功 {task.Succeeded} 集，部分弹幕缺失 {task.Partial} 集，" +
                            $"重复已跳过 {task.Skipped} 集，失败 {task.Failed} 集";
         }
@@ -3850,6 +4276,11 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                     Partial = task.Partial,
                     Failed = task.Failed,
                     ForceRefresh = task.ForceRefresh,
+                    ReplayEligible = task.ReplayEligible,
+                    ReplayEligibleCount = task.ReplayEligibleCount,
+                    ReplayOriginTaskId = task.ReplayOriginTaskId,
+                    ReplayChildTaskId = task.ReplayChildTaskId,
+                    ReplayKind = task.ReplayKind,
                     Episodes = task.Episodes.Select(x => new DanmuEpisodeDownloadResult
                     {
                         ItemId = x.ItemId,
@@ -3859,9 +4290,11 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                         SourceSite = x.SourceSite,
                         SourceCandidateId = x.SourceCandidateId,
                         SourceEpisodeId = x.SourceEpisodeId,
+                        SourceScopeType = x.SourceScopeType,
                         MatchOrigin = x.MatchOrigin,
                         Status = x.Status,
                         Message = x.Message,
+                        SkipReason = x.SkipReason,
                     }).ToList(),
                 };
             }

@@ -555,6 +555,11 @@ namespace Emby.Plugin.Danmu.Model
         public int Partial { get; set; }
         public int Failed { get; set; }
         public bool ForceRefresh { get; set; }
+        public bool ReplayEligible { get; set; }
+        public int ReplayEligibleCount { get; set; }
+        public string ReplayOriginTaskId { get; set; } = string.Empty;
+        public string ReplayChildTaskId { get; set; } = string.Empty;
+        public string ReplayKind { get; set; } = string.Empty;
         public List<DanmuEpisodeDownloadResult> Episodes { get; set; } = new List<DanmuEpisodeDownloadResult>();
     }
 
@@ -584,7 +589,14 @@ namespace Emby.Plugin.Danmu.Model
         public string SourceSite { get; set; } = string.Empty;
         public string SourceCandidateId { get; set; } = string.Empty;
         public string SourceEpisodeId { get; set; } = string.Empty;
+        // Frozen provider-id provenance.  MatchOrigin describes the match
+        // decision, whereas this records whether SourceCandidateId identifies
+        // an upstream Episode or a Season/media collection.
+        public string SourceScopeType { get; set; } = string.Empty;
         public string MatchOrigin { get; set; } = string.Empty;
+        // This is intentionally populated only by the seven-day existing-file
+        // branch. Other skipped outcomes remain ineligible for replay.
+        public string SkipReason { get; set; } = string.Empty;
     }
 
     public class DanmuEpisodeDownloadOutcome
@@ -601,6 +613,8 @@ namespace Emby.Plugin.Danmu.Model
         public string ProviderValue { get; set; } = string.Empty;
         public bool FilePersisted { get; set; }
         public long ProviderWriteGeneration { get; set; }
+        // Set only for the filesystem age check in DownloadItemForProgress.
+        public string SkipReason { get; set; } = string.Empty;
     }
 
     public static class DanmuMatchIntent

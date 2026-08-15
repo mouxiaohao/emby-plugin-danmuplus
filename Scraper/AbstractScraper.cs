@@ -141,6 +141,18 @@ namespace Emby.Plugin.Danmu.Scraper
         }
 
         /// <summary>
+        /// Search options used by the bounded smart-match coordinator.  The
+        /// default preserves the legacy provider behavior.
+        /// </summary>
+        public virtual Task<ScraperSearchResult> SearchForApiWithDiagnostics(
+            string keyword,
+            CancellationToken cancellationToken,
+            bool allowMovieTypedSearch)
+        {
+            return SearchForApiWithDiagnostics(keyword, cancellationToken);
+        }
+
+        /// <summary>
         /// 获取影片剧集数据（用于api）
         /// </summary>
         /// <returns>剧集列表</returns>

@@ -66,6 +66,32 @@ namespace Emby.Plugin.Danmu.Core
             };
         }
 
+        /// <summary>
+        /// Keeps an Episode-level ownership lease until the provider task has
+        /// actually settled.  AwaitAsync may intentionally return early for a
+        /// timeout or cancellation, while a provider that ignores cancellation
+        /// can still be writing the target XML in the background.
+        /// </summary>
+        public static void ReleaseLeaseWhenProviderSettles(Task providerTask, SemaphoreSlim lease)
+        {
+            if (lease == null)
+            {
+                return;
+            }
+
+            if (providerTask == null || providerTask.IsCompleted)
+            {
+                lease.Release();
+                return;
+            }
+
+            _ = providerTask.ContinueWith(
+                ignored => lease.Release(),
+                CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
+        }
+
         private static void ObserveLateFailure(
             Task<DanmuEpisodeDownloadOutcome> providerTask,
             Action<Exception> onLateProviderFailure)

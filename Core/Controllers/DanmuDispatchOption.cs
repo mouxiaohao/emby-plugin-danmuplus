@@ -64,6 +64,12 @@ namespace Emby.Plugin.Danmu.Core.Controllers
         public static string RetryTrackedEpisode = "RetryTrackedEpisode";
 
         /**
+         * Replays only the frozen seven-day-recent-file skips from a completed
+         * tracked task. The request accepts taskId only.
+         */
+        public static string ReplaySevenDaySkipped = "ReplaySevenDaySkipped";
+
+        /**
          * 中止所有由智能匹配界面创建的等待中或执行中的下载任务
          */
         public static string StopAllTrackedDownloads = "StopAllTrackedDownloads";

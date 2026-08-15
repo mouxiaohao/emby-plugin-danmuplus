@@ -29,6 +29,7 @@ namespace Emby.Plugin.Danmu.Scraper.Bilibili
     {
         internal const int TypedSearchPageLimit = 2;
         internal const int TypedSearchRecordLimitPerType = 40;
+        internal const int TypedSearchAttemptLimit = 2;
         internal const int SearchRecordLimit = 100;
         private static readonly string[] TypedMediaSearchTypes = { "media_ft", "media_bangumi" };
         private static readonly Regex regBiliplusVideoInfo = new Regex(@"view\((.+?)\);", RegexOptions.Compiled);
@@ -63,7 +64,7 @@ namespace Emby.Plugin.Danmu.Scraper.Bilibili
             _httpClient.DefaultRequestHeaders.UserAgent.ParseAdd(HTTP_USER_AGENT); // Use User-Agent from AbstractApi
             _httpClient.DefaultRequestHeaders.Accept.ParseAdd("application/json, text/plain, */*"); // API 通常接受 JSON 或纯文本，*/* 作为备选
             _httpClient.DefaultRequestHeaders.AcceptLanguage.ParseAdd("zh-CN,zh;q=0.9,en;q=0.8");
-            _httpClient.DefaultRequestHeaders.AcceptEncoding.ParseAdd("gzip, deflate, br");
+            _httpClient.DefaultRequestHeaders.AcceptEncoding.ParseAdd("gzip, deflate");
             _httpClient.DefaultRequestHeaders.Add("Referer", "https://www.bilibili.com/"); // API 调用通常需要 Referer
             
             // Sec-Fetch-* 头部，模拟浏览器 AJAX/Fetch 请求
@@ -199,12 +200,13 @@ namespace Emby.Plugin.Danmu.Scraper.Bilibili
 
         /// <summary>
         /// Supplements the aggregate response with bounded media-only typed
-        /// pages. Optional typed failures are returned as diagnostics while
-        /// aggregate and previously collected typed candidates remain usable.
+        /// pages. Optional typed failures retry once, then leave aggregate and
+        /// previously collected typed candidates usable without a diagnostic.
         /// </summary>
         public async Task<SearchResult> SearchMergedAsync(
             string keyword,
-            CancellationToken cancellationToken)
+            CancellationToken cancellationToken,
+            IEnumerable<string> typedSearchTypes = null)
         {
             cancellationToken.ThrowIfCancellationRequested();
             if (string.IsNullOrWhiteSpace(keyword))
@@ -212,7 +214,8 @@ namespace Emby.Plugin.Danmu.Scraper.Bilibili
                 return new SearchResult { Result = new List<Entity.Media>() };
             }
 
-            var cacheKey = $"search_merged_{keyword}";
+            var typedProfile = NormalizeTypedSearchTypes(typedSearchTypes);
+            var cacheKey = GetMergedSearchCacheKey(keyword, typedProfile);
             if (_memoryCache.TryGetValue<SearchResult>(cacheKey, out var cached))
             {
                 return cached;
@@ -249,9 +252,10 @@ namespace Emby.Plugin.Danmu.Scraper.Bilibili
                         return typed.Data;
                     }
                 },
-                cancellationToken).ConfigureAwait(false);
+                cancellationToken,
+                typedProfile).ConfigureAwait(false);
 
-            foreach (var diagnostic in result.Diagnostics)
+            foreach (var diagnostic in result.SuppressedDiagnostics)
             {
                 _logger.Warn(
                     "Typed media search failed without discarding candidates: type={0}, page={1}, error={2}",
@@ -259,7 +263,7 @@ namespace Emby.Plugin.Danmu.Scraper.Bilibili
                     diagnostic.Page,
                     diagnostic.Message);
             }
-            if (result.Diagnostics.Count == 0)
+            if (ShouldCacheMergedSearchResult(result))
             {
                 _memoryCache.Set(
                     cacheKey,
@@ -278,10 +282,44 @@ namespace Emby.Plugin.Danmu.Scraper.Bilibili
             return aggregate?.SessionAvailable == true;
         }
 
+        internal static string[] GetTypedSearchTypesForItem(bool isMovie)
+        {
+            return isMovie
+                ? TypedMediaSearchTypes.ToArray()
+                : new[] { "media_bangumi" };
+        }
+
+        internal static string GetMergedSearchCacheKey(
+            string keyword,
+            IEnumerable<string> typedSearchTypes)
+        {
+            return $"search_merged_{keyword}|typed:{string.Join(",", NormalizeTypedSearchTypes(typedSearchTypes))}";
+        }
+
+        internal static bool ShouldCacheMergedSearchResult(SearchResult result)
+        {
+            return result != null && result.SuppressedDiagnostics.Count == 0;
+        }
+
+        private static string[] NormalizeTypedSearchTypes(IEnumerable<string> typedSearchTypes)
+        {
+            var requested = typedSearchTypes == null
+                ? TypedMediaSearchTypes
+                : typedSearchTypes
+                    .Where(type => !string.IsNullOrWhiteSpace(type))
+                    .Select(type => type.Trim())
+                    .ToArray();
+            return TypedMediaSearchTypes
+                .Where(type => requested.Any(candidate =>
+                    string.Equals(candidate, type, StringComparison.OrdinalIgnoreCase)))
+                .ToArray();
+        }
+
         internal static async Task<SearchResult> MergeTypedAsync(
             SearchResult aggregate,
             Func<string, int, CancellationToken, Task<BiliSearchTypeData>> fetchTypedPage,
-            CancellationToken cancellationToken)
+            CancellationToken cancellationToken,
+            IEnumerable<string> typedSearchTypes = null)
         {
             var result = new SearchResult
             {
@@ -297,7 +335,7 @@ namespace Emby.Plugin.Danmu.Scraper.Bilibili
                     MergeUsableMedia(merged, media);
             }
 
-            foreach (var searchType in TypedMediaSearchTypes)
+            foreach (var searchType in NormalizeTypedSearchTypes(typedSearchTypes))
             {
                 var acceptedForType = 0;
                 for (var page = 1;
@@ -306,10 +344,39 @@ namespace Emby.Plugin.Danmu.Scraper.Bilibili
                     page++)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
+                    BiliSearchTypeData typed = null;
+                    var fetched = false;
+                    Exception lastError = null;
+                    for (var attempt = 1; attempt <= TypedSearchAttemptLimit; attempt++)
+                    {
+                        try
+                        {
+                            typed = await fetchTypedPage(searchType, page, cancellationToken)
+                                .ConfigureAwait(false);
+                            fetched = true;
+                            break;
+                        }
+                        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                        {
+                            throw;
+                        }
+                        catch (Exception ex)
+                        {
+                            // Typed media pages only supplement the aggregate
+                            // result. Retry once for transient Bilibili HTML,
+                            // anti-bot, or transport responses.
+                            lastError = ex;
+                        }
+                    }
+
+                    if (!fetched)
+                    {
+                        AddSuppressedDiagnostic(result, searchType, page, lastError);
+                        break;
+                    }
+
                     try
                     {
-                        var typed = await fetchTypedPage(searchType, page, cancellationToken)
-                            .ConfigureAwait(false);
                         var typedItems = typed?.Result ?? new List<Entity.Media>();
                         foreach (var media in typedItems.Take(
                             TypedSearchRecordLimitPerType - acceptedForType))
@@ -332,12 +399,10 @@ namespace Emby.Plugin.Danmu.Scraper.Bilibili
                     }
                     catch (Exception ex)
                     {
-                        result.Diagnostics.Add(new BilibiliSearchDiagnostic
-                        {
-                            SearchType = searchType,
-                            Page = page,
-                            Message = ex.Message,
-                        });
+                        // A malformed typed payload is treated exactly like a
+                        // failed typed request: aggregate candidates remain
+                        // valid and no frontend diagnostic is emitted.
+                        AddSuppressedDiagnostic(result, searchType, page, ex);
                         break;
                     }
                 }
@@ -346,6 +411,20 @@ namespace Emby.Plugin.Danmu.Scraper.Bilibili
             result.Result = merged.Values.Take(SearchRecordLimit).ToList();
             result.NumResults = result.Result.Count;
             return result;
+        }
+
+        private static void AddSuppressedDiagnostic(
+            SearchResult result,
+            string searchType,
+            int page,
+            Exception exception)
+        {
+            result.SuppressedDiagnostics.Add(new BilibiliSearchDiagnostic
+            {
+                SearchType = searchType,
+                Page = page,
+                Message = exception?.Message ?? "typed search did not return a usable response",
+            });
         }
 
         private static void MergeUsableMedia(IDictionary<long, Entity.Media> merged, Entity.Media media)
@@ -1034,7 +1113,7 @@ namespace Emby.Plugin.Danmu.Scraper.Bilibili
                 request.Headers.AcceptLanguage.Clear();
                 request.Headers.AcceptLanguage.ParseAdd("zh-CN,zh;q=0.9,en;q=0.8"); // 示例值
                 request.Headers.AcceptEncoding.Clear();
-                request.Headers.AcceptEncoding.ParseAdd("gzip, deflate, br"); // 示例值
+                request.Headers.AcceptEncoding.ParseAdd("gzip, deflate"); // 示例值
 
                 request.Headers.TryAddWithoutValidation("Upgrade-Insecure-Requests", "1");
                 request.Headers.TryAddWithoutValidation("Sec-Fetch-Site", "none"); // 初始导航

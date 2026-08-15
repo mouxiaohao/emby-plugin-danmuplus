@@ -27,7 +27,10 @@ namespace Emby.Plugin.Danmu.RegressionTests
             MergesAggregateAndTypedBourneFixtures();
             RejectsOrdinaryVideoFromTypedMediaPath();
             UsesTypedKindAndProviderAliasAcrossConsumers();
-            ExercisesInjectableTypedPaginationAndPartialFailure();
+            ExercisesInjectableTypedPaginationAndSilentFallback();
+            RestrictsMediaFtToMovieSearch();
+            RetriesUncancelledTimeoutAndPreservesSuppressedFailureState();
+            SeparatesMergedCacheProfiles();
             StopsTypedRetrievalAfterSessionFailure();
             PropagatesPartialDiagnosticsToMovieAndSeasonSearch();
             PreservesMovieParentIdentityAndBuildsStableProviderParts();
@@ -242,7 +245,7 @@ namespace Emby.Plugin.Danmu.RegressionTests
                 "typed media_ft without a localized label must map as Movie and retain org_title as a real source alias");
         }
 
-        private static void ExercisesInjectableTypedPaginationAndPartialFailure()
+        private static void ExercisesInjectableTypedPaginationAndSilentFallback()
         {
             var calls = new List<string>();
             var aggregate = new SearchResult
@@ -260,8 +263,9 @@ namespace Emby.Plugin.Danmu.RegressionTests
                     calls.Add(type + ":" + page);
                     Assert(type == "media_ft" || type == "media_bangumi",
                         "typed retrieval must never request the ordinary video endpoint");
-                    if (type == "media_ft" && page == 2)
-                        throw new InvalidOperationException("fixture page two failure");
+                    if (type == "media_bangumi" && page == 1 &&
+                        calls.Count(call => call == "media_bangumi:1") == 1)
+                        throw new InvalidOperationException("transient bangumi failure");
                     return Task.FromResult(new BiliSearchTypeData
                     {
                         Page = page,
@@ -272,17 +276,69 @@ namespace Emby.Plugin.Danmu.RegressionTests
                                 new BilibiliMedia { SeasonId = 801, Title = "Film 1" },
                                 new BilibiliMedia { SeasonId = 999, Title = "Uploader clip", ApiType = "video" },
                             }
-                            : new List<BilibiliMedia>()
+                            : new List<BilibiliMedia>
+                            {
+                                new BilibiliMedia { SeasonId = 801, Title = "Duplicate film" },
+                                new BilibiliMedia { SeasonId = 802, Title = "Bangumi 2" },
+                            }
                     });
                 },
                 CancellationToken.None).GetAwaiter().GetResult();
 
-            Assert(calls.SequenceEqual(new[] { "media_ft:1", "media_ft:2", "media_bangumi:1" }),
-                "the injectable typed fetcher should stop at the fixed page budget/final page and continue the other media kind after failure");
+            Assert(calls.SequenceEqual(new[] { "media_ft:1", "media_ft:2", "media_bangumi:1", "media_bangumi:1" }),
+                "the typed fetcher must retain the fixed page budget and retry a transient bangumi page once");
             Assert(merged.Result.Select(item => item.SeasonId).OrderBy(id => id)
-                       .SequenceEqual(new long[] { 801, 803 }) &&
-                   merged.Diagnostics.Count == 1 && merged.Diagnostics[0].Page == 2,
-                "page two failure must preserve aggregate and page one candidates, reject video, and surface one diagnostic");
+                       .SequenceEqual(new long[] { 801, 802, 803 }) &&
+                   merged.Diagnostics.Count == 0,
+                "a recovered bangumi request must preserve aggregate candidates, reject video, deduplicate, and remain diagnostic-free");
+
+            var failedCalls = 0;
+            var failed = BilibiliApi.MergeTypedAsync(
+                new SearchResult
+                {
+                    Result = new List<BilibiliMedia>
+                    {
+                        new BilibiliMedia { SeasonId = 804, Title = "Aggregate fallback", ApiType = "media_bangumi" },
+                    }
+                },
+                (type, page, token) =>
+                {
+                    failedCalls++;
+                    throw new InvalidOperationException("persistent bangumi failure");
+                },
+                CancellationToken.None,
+                new[] { "media_bangumi" }).GetAwaiter().GetResult();
+
+            Assert(failedCalls == 2 &&
+                   failed.Result.Select(item => item.SeasonId).SequenceEqual(new long[] { 804 }) &&
+                   failed.Diagnostics.Count == 0 && failed.SuppressedDiagnostics.Count == 1,
+                "two failed bangumi attempts must retain aggregate candidates, suppress frontend diagnostics, and retain internal failure state");
+
+            using (var cancellation = new CancellationTokenSource())
+            {
+                var cancelled = false;
+                var cancellationCalls = 0;
+                try
+                {
+                    BilibiliApi.MergeTypedAsync(
+                        new SearchResult { Result = new List<BilibiliMedia>() },
+                        (type, page, token) =>
+                        {
+                            cancellationCalls++;
+                            cancellation.Cancel();
+                            throw new OperationCanceledException(token);
+                        },
+                        cancellation.Token,
+                        new[] { "media_bangumi" }).GetAwaiter().GetResult();
+                }
+                catch (OperationCanceledException)
+                {
+                    cancelled = true;
+                }
+
+                Assert(cancelled && cancellationCalls == 1,
+                    "typed retrieval cancellation must propagate immediately without retrying");
+            }
         }
 
         private static void StopsTypedRetrievalAfterSessionFailure()
@@ -290,6 +346,175 @@ namespace Emby.Plugin.Danmu.RegressionTests
             Assert(!BilibiliApi.ShouldAttemptTypedSearch(new SearchResult { SessionAvailable = false }) &&
                    BilibiliApi.ShouldAttemptTypedSearch(new SearchResult { SessionAvailable = true }),
                 "a provider-wide session failure must stop typed requests, while an established session may continue");
+        }
+
+        private static void RetriesUncancelledTimeoutAndPreservesSuppressedFailureState()
+        {
+            var timeoutCalls = 0;
+            var recovered = BilibiliApi.MergeTypedAsync(
+                new SearchResult { Result = new List<BilibiliMedia>() },
+                (type, page, token) =>
+                {
+                    timeoutCalls++;
+                    if (timeoutCalls == 1)
+                    {
+                        return Task.FromException<BiliSearchTypeData>(
+                            new TaskCanceledException("simulated HTTP timeout"));
+                    }
+
+                    return Task.FromResult(new BiliSearchTypeData
+                    {
+                        Page = page,
+                        NumPages = 1,
+                        Result = new List<BilibiliMedia>
+                        {
+                            new BilibiliMedia { SeasonId = 906, Title = "timeout recovery" },
+                        },
+                    });
+                },
+                CancellationToken.None,
+                new[] { "media_bangumi" }).GetAwaiter().GetResult();
+
+            Assert(timeoutCalls == 2 && recovered.Result.Any(item => item.SeasonId == 906) &&
+                   recovered.Diagnostics.Count == 0 && recovered.SuppressedDiagnostics.Count == 0,
+                "an uncancelled TaskCanceledException must retry once and recover without a frontend diagnostic");
+
+            var failedCalls = 0;
+            var failed = BilibiliApi.MergeTypedAsync(
+                new SearchResult { Result = new List<BilibiliMedia>() },
+                (type, page, token) =>
+                {
+                    failedCalls++;
+                    throw new InvalidOperationException("persistent typed endpoint failure");
+                },
+                CancellationToken.None,
+                new[] { "media_bangumi" }).GetAwaiter().GetResult();
+
+            Assert(failedCalls == 2 && failed.Diagnostics.Count == 0 &&
+                   failed.SuppressedDiagnostics.Count == 1 &&
+                   failed.SuppressedDiagnostics[0].SearchType == "media_bangumi",
+                "a terminal typed failure must remain internal so it blocks caching without emitting partial_failure");
+            Assert(!BilibiliApi.ShouldCacheMergedSearchResult(failed) &&
+                   !JsonSerializer.Serialize(failed).Contains("SuppressedDiagnostics"),
+                "suppressed failures must block the merged cache and remain absent from serialized frontend data");
+        }
+
+        private static void SeparatesMergedCacheProfiles()
+        {
+            var movieTypes = BilibiliApi.GetTypedSearchTypesForItem(true);
+            var seasonTypes = BilibiliApi.GetTypedSearchTypesForItem(false);
+            Assert(movieTypes.SequenceEqual(new[] { "media_ft", "media_bangumi" }) &&
+                   seasonTypes.SequenceEqual(new[] { "media_bangumi" }),
+                "only the concrete Movie route may select media_ft; every non-Movie route is Bangumi-only");
+
+            var movieKey = BilibiliApi.GetMergedSearchCacheKey("same title", movieTypes);
+            var seasonKey = BilibiliApi.GetMergedSearchCacheKey("same title", seasonTypes);
+            var normalizedMovieKey = BilibiliApi.GetMergedSearchCacheKey(
+                "same title",
+                new[] { "MEDIA_BANGUMI", "media_ft", "media_ft" });
+            Assert(movieKey != seasonKey && movieKey == normalizedMovieKey,
+                "merged-search cache keys must distinguish Movie and non-Movie profiles while normalizing type order and duplicates");
+        }
+
+        private static void RestrictsMediaFtToMovieSearch()
+        {
+            var calls = new List<string>();
+            var merged = BilibiliApi.MergeTypedAsync(
+                new SearchResult
+                {
+                    Result = new List<BilibiliMedia>
+                    {
+                        new BilibiliMedia { SeasonId = 901, Title = "普通搜索电影", ApiType = "media_ft" },
+                    }
+                },
+                (type, page, token) =>
+                {
+                    token.ThrowIfCancellationRequested();
+                    calls.Add(type + ":" + page);
+                    return Task.FromResult(new BiliSearchTypeData
+                    {
+                        Page = page,
+                        NumPages = 1,
+                        Result = new List<BilibiliMedia>
+                        {
+                            new BilibiliMedia { SeasonId = 902, Title = "电影增强结果" },
+                        },
+                    });
+                },
+                CancellationToken.None,
+                new[] { "media_ft" }).GetAwaiter().GetResult();
+
+            Assert(calls.SequenceEqual(new[] { "media_ft:1" }) &&
+                   merged.Result.Select(item => item.SeasonId).OrderBy(id => id)
+                       .SequenceEqual(new long[] { 901, 902 }),
+                "Movie typed retrieval must request media_ft and retain aggregate candidates");
+
+            calls.Clear();
+            BilibiliApi.MergeTypedAsync(
+                new SearchResult { Result = new List<BilibiliMedia>() },
+                (type, page, token) =>
+                {
+                    calls.Add(type + ":" + page);
+                    return Task.FromResult(new BiliSearchTypeData { Page = page, NumPages = 1 });
+                },
+                CancellationToken.None,
+                new[] { "media_bangumi" }).GetAwaiter().GetResult();
+
+            Assert(calls.SequenceEqual(new[] { "media_bangumi:1" }),
+                "Season/Anime typed retrieval must exclude media_ft while retaining media_bangumi");
+
+            var retryCalls = 0;
+            var retryResult = BilibiliApi.MergeTypedAsync(
+                new SearchResult
+                {
+                    Result = new List<BilibiliMedia>
+                    {
+                        new BilibiliMedia { SeasonId = 903, Title = "聚合电影", ApiType = "media_ft" },
+                    }
+                },
+                (type, page, token) =>
+                {
+                    retryCalls++;
+                    if (retryCalls == 1)
+                        throw new InvalidOperationException("temporary media_ft response failure");
+                    return Task.FromResult(new BiliSearchTypeData
+                    {
+                        Page = page,
+                        NumPages = 1,
+                        Result = new List<BilibiliMedia>
+                        {
+                            new BilibiliMedia { SeasonId = 904, Title = "重试成功电影" },
+                        },
+                    });
+                },
+                CancellationToken.None,
+                new[] { "media_ft" }).GetAwaiter().GetResult();
+
+            Assert(retryCalls == 2 && retryResult.Result.Any(item => item.SeasonId == 904) &&
+                   retryResult.Diagnostics.Count == 0,
+                "media_ft must retry once and suppress its failure diagnostic after recovery");
+
+            var failedCalls = 0;
+            var failed = BilibiliApi.MergeTypedAsync(
+                new SearchResult
+                {
+                    Result = new List<BilibiliMedia>
+                    {
+                        new BilibiliMedia { SeasonId = 905, Title = "Aggregate movie fallback", ApiType = "media_ft" },
+                    }
+                },
+                (type, page, token) =>
+                {
+                    failedCalls++;
+                    throw new InvalidOperationException("persistent media_ft failure");
+                },
+                CancellationToken.None,
+                new[] { "media_ft" }).GetAwaiter().GetResult();
+
+            Assert(failedCalls == 2 &&
+                   failed.Result.Select(item => item.SeasonId).SequenceEqual(new long[] { 905 }) &&
+                   failed.Diagnostics.Count == 0,
+                "two failed media_ft attempts must silently retain aggregate candidates");
         }
 
         private static void PropagatesPartialDiagnosticsToMovieAndSeasonSearch()

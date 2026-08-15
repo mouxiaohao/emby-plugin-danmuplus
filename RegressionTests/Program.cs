@@ -48,6 +48,20 @@ namespace Emby.Plugin.Danmu.RegressionTests
                 return 0;
             }
 
+            if (args != null && args.Contains("--tmdb-alias", StringComparer.Ordinal))
+            {
+                TmdbAliasTests.Run();
+                Console.WriteLine("TMDB alias regression checks passed.");
+                return 0;
+            }
+
+            if (args != null && args.Contains("--seven-day-replay", StringComparer.Ordinal))
+            {
+                SevenDayReplayTests.Run();
+                Console.WriteLine("Seven-day replay regression checks passed.");
+                return 0;
+            }
+
             if (args != null && args.Contains("--composite-season-state", StringComparer.Ordinal))
             {
                 CompositeSeasonStateTests.Run();
@@ -75,6 +89,8 @@ namespace Emby.Plugin.Danmu.RegressionTests
             UsesIdentifierFallbackOrder();
             OmitsMalformedRecords();
             BilibiliSearchTests.Run();
+            TmdbAliasTests.Run();
+            SevenDayReplayTests.Run();
             IqiyiSourceMetadataTests.Run();
             OrdersAndSelectsCrossProviderTies();
             PreservesSameSiteHighestScoreTieAmbiguity();

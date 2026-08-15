@@ -1662,6 +1662,114 @@ async function main() {
         multiFailureDialog.executionForceRefresh === null && multiStart.parameters.forceRefresh === "true",
         "a zero-task multi-season start must share the snapshotted force flag then unlock and restore the picker");
 
+    const contextSeasons = [
+        { SeriesId: "context-series", SeasonId: "context-s0", SeasonNumber: 0,
+            SeriesName: "服务端剧名", SeasonName: "特别篇", EpisodeCount: 2 },
+        { SeriesId: "context-series", SeasonId: "context-s1", SeasonNumber: 1,
+            SeriesName: "服务端剧名", SeasonName: "", Year: 2024,
+            EpisodeCount: 12, EligibleEpisodeCount: 11 },
+        { SeriesId: "context-series", SeasonId: "context-s2", SeasonNumber: 2,
+            SeriesName: "服务端剧名", SeasonName: "第二季",
+            EpisodeCount: 13, MappedEpisodeCount: 9 }
+    ];
+    const contextDialog = hooks.openDialog("server preview context");
+    hooks.renderSeriesPicker(contextDialog,
+        { Id: "context-series", Type: "Series", Name: "browser fallback name" }, contextSeasons, {}, {});
+    const contextText = allVisibleText(contextDialog.body);
+    assert(contextText.includes("库内信息：服务端剧名，返回 2 季，本地共 25 集。") &&
+        contextText.includes("库内信息：服务端剧名 / 第 1 季，2024，本地 12 集，映射 11 集") &&
+        contextText.includes("库内信息：服务端剧名 / 第二季，本地 13 集，映射 9 集") &&
+        !contextText.includes("匹配状态、来源和决策原因均由服务器返回"),
+        "Series and Season context must come from returned preview fields while the fixed authority paragraph stays removed");
+    contextDialog.forceClose();
+
+    const contextSeasonDialog = hooks.openDialog("direct Season context");
+    hooks.renderCandidatePicker(contextSeasonDialog,
+        { Id: "context-s1", Type: "Season", Name: "browser season name" }, contextSeasons[0], "");
+    assert(allVisibleText(contextSeasonDialog.body).includes(
+        "库内信息：服务端剧名 / 第 1 季，2024，本地 12 集，映射 11 集"),
+        "a single Season must show returned Series/Season, optional year, local count, and mapped count");
+    contextSeasonDialog.forceClose();
+
+    const unchangedEpisodeDialog = hooks.openDialog("unchanged Episode context");
+    hooks.renderItemCandidatePicker(unchangedEpisodeDialog,
+        { Id: "unchanged-episode", Type: "Episode", Name: "browser episode name" },
+        { ParentName: "父剧", SeasonName: "第一季", EpisodeNumber: 3, ItemName: "第三集", Candidates: [] }, "");
+    assert(allVisibleText(unchangedEpisodeDialog.body).includes(
+        "库内信息：父剧 / 第一季 / 第 3 集 · 第三集。请选择季度候选，再解析该候选的来源剧集。"),
+        "single-Episode context must remain unchanged by Series/Season summary rendering");
+    unchangedEpisodeDialog.forceClose();
+
+    const unchangedMovieDialog = hooks.openDialog("unchanged Movie context");
+    hooks.renderItemCandidatePicker(unchangedMovieDialog,
+        { Id: "unchanged-movie", Type: "Movie", Name: "电影" },
+        { ItemName: "服务端电影", Year: 2025, Candidates: [] }, "");
+    assert(allVisibleText(unchangedMovieDialog.body).includes(
+        "库内信息：服务端电影，2025。请选择正确电影。"),
+        "Movie context must remain unchanged by Series/Season summary rendering");
+    unchangedMovieDialog.forceClose();
+
+    apiCalls.length = 0;
+    apiResponses.StartTrackedDownload = {
+        TaskId: "ineligible-origin", Status: "completed", Skipped: 4,
+        Episodes: [{ ItemId: "ineligible-episode", Status: "skipped" }]
+    };
+    const ineligibleReplayDialog = {
+        body: new FakeElement("div"), footer: new FakeElement("div"), overlay: { isConnected: false },
+        closable: false, forceRefresh: false, close: function () {}, forceClose: function () {},
+        setBackHandler: function () {}
+    };
+    await hooks.renderDownloadProgress(ineligibleReplayDialog,
+        [{ SeriesId: "replay-series", SeasonId: "ineligible-season", SeasonName: "Ineligible" }], {});
+    assert(!ineligibleReplayDialog.footer.children.some(button =>
+        button.textContent.indexOf("忽略跳过再次下载") === 0 && button.style.display !== "none"),
+        "skipped counts alone must not expose replay; only the latest server eligibility declaration can do so");
+
+    apiCalls.length = 0;
+    apiResponses.StartTrackedDownload = request => {
+        const seasonId = request.url.url.split("/").pop();
+        return {
+            TaskId: "origin-" + seasonId, Status: "completed", Skipped: 2,
+            ReplayEligible: true, ReplayEligibleCount: seasonId === "replay-a" ? 2 : 3,
+            Episodes: [{ ItemId: seasonId + "-episode", Status: "skipped" }]
+        };
+    };
+    apiResponses.ReplaySevenDaySkipped = request => {
+        const taskId = request.url.query.taskId;
+        if (taskId === "origin-replay-a") {
+            return { TaskId: "child-replay-a", ReplayOriginTaskId: "origin-replay-a",
+                ReplayKind: "seven_day_skipped", Status: "completed", Succeeded: 2,
+                Episodes: [{ ItemId: "replay-a-episode", Status: "success" }] };
+        }
+        return { TaskId: "", Status: "failed", Message: "second replay rejected" };
+    };
+    const replayDialog = {
+        body: new FakeElement("div"), footer: new FakeElement("div"), overlay: { isConnected: false },
+        closable: false, forceRefresh: false, close: function () {}, forceClose: function () {},
+        setBackHandler: function () {}
+    };
+    await hooks.renderDownloadProgress(replayDialog, [
+        { SeriesId: "replay-series", SeasonId: "replay-a", SeasonName: "Replay A" },
+        { SeriesId: "replay-series", SeasonId: "replay-b", SeasonName: "Replay B" }
+    ], {});
+    let replayButton = replayDialog.footer.children.find(button =>
+        button.textContent === "忽略跳过再次下载（5 集）");
+    assert(replayButton && !replayButton.disabled,
+        "the lower-left replay action must appear only after every source task settles with server-declared eligibility");
+    apiCalls.length = 0;
+    await Promise.all([replayButton.dispatch("click"), replayButton.dispatch("click")]);
+    const replayCalls = apiCalls.filter(call => call.option === "ReplaySevenDaySkipped");
+    assert(replayCalls.length === 2 && replayCalls.map(call => call.parameters.taskId).join(",") ===
+            "origin-replay-a,origin-replay-b" &&
+        replayCalls.every(call => Object.keys(call.parameters).every(key =>
+            ["option", "mappingProtocolVersion", "taskId"].includes(key))),
+        "replay submits each eligible origin exactly once with only taskId, accepts child tasks into progress, and blocks duplicate clicks");
+    replayButton = replayDialog.footer.children.find(button =>
+        button.textContent === "忽略跳过再次下载（3 集）");
+    assert(replayButton && !replayButton.disabled,
+        "after a partial replay submission failure, only the still-eligible origin remains available for retry");
+    delete apiResponses.ReplaySevenDaySkipped;
+
     apiResponses.StartTrackedDownload = {
         TaskId: "running-task", Status: "running",
         Episodes: [{ ItemId: "running-movie", EpisodeName: "Movie", Status: "running" }]

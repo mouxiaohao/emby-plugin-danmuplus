@@ -2,9 +2,9 @@
     <PropertyGroup>
         <TargetFramework>netstandard2.0</TargetFramework>
         <Description>弹幕插件</Description>
-        <AssemblyVersion>2.0.3.0</AssemblyVersion>
-        <FileVersion>2.0.3.10</FileVersion>
-        <InformationalVersion>2.0.3r10</InformationalVersion>
+        <AssemblyVersion>2.0.4.2</AssemblyVersion>
+        <FileVersion>2.0.4.2</FileVersion>
+        <InformationalVersion>2.0.4r2</InformationalVersion>
         <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
         <PackageTags>emby;plugin;pms;media;server;</PackageTags>
         <LangVersion>8.0</LangVersion>

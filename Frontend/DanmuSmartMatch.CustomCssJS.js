@@ -744,6 +744,53 @@
         return parts.join("；");
     }
 
+    function nonNegativeCount(raw) {
+        var count = Number(raw);
+        return isFinite(count) && count > 0 ? Math.floor(count) : 0;
+    }
+
+    function seasonMappedEpisodeCount(season) {
+        var mapped = value(season, "MappedEpisodeCount", "mappedEpisodeCount", null);
+        if (mapped !== null && mapped !== undefined && mapped !== "") return nonNegativeCount(mapped);
+        var plan = compositePlan(season);
+        var mappings = compositeArray(plan, "Mappings", "mappings");
+        if (mappings.length) return mappings.length;
+        return nonNegativeCount(value(season, "EligibleEpisodeCount", "eligibleEpisodeCount", 0));
+    }
+
+    function seasonDisplayName(season) {
+        var name = String(value(season, "SeasonName", "seasonName", "") || "").trim();
+        if (name) return name;
+        var number = targetSeasonNumber(season);
+        return number === null ? "未命名季度" : "第 " + number + " 季";
+    }
+
+    function seasonLibraryContextLine(season) {
+        var seriesName = String(value(season, "SeriesName", "seriesName", "") || "").trim() || "未命名剧集";
+        var parts = ["库内信息：" + seriesName + " / " + seasonDisplayName(season)];
+        var year = value(season, "Year", "year", null);
+        if (year !== null && year !== undefined && year !== "") parts.push(String(year));
+        parts.push("本地 " + nonNegativeCount(value(season, "EpisodeCount", "episodeCount", 0)) + " 集");
+        parts.push("映射 " + seasonMappedEpisodeCount(season) + " 集");
+        return parts.join("，");
+    }
+
+    function seriesLibraryContextLine(seasons) {
+        var positive = (seasons || []).filter(function (season) {
+            return targetSeasonNumber(season) > 0;
+        });
+        var seriesName = "";
+        positive.some(function (season) {
+            seriesName = String(value(season, "SeriesName", "seriesName", "") || "").trim();
+            return Boolean(seriesName);
+        });
+        var totalEpisodes = positive.reduce(function (total, season) {
+            return total + nonNegativeCount(value(season, "EpisodeCount", "episodeCount", 0));
+        }, 0);
+        return "库内信息：" + (seriesName || "未命名剧集") + "，返回 " + positive.length +
+            " 季，本地共 " + totalEpisodes + " 集。";
+    }
+
     function discardIncompatibleSeasonDrafts(dialog, seasons, selections) {
         selections = selections || {};
         var contracts = selections.__mappingContracts || (selections.__mappingContracts = {});
@@ -1873,11 +1920,15 @@
         background.className = "danmuSmartButton";
         background.textContent = "后台下载";
         background.disabled = true;
+        var replay = document.createElement("button");
+        replay.className = "danmuSmartButton";
+        replay.textContent = "忽略跳过再次下载";
+        replay.style.display = "none";
         var stop = document.createElement("button");
         stop.className = "danmuSmartButton danger";
         stop.textContent = "强制停止全部下载";
         stop.disabled = true;
-        dialog.footer.append(background, stop);
+        dialog.footer.append(replay, background, stop);
 
         var detached = false;
         var stopRequested = false;
@@ -1889,6 +1940,49 @@
             return status === "completed" || status === "completed_with_warnings" ||
                 status === "completed_with_errors" ||
                 status === "failed" || status === "cancelled" || status === "not_found";
+        }
+
+        function isReplayTerminal(task) {
+            var status = value(task, "Status", "status", "");
+            return status === "completed" || status === "completed_with_warnings" ||
+                status === "completed_with_errors";
+        }
+
+        function replayEligibleCount(task) {
+            return nonNegativeCount(value(task, "SevenDayReplayEligibleCount", "sevenDayReplayEligibleCount",
+                value(task, "ReplayEligibleCount", "replayEligibleCount",
+                    value(task, "SevenDaySkippedReplayEligibleCount", "sevenDaySkippedReplayEligibleCount", 0))));
+        }
+
+        function serverAdvertisesSevenDayReplay(task) {
+            var eligible = value(task, "CanReplaySevenDaySkipped", "canReplaySevenDaySkipped",
+                value(task, "SevenDayReplayEligible", "sevenDayReplayEligible",
+                    value(task, "ReplayEligible", "replayEligible", false)));
+            return (eligible === true || String(eligible).toLowerCase() === "true") && replayEligibleCount(task) > 0;
+        }
+
+        function replayableEntries() {
+            if (!taskEntries.length || !taskEntries.every(function (entry) {
+                return isReplayTerminal(entry.task);
+            })) return [];
+            return taskEntries.filter(function (entry) {
+                return !entry.replaySubmitted && entry.taskId === entry.originTaskId &&
+                    serverAdvertisesSevenDayReplay(entry.task);
+            });
+        }
+
+        function updateReplayButton() {
+            var entries = replayableEntries();
+            if (!entries.length) {
+                replay.style.display = "none";
+                return;
+            }
+            var count = entries.reduce(function (total, entry) {
+                return total + replayEligibleCount(entry.task);
+            }, 0);
+            replay.style.display = "";
+            replay.disabled = false;
+            replay.textContent = "忽略跳过再次下载（" + count + " 集）";
         }
 
         function updateView(season, task, entry) {
@@ -1949,6 +2043,7 @@
                         if (!isTerminal(value(entry.task, "Status", "status", ""))) {
                             await monitorTasks();
                         } else {
+                            updateReplayButton();
                             notify(value(entry.task, "Message", "message", "未能启动单集重试"), true);
                         }
                     } catch (error) {
@@ -1989,6 +2084,50 @@
             }
         });
 
+        replay.addEventListener("click", async function () {
+            if (replay.disabled) return;
+            var entries = replayableEntries();
+            if (!entries.length) {
+                updateReplayButton();
+                return;
+            }
+            replay.disabled = true;
+            replay.textContent = "正在提交再次下载…";
+            var accepted = 0;
+            var failures = [];
+            for (var entryIndex = 0; entryIndex < entries.length; entryIndex++) {
+                var entry = entries[entryIndex];
+                try {
+                    var child = await api("all", "ReplaySevenDaySkipped", { taskId: entry.originTaskId });
+                    var childTaskId = value(child, "TaskId", "taskId", "");
+                    var childOriginTaskId = value(child, "ReplayOriginTaskId", "replayOriginTaskId", "");
+                    if (!childTaskId || childTaskId === entry.originTaskId ||
+                        childOriginTaskId !== entry.originTaskId ||
+                        value(child, "Status", "status", "") === "failed") {
+                        throw new Error(value(child, "Message", "message", "未能创建再次下载任务"));
+                    }
+                    entry.taskId = childTaskId;
+                    entry.task = child;
+                    entry.pollErrors = 0;
+                    entry.replaySubmitted = true;
+                    updateView(entry.season, child, entry);
+                    accepted++;
+                } catch (error) {
+                    failures.push(publicErrorMessage(error));
+                }
+            }
+            if (!accepted) {
+                updateReplayButton();
+                notify("忽略跳过再次下载提交失败：" + (failures[0] || "服务器未接受请求"), true);
+                return;
+            }
+            replay.style.display = "none";
+            notify(failures.length
+                ? "已提交 " + accepted + " 个再次下载任务，" + failures.length + " 个提交失败。"
+                : "已提交 " + accepted + " 个再次下载任务。", failures.length > 0);
+            await monitorTasks();
+        });
+
         for (var index = 0; index < seasons.length; index++) {
             var season = seasons[index];
             var key = seasonSelectionKey(season);
@@ -2018,7 +2157,14 @@
                 if (!taskId || value(task, "Status", "status", "") === "failed") {
                     throw new Error(value(task, "Message", "message", "无法启动本季下载任务"));
                 }
-                var entry = { season: season, taskId: taskId, task: task, pollErrors: 0 };
+                var entry = {
+                    season: season,
+                    taskId: taskId,
+                    originTaskId: taskId,
+                    task: task,
+                    pollErrors: 0,
+                    replaySubmitted: false
+                };
                 taskEntries.push(entry);
                 updateView(season, task, entry);
             } catch (error) {
@@ -2126,6 +2272,7 @@
             background.style.display = "none";
             stop.style.display = "none";
             dialog.closable = true;
+            updateReplayButton();
         }
 
         await monitorTasks();
@@ -2166,8 +2313,7 @@
         container.className = "danmuCompositeSeason";
         var header = document.createElement("div");
         header.className = "danmuCompositeHeader";
-        header.textContent = value(season, "SeasonName", "seasonName", "未命名季度") + "（库内 " +
-            value(season, "EpisodeCount", "episodeCount", 0) + " 集）";
+        header.textContent = seasonLibraryContextLine(season);
         var hint = document.createElement("div");
         hint.className = "danmuCompositeHint";
         hint.textContent = "该季包含多个来源或存在未识别区间；下列卡片仅用于本次下载映射，不会改变 Emby 的季归属。";
@@ -2582,9 +2728,11 @@
                 if (current) selections[key] = current;
             }
         });
-        var message = document.createElement("p");
-        message.textContent = "匹配状态、来源和决策原因均由服务器返回。需要修改时可查看服务器返回的全部候选；浏览器不会重新评分或调整候选顺序。";
-        dialog.body.appendChild(message);
+        if (item.Type === "Series") {
+            var seriesContext = document.createElement("p");
+            seriesContext.textContent = seriesLibraryContextLine(seasons);
+            dialog.body.appendChild(seriesContext);
+        }
 
         seasons.forEach(function (season, seasonIndex) {
             var diagnosticsText = searchDiagnosticsLine(season);
@@ -2605,9 +2753,7 @@
             var main = document.createElement("div");
             var title = document.createElement("div");
             title.className = "danmuSeasonSummaryTitle";
-            title.textContent = value(season, "SeasonName", "seasonName", "未命名季度") + "（" +
-                (value(season, "Year", "year", null) || "年份未知") + "，库内 " +
-                value(season, "EpisodeCount", "episodeCount", 0) + " 集）";
+            title.textContent = seasonLibraryContextLine(season);
             var matched = hasBackendMatch(season);
             var state = document.createElement("div");
             state.className = "danmuSeasonSummaryState";
@@ -2697,10 +2843,7 @@
         dialog.footer.replaceChildren();
 
         var summary = document.createElement("p");
-        summary.textContent = "库内信息：" + value(season, "SeriesName", "seriesName", "") + " / " +
-            value(season, "SeasonName", "seasonName", "") + "，" +
-            (value(season, "Year", "year", null) || "年份未知") + "，" +
-            value(season, "EpisodeCount", "episodeCount", 0) + " 集。" +
+        summary.textContent = seasonLibraryContextLine(season) + "。" +
             (isProviderIdMatch(season) && hasBackendMatch(season) ? "　✓ 匹配成功" : "") +
             (backendDecisionLine(season) ? "　" + backendDecisionLine(season) : "");
         dialog.body.appendChild(summary);
@@ -2851,7 +2994,7 @@
         dialog.footer.replaceChildren();
 
         var summary = document.createElement("p");
-        summary.textContent = "库内信息：" + value(season, "SeriesName", "seriesName", "") + " / " + value(season, "SeasonName", "seasonName", "") + "，" + (value(season, "Year", "year", null) || "年份未知") + "，" + value(season, "EpisodeCount", "episodeCount", 0) + " 集。请选择正确项目；服务器会先解析逐集映射并显示未匹配区间。" +
+        summary.textContent = seasonLibraryContextLine(season) + "。请选择正确项目；服务器会先解析逐集映射并显示未匹配区间。" +
             (isProviderIdMatch(season) && hasBackendMatch(season) ? "　✓ 匹配成功" : "") +
             (backendDecisionLine(season) ? "　" + backendDecisionLine(season) : "") +
             (scopeSummaryLine(season) ? "　" + scopeSummaryLine(season) : "");

@@ -11,6 +11,7 @@ namespace Emby.Plugin.Danmu.Scraper.Entity
         public int? Year { get; set; }
         public int EpisodeSize { get; set; }
         public List<string> Aliases { get; set; } = new List<string>();
+        public string SearchAlias { get; set; } = string.Empty;
         public SourceMetadata SourceMetadata { get; set; }
     }
 }

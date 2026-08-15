@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -31,6 +32,10 @@ namespace Emby.Plugin.Danmu.Scraper
 
         private static readonly Regex GenericSeasonNumberRegex = new Regex(
             @"^(?:(?:第\s*)?[0-9一二三四五六七八九十百零〇两]+\s*季|season\s*\d+|s\s*\d+)$",
+            RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+        private static readonly Regex ExplicitSeasonMarkerRegex = new Regex(
+            @"(?:第\s*(?<chinese>[0-9一二三四五六七八九十百零〇两]+)\s*(?:季|期)|season\s*(?<number>\d+)|\bs\s*0?(?<short>\d{1,2})\b)",
             RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
         private static readonly Regex SeparatorRegex = new Regex(
@@ -92,6 +97,50 @@ namespace Emby.Plugin.Danmu.Scraper
             }
 
             return value;
+        }
+
+        /// <summary>
+        /// Returns a positive Season number only when all explicit markers agree.
+        /// Bare numbers, episode labels, part/cour labels, and Season 0 are not
+        /// identity evidence and deliberately return null.
+        /// </summary>
+        public static int? ParseExplicitSeasonNumber(string value)
+        {
+            return ParseExplicitSeasonNumber(new[] { value });
+        }
+
+        public static int? ParseExplicitSeasonNumber(IEnumerable<string> values)
+        {
+            var seasons = new HashSet<int>();
+            var hasZeroOrUnparseableMarker = false;
+            foreach (var value in values ?? Enumerable.Empty<string>())
+            {
+                foreach (Match match in ExplicitSeasonMarkerRegex.Matches(value ?? string.Empty))
+                {
+                    var parsed = ParseSeasonNumber(match.Groups["number"].Value);
+                    if (!parsed.HasValue)
+                    {
+                        parsed = ParseSeasonNumber(match.Groups["short"].Value);
+                    }
+                    if (!parsed.HasValue)
+                    {
+                        parsed = ParseChineseSeasonNumber(match.Groups["chinese"].Value);
+                    }
+
+                    if (parsed.GetValueOrDefault() > 0)
+                    {
+                        seasons.Add(parsed.Value);
+                    }
+                    else
+                    {
+                        hasZeroOrUnparseableMarker = true;
+                    }
+                }
+            }
+
+            return !hasZeroOrUnparseableMarker && seasons.Count == 1
+                ? seasons.First()
+                : (int?)null;
         }
 
         public static bool IsEligibleSeasonCandidate(
@@ -159,13 +208,18 @@ namespace Emby.Plugin.Danmu.Scraper
             int? expectedYear,
             int expectedEpisodes,
             IEnumerable<string> localSeriesTitleAliases = null,
-            IEnumerable<string> localSeasonTitleAliases = null)
+            IEnumerable<string> localSeasonTitleAliases = null,
+            bool applyContradictionCap = true,
+            int? expectedSeasonNumber = null)
         {
             var sourceTitles = GetSourceTitles(source).Select(Normalize)
                 .Where(value => value.Length > 0).ToList();
             var parent = Normalize(seriesName);
             var seasonKeyword = Normalize(ExtractSeasonKeyword(seriesName, seasonName));
             var combined = Normalize((seriesName ?? string.Empty) + (seasonKeyword ?? string.Empty));
+            var targetSeasonNumber = expectedSeasonNumber ?? ParseExplicitSeasonNumber(seasonName);
+            var hasTermSpecificExactSeasonEvidence = HasTermSpecificExactSeasonEvidence(
+                source, targetSeasonNumber);
 
             var localParents = new[] { seriesName, seasonName }
                 .Concat(localSeriesTitleAliases ?? Enumerable.Empty<string>())
@@ -197,6 +251,15 @@ namespace Emby.Plugin.Danmu.Scraper
                 titleScore = parentScore;
             }
 
+            // TMDB fallback results are scored against the term that produced
+            // them. When Dandan returns only a localized title for an English or
+            // Japanese term, an exact explicit Season marker supplies a bounded
+            // cross-language bridge without consulting the library title.
+            if (hasTermSpecificExactSeasonEvidence)
+            {
+                titleScore = Math.Max(titleScore, 0.70);
+            }
+
             var yearScore = GetYearScore(expectedYear, source.Year);
             var episodeScore = GetEpisodeScore(expectedEpisodes, source.EpisodeSize);
             var score = !string.IsNullOrEmpty(seasonKeyword)
@@ -211,6 +274,12 @@ namespace Emby.Plugin.Danmu.Scraper
             if (!string.IsNullOrWhiteSpace(source.Category) && source.Category.Contains("电影"))
             {
                 score *= 0.45;
+            }
+
+            if (applyContradictionCap && HasContradictorySeasonEvidence(
+                    source, targetSeasonNumber, expectedYear))
+            {
+                score = Math.Min(score, 0.79);
             }
 
             score = Clamp(score);
@@ -238,7 +307,10 @@ namespace Emby.Plugin.Danmu.Scraper
                 KeywordScore = Round(keywordScore),
                 YearScore = Round(yearScore),
                 EpisodeScore = Round(episodeScore),
-                Reason = BuildReason(parentScore, keywordScore, yearScore, episodeScore),
+                Reason = BuildReason(parentScore, keywordScore, yearScore, episodeScore,
+                    hasTermSpecificExactSeasonEvidence),
+                MatchOrigin = string.IsNullOrWhiteSpace(source.SearchAlias) ? string.Empty : "tmdb-alias",
+                DecisionReason = string.IsNullOrWhiteSpace(source.SearchAlias) ? string.Empty : "tmdb-alias:" + source.SearchAlias,
                 FidelityTitleEvidence = fidelityTitleEvidence,
                 SourceMetadata = CloneSourceMetadata(source),
             };
@@ -286,6 +358,8 @@ namespace Emby.Plugin.Danmu.Scraper
                 Reason = titleScore >= 0.95 && yearScore >= 0.95
                     ? "电影名和年份吻合"
                     : titleScore >= 0.95 ? "电影名吻合" : "需要人工确认",
+                MatchOrigin = string.IsNullOrWhiteSpace(source.SearchAlias) ? string.Empty : "tmdb-alias",
+                DecisionReason = string.IsNullOrWhiteSpace(source.SearchAlias) ? string.Empty : "tmdb-alias:" + source.SearchAlias,
                 FidelityTitleEvidence = fidelityTitleEvidence,
                 SourceMetadata = CloneSourceMetadata(source),
             };
@@ -327,8 +401,11 @@ namespace Emby.Plugin.Danmu.Scraper
                 candidate.MatchScore = Round(GetEffectiveConfidence(candidate, available));
             }
 
+            var threshold = available.Any(x => string.Equals(x.MatchOrigin, "tmdb-alias", StringComparison.OrdinalIgnoreCase))
+                ? 0.80
+                : AutomaticConfidenceThreshold;
             var confident = available
-                .Where(x => x.MatchScore >= AutomaticConfidenceThreshold)
+                .Where(x => x.MatchScore >= threshold)
                 .ToList();
             if (confident.Count == 0)
             {
@@ -345,6 +422,40 @@ namespace Emby.Plugin.Danmu.Scraper
         public static bool CanAutoSelect(IList<DanmuMatchCandidate> candidates, bool allowProviderPriorityTie = true)
         {
             return SelectAutoCandidate(candidates, allowProviderPriorityTie) != null;
+        }
+
+        private static bool HasContradictorySeasonEvidence(
+            ScraperSearchInfo source,
+            int? targetSeasonNumber,
+            int? expectedYear)
+        {
+            if (!targetSeasonNumber.HasValue || targetSeasonNumber.Value <= 0)
+            {
+                return false;
+            }
+
+            var candidateSeasonNumber = ParseExplicitSeasonNumber(GetSourceTitles(source));
+            var seasonConflict = candidateSeasonNumber.HasValue &&
+                                 candidateSeasonNumber.Value != targetSeasonNumber.Value;
+            var yearConflict = expectedYear.HasValue && expectedYear.Value > 0 &&
+                               source?.Year.HasValue == true && source.Year.Value > 0 &&
+                               Math.Abs(expectedYear.Value - source.Year.Value) >= 2;
+            return seasonConflict || yearConflict;
+        }
+
+        private static bool HasTermSpecificExactSeasonEvidence(
+            ScraperSearchInfo source,
+            int? targetSeasonNumber)
+        {
+            if (!targetSeasonNumber.HasValue || targetSeasonNumber.Value <= 0 ||
+                !IsIdentityBearingTitle(source?.SearchAlias))
+            {
+                return false;
+            }
+
+            var candidateSeasonNumber = ParseExplicitSeasonNumber(GetSourceTitles(source));
+            return candidateSeasonNumber.HasValue &&
+                   candidateSeasonNumber.Value == targetSeasonNumber.Value;
         }
 
         private static DanmuMatchCandidate SelectUniqueHighest(IList<DanmuMatchCandidate> candidates)
@@ -391,7 +502,7 @@ namespace Emby.Plugin.Danmu.Scraper
             }
 
             // Providers and TMDB occasionally mix these homophones/variants.
-            var normalized = SanitizeSearchTerm(value).ToLowerInvariant()
+            var normalized = NormalizeExplicitSeasonMarkers(SanitizeSearchTerm(value)).ToLowerInvariant()
                 .Replace('谭', '潭')
                 .Replace('臺', '台')
                 .Replace('裏', '里');
@@ -594,6 +705,71 @@ namespace Emby.Plugin.Danmu.Scraper
             return Clamp(best);
         }
 
+        private static int? ParseSeasonNumber(string value)
+        {
+            return int.TryParse(value, out var number) && number > 0 ? number : (int?)null;
+        }
+
+        private static string NormalizeExplicitSeasonMarkers(string value)
+        {
+            return ExplicitSeasonMarkerRegex.Replace(value ?? string.Empty, match =>
+            {
+                var number = ParseSeasonNumber(match.Groups["number"].Value) ??
+                             ParseSeasonNumber(match.Groups["short"].Value) ??
+                             ParseChineseSeasonNumber(match.Groups["chinese"].Value);
+                return number.HasValue
+                    ? "season" + number.Value.ToString(CultureInfo.InvariantCulture)
+                    : match.Value;
+            });
+        }
+
+        private static int? ParseChineseSeasonNumber(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return null;
+            }
+
+            var decimalNumber = ParseSeasonNumber(value);
+            if (decimalNumber.HasValue)
+            {
+                return decimalNumber;
+            }
+
+            var digits = new Dictionary<char, int>
+            {
+                ['零'] = 0, ['〇'] = 0, ['一'] = 1, ['二'] = 2, ['两'] = 2,
+                ['三'] = 3, ['四'] = 4, ['五'] = 5, ['六'] = 6, ['七'] = 7,
+                ['八'] = 8, ['九'] = 9,
+            };
+            var total = 0;
+            var current = 0;
+            foreach (var character in value)
+            {
+                if (digits.TryGetValue(character, out var digit))
+                {
+                    current = digit;
+                }
+                else if (character == '十')
+                {
+                    total += (current == 0 ? 1 : current) * 10;
+                    current = 0;
+                }
+                else if (character == '百')
+                {
+                    total += (current == 0 ? 1 : current) * 100;
+                    current = 0;
+                }
+                else
+                {
+                    return null;
+                }
+            }
+
+            total += current;
+            return total > 0 ? total : (int?)null;
+        }
+
         private static double GetYearScore(int? expected, int? actual)
         {
             if (!expected.HasValue || expected.Value <= 0 || !actual.HasValue || actual.Value <= 0)
@@ -631,11 +807,17 @@ namespace Emby.Plugin.Danmu.Scraper
             return Clamp(1 - (double)difference / Math.Max(expected, actual));
         }
 
-        private static string BuildReason(double parent, double keyword, double year, double episodes)
+        private static string BuildReason(
+            double parent,
+            double keyword,
+            double year,
+            double episodes,
+            bool termSpecificExactSeasonEvidence)
         {
             var parts = new List<string>();
             if (keyword >= 0.95) parts.Add("季名关键词吻合");
             if (parent >= 0.95) parts.Add("父剧名吻合");
+            if (termSpecificExactSeasonEvidence) parts.Add("本次搜索词结果季号吻合");
             if (year >= 0.95) parts.Add("年份吻合");
             if (episodes >= 0.95) parts.Add("集数吻合");
             return parts.Count > 0 ? string.Join("、", parts) : "需要人工确认";
