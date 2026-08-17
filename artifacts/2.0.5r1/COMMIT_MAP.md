@@ -83,6 +83,22 @@ and rollback boundaries without claiming that an inverse tree was exercised.
 
 ## Separate release-preparation commit
 
-- Commit: pending
-- Checks: pending
+- Commit: `6e4c3c09df81150a3fa0d49fe9d5f11dc405d490`
+- Checks: frontend regression; version/resource/document consistency; strict OpenSpec validation; staged allowlist, secret-pattern, and diff checks
 - This commit is not part of the l1-l10 behavioral rollback map.
+
+## Post-slice Season scoring and source-surplus refinement
+
+- Commit: `872aa157a39cd1b235b52f7a7b630305e7201a3d`
+- Behavior: Season scoring `60/20/20/0`; Episode-count differences are non-blocking; a response-only authoritative state drives the yellow local-shortage notice.
+- Checks: frontend full regression; TMDB alias; composite planner; TitleFidelity; SearchTermPolicy; R3; BoundedSearchPolicy; R5 target scope; EpisodeSelectionPolicy; TemporaryRangePolicy; main backend; manual-keyword core; seven-day replay; clean Release build; strict OpenSpec; staged scope, secret-pattern, and diff checks.
+- Independent rollback: `git revert 872aa157a39cd1b235b52f7a7b630305e7201a3d`
+- This commit is independent of l1-l10 and can be reverted without rewriting their history.
+
+## Post-slice TMDB alias terminal-marker correction
+
+- Commit: `6d20fc0a7ac0027aea0309ac78b4f316256f7516`
+- Behavior: In the TMDB alias parent-maximum path only, recover one verified terminal generic Season marker when a short parent alias leaves a bounded continuation matching a known parent-title window; reject OVA, named-Season, conflicting-number, numeric-only, short, unrelated, overlong, and trailing-text false positives.
+- Checks: TMDB alias; TitleFidelity; SearchTermPolicy; R3 search quality; main backend; composite-season planner; frontend syntax and full regression; clean Release build; strict OpenSpec; final Sol-high review; staged scope, secret-pattern, and diff checks.
+- Independent rollback: `git revert 6d20fc0a7ac0027aea0309ac78b4f316256f7516`
+- This correction refines `872aa157a39cd1b235b52f7a7b630305e7201a3d`; reverting it retains the `60/20/20/0` score and source-surplus notice while removing only the alias-continuation recovery.
