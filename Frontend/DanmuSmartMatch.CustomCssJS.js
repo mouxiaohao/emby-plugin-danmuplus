@@ -2314,10 +2314,7 @@
         var header = document.createElement("div");
         header.className = "danmuCompositeHeader";
         header.textContent = seasonLibraryContextLine(season);
-        var hint = document.createElement("div");
-        hint.className = "danmuCompositeHint";
-        hint.textContent = "下列卡片仅用于本次下载映射，不会改变Emby 的季归属。";
-        container.append(header, hint);
+        container.appendChild(header);
         var scopeLine = scopeSummaryLine(season);
         if (scopeLine) {
             var scope = document.createElement("div");
@@ -2499,6 +2496,14 @@
             container.appendChild(warning);
         }
         dialog.body.appendChild(container);
+    }
+
+    function appendCompositeMappingHint(container, seasons) {
+        if (!(seasons || []).some(hasCompositePlan)) return;
+        var hint = document.createElement("div");
+        hint.className = "danmuCompositeHint";
+        hint.textContent = "下列卡片仅用于本次下载映射，不会改变Emby 的季归属。";
+        container.appendChild(hint);
     }
 
     function renderCompositeGroupPicker(dialog, item, season, seasonIndex, seasons, selections, keywords, group, options) {
@@ -2733,6 +2738,7 @@
             seriesContext.textContent = seriesLibraryContextLine(seasons);
             dialog.body.appendChild(seriesContext);
         }
+        appendCompositeMappingHint(dialog.body, seasons);
 
         seasons.forEach(function (season, seasonIndex) {
             var diagnosticsText = searchDiagnosticsLine(season);

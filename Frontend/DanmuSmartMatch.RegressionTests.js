@@ -597,6 +597,36 @@ async function main() {
         hooks.compositeRequestSelections({}, groupOnlySeason).length === 1 &&
         hooks.compositeRequestSelections({}, groupOnlySeason)[0].CandidateId === "s1",
         "the UI must also accept the compact CompositeGroups preview contract during controller rollout");
+    const secondGroupOnlySeason = Object.assign({}, groupOnlySeason, {
+        SeasonId: "group-only-second", SeasonNumber: 3, SeasonName: "Group only second",
+        CompositeGroups: groupOnlySeason.CompositeGroups.map(group => Object.assign({}, group, {
+            Episodes: group.Episodes.map(episode => Object.assign({}, episode, { ParentSeasonNumber: 3 }))
+        }))
+    });
+    const compositeHintDialog = hooks.openDialog("composite mapping hint");
+    hooks.renderSeriesPicker(compositeHintDialog,
+        { Id: "series", Type: "Series", Name: "mapping hint fixture" },
+        [groupOnlySeason, secondGroupOnlySeason], {}, {});
+    assert(compositeHintDialog.body.querySelectorAll(".danmuCompositeHint").length === 1 &&
+        allVisibleText(compositeHintDialog.body).split(compositeMappingHint).length === 2 &&
+        compositeHintDialog.body.querySelectorAll(".danmuCompositeSeason").length === 2 &&
+        compositeHintDialog.body.querySelectorAll(".danmuVirtualSeason").length === 4,
+        "a multi-season result with multiple virtual groups must show the mapping hint exactly once above its mapping cards");
+    hooks.renderSeriesPicker(compositeHintDialog,
+        { Id: "series", Type: "Series", Name: "mapping hint fixture" },
+        [groupOnlySeason, secondGroupOnlySeason], {}, {});
+    assert(compositeHintDialog.body.querySelectorAll(".danmuCompositeHint").length === 1,
+        "a repeated Series render or rematch must replace, not accumulate, the mapping hint");
+    hooks.renderCompositeTargetPicker(compositeHintDialog,
+        { Id: "group-only", Type: "Season", Name: "Group only" }, groupOnlySeason);
+    assert(compositeHintDialog.body.querySelectorAll(".danmuCompositeHint").length === 1,
+        "an applicable direct Season result must show the mapping hint exactly once");
+    hooks.renderSeriesPicker(compositeHintDialog,
+        { Id: "plain-series", Type: "Series", Name: "plain fixture" },
+        [{ SeasonId: "plain-s1", SeasonNumber: 1, SeasonName: "Plain", Candidates: [] }], {}, {});
+    assert(compositeHintDialog.body.querySelectorAll(".danmuCompositeHint").length === 0,
+        "a result without mapping cards must not show the mapping hint");
+    compositeHintDialog.forceClose();
     const unmatchedScoreDialog = hooks.openDialog("unmatched score visibility");
     hooks.renderCompositeSeasonSummary(unmatchedScoreDialog,
         { Id: "series", Type: "Series", Name: "score fixture" },
