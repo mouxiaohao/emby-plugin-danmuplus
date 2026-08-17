@@ -1376,6 +1376,26 @@ namespace Emby.Plugin.Danmu.RegressionTests
                    seriesPreview.Contains("Recursive = false") &&
                    !seriesPreview.Contains("DtoOptions"),
                 "Series match preview must enumerate direct, non-projected library Seasons with ProviderIds intact");
+            var primaryQuery = controller.IndexOf(
+                "var primarySeasons = _libraryManager.GetItemList(new InternalItemsQuery",
+                StringComparison.Ordinal);
+            var emptyFallbackGuard = controller.IndexOf(
+                "if (primarySeasons.Count == 0)",
+                StringComparison.Ordinal);
+            var containerFallback = controller.IndexOf(
+                "primarySeasons = series.GetItemList(new InternalItemsQuery",
+                StringComparison.Ordinal);
+            var authoritativeSelection = controller.IndexOf(
+                "seasons.AddRange(primarySeasons",
+                StringComparison.Ordinal);
+            Assert(primaryQuery >= 0 &&
+                   emptyFallbackGuard > primaryQuery &&
+                   containerFallback > emptyFallbackGuard &&
+                   authoritativeSelection > containerFallback &&
+                   controller.IndexOf("seasons.AddRange(primarySeasons",
+                       authoritativeSelection + "seasons.AddRange(primarySeasons".Length,
+                       StringComparison.Ordinal) < 0,
+                "Series match preview may use the Series container only after an empty primary result and must select, not merge, the two Season sources");
             Assert(controller.Contains("item is Series,") &&
                    controller.Contains("item as Series,") &&
                    controller.Contains("bool preserveProvidedSeason = false") &&

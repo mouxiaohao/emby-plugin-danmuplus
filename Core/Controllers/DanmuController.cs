@@ -968,13 +968,32 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 // DTO projection for provider-ID
                 // precedence, while retaining the existing filter/order/UI
                 // context selection below.
-                seasons.AddRange(_libraryManager.GetItemList(new InternalItemsQuery
+                var primarySeasons = _libraryManager.GetItemList(new InternalItemsQuery
                 {
                     ParentIds = new[] { series.InternalId },
                     IncludeItemTypes = new[] { "Season" },
                     Recursive = false,
                 })
                     .OfType<Season>()
+                    .ToList();
+
+                // A newly opened Series can transiently be absent from the
+                // library-wide direct-child index even though its own container
+                // already exposes the Seasons. Keep the direct library query
+                // authoritative whenever it returns anything; consult the
+                // container only for the empty result.
+                if (primarySeasons.Count == 0)
+                {
+                    primarySeasons = series.GetItemList(new InternalItemsQuery
+                        {
+                            IncludeItemTypes = new[] { "Season" },
+                            Recursive = false,
+                        })
+                        .OfType<Season>()
+                        .ToList();
+                }
+
+                seasons.AddRange(primarySeasons
                     .OrderBy(x => x.IndexNumber ?? int.MaxValue));
 
                 // 某些 Emby 返回的季度对象无法再仅凭 ItemId 从全局媒体库回查。

@@ -232,9 +232,9 @@ function fakeResponse(status, statusText, body, contentType) {
 }
 
 async function main() {
-    assert((source.match(/__embyDanmuSmartMenuV25/g) || []).length === 1 &&
-        !source.includes("__embyDanmuSmartMenuV24") && !source.includes("__embyDanmuSmartMenuV23"),
-        "the 2.0.5r1 frontend installation flag should be V25 exactly once");
+    assert((source.match(/__embyDanmuSmartMenuV26/g) || []).length === 1 &&
+        !source.includes("__embyDanmuSmartMenuV25") && !source.includes("__embyDanmuSmartMenuV24"),
+        "the 2.0.5r1 frontend installation flag should be V26 exactly once");
     assert(!source.includes("MAPPING_PROTOCOL_GENERATION") && source.includes("var MAPPING_PROTOCOL_VERSION = 21"),
         "the 2.0.5r1 UI must retain the backend numeric V21 mapping protocol and server-authored plan generation");
     const compositeFailure = "复合季映射需要重新确认：Selected candidate evidence expired or belongs to another Season.";
@@ -298,6 +298,68 @@ async function main() {
         partialCall.parameters.mappingProtocolGeneration === undefined,
         "a whole-Series partial HTTP failure must retain completed sibling Seasons and every API call must carry the V21 fence");
     partialSeriesDialog.forceClose();
+    delete apiResponses.MatchPreview;
+
+    const recoveredSeriesSeason = {
+        SeriesId: "series-empty-recovered", SeasonId: "season-empty-recovered",
+        SeriesName: "Recovered Series", SeasonName: "Recovered Season 1",
+        SeasonNumber: 1, EpisodeCount: 12, Status: "not-matched", Candidates: []
+    };
+    const emptyThenValidDialog = hooks.openDialog("empty Series preview recovery");
+    let emptyThenValidResponses = 0;
+    apiResponses.MatchPreview = function () {
+        emptyThenValidResponses++;
+        return emptyThenValidResponses === 1 ? { Seasons: [] } : { Seasons: [recoveredSeriesSeason] };
+    };
+    const emptyThenValidCallStart = apiCalls.length;
+    await hooks.runSmartDownload({ Id: "series-empty-recovered", Type: "Series", Name: "Recovered Series" },
+        emptyThenValidDialog);
+    const emptyThenValidCalls = apiCalls.slice(emptyThenValidCallStart)
+        .filter(call => call.option === "MatchPreview");
+    const emptyThenValidText = allVisibleText(emptyThenValidDialog.body);
+    assert(emptyThenValidCalls.length === 2 &&
+        emptyThenValidCalls[0].parameters.searchOperationId !==
+            emptyThenValidCalls[1].parameters.searchOperationId &&
+        emptyThenValidDialog.body.querySelectorAll(".danmuSeasonSummary").length === 1 &&
+        emptyThenValidText.includes("Recovered Season 1") &&
+        !emptyThenValidText.includes("未命名剧集") && !emptyThenValidText.includes("返回 0 季"),
+        "a decoded empty whole-Series preview must retry exactly once with a fresh operation and render only the valid response");
+    emptyThenValidDialog.forceClose();
+
+    const twiceEmptyDialog = hooks.openDialog("twice empty Series preview");
+    apiResponses.MatchPreview = { Message: "服务器仍在准备季度列表", Seasons: [] };
+    const twiceEmptyCallStart = apiCalls.length;
+    await hooks.runSmartDownload({ Id: "series-twice-empty", Type: "Series", Name: "Twice Empty" },
+        twiceEmptyDialog);
+    const twiceEmptyCalls = apiCalls.slice(twiceEmptyCallStart)
+        .filter(call => call.option === "MatchPreview");
+    const twiceEmptyText = allVisibleText(twiceEmptyDialog.body);
+    assert(twiceEmptyCalls.length === 2 && twiceEmptyText.includes("服务器仍在准备季度列表") &&
+        !twiceEmptyText.includes("未命名剧集") && !twiceEmptyText.includes("返回 0 季") &&
+        twiceEmptyDialog.body.querySelectorAll(".danmuSeasonSummary").length === 0 &&
+        twiceEmptyDialog.footer.children.length === 1 &&
+        twiceEmptyDialog.footer.children[0].textContent === "重试搜索" &&
+        !allVisibleText(twiceEmptyDialog.footer).includes("下载"),
+        "two decoded empty whole-Series previews must stop after two requests and expose only the existing retryable failure UI");
+
+    let manualRetryResponses = 0;
+    apiResponses.MatchPreview = function () {
+        manualRetryResponses++;
+        return manualRetryResponses === 1 ? { Seasons: [] } : { Seasons: [recoveredSeriesSeason] };
+    };
+    const manualRetryCallStart = apiCalls.length;
+    await twiceEmptyDialog.footer.children[0].dispatch("click");
+    await waitUntil(() => apiCalls.slice(manualRetryCallStart)
+        .filter(call => call.option === "MatchPreview").length === 2 &&
+        twiceEmptyDialog.body.querySelectorAll(".danmuSeasonSummary").length === 1,
+        "manual retry did not complete a fresh bounded empty-Series cycle");
+    const manualRetryCalls = apiCalls.slice(manualRetryCallStart)
+        .filter(call => call.option === "MatchPreview");
+    assert(manualRetryCalls.length === 2 && manualRetryResponses === 2 &&
+        manualRetryCalls[0].parameters.searchOperationId !== manualRetryCalls[1].parameters.searchOperationId &&
+        allVisibleText(twiceEmptyDialog.body).includes("Recovered Season 1"),
+        "each manual retry must reset the one-retry allowance without exceeding two whole-Series requests");
+    twiceEmptyDialog.forceClose();
     delete apiResponses.MatchPreview;
     /* r2 intentionally hid all scores; r3 replaces that contract below.
     assert(!/\bScore\b|综合评分|评分：/.test(source),
@@ -1643,6 +1705,23 @@ async function main() {
         apiCalls.some(call => call.option === "CancelSearch" && call.parameters.searchOperationId === closeOperation),
         "closing a dialog must cancel its live server search without allowing a late response to mutate closed UI");
 
+    const cancelledSmartDialog = hooks.openDialog("cancelled whole-Series preview");
+    const cancelledSmartTransport = deferredTransport();
+    apiResponses.MatchPreview = function () { return cancelledSmartTransport.promise; };
+    const cancelledSmartCallStart = apiCalls.length;
+    const cancelledSmartRun = hooks.runSmartDownload(
+        { Id: "series-cancelled-preview", Type: "Series", Name: "Cancelled Series" }, cancelledSmartDialog);
+    await new Promise(resolve => setImmediate(resolve));
+    const cancelledSmartButton = cancelledSmartDialog.footer.children
+        .find(button => button.textContent === "取消搜索");
+    await cancelledSmartButton.dispatch("click");
+    await cancelledSmartRun;
+    assert(apiCalls.slice(cancelledSmartCallStart)
+        .filter(call => call.option === "MatchPreview").length === 1 &&
+        cancelledSmartDialog.footer.children.some(button => button.textContent === "重试搜索"),
+        "cancelling a whole-Series preview must not be mistaken for a decoded empty response or start another request");
+    cancelledSmartDialog.forceClose();
+
     const errorDialog = hooks.openDialog("search error recovery");
     apiResponses.MatchPreview = function () { return Promise.reject(new Error("provider unavailable")); };
     const errorResult = await hooks.runDialogSearch(errorDialog, "search-item", "provider-search", {},
@@ -1656,12 +1735,23 @@ async function main() {
         "provider errors must run the same finally cleanup path and release dialog controls");
     errorDialog.forceClose();
 
+    const errorSmartDialog = hooks.openDialog("failed whole-Series preview");
+    const errorSmartCallStart = apiCalls.length;
+    await hooks.runSmartDownload(
+        { Id: "series-failed-preview", Type: "Series", Name: "Failed Series" }, errorSmartDialog);
+    assert(apiCalls.slice(errorSmartCallStart).filter(call => call.option === "MatchPreview").length === 1 &&
+        errorSmartDialog.footer.children.some(button => button.textContent === "重试搜索"),
+        "a whole-Series transport or HTTP failure must not enter the decoded-empty retry path");
+    errorSmartDialog.forceClose();
+
     const malformedDialog = hooks.openDialog("malformed preview");
     apiResponses.MatchPreview = {};
+    const malformedCallStart = apiCalls.length;
     await hooks.runSmartDownload({ Id: "malformed", Type: "Movie", Name: "Malformed" }, malformedDialog);
-    assert(!malformedDialog.androidBackLocked && malformedDialog.footer.children.some(button =>
-        button.textContent === "重试搜索"),
-        "malformed preview responses must restore a retryable dialog instead of leaving busy controls stuck");
+    assert(apiCalls.slice(malformedCallStart).filter(call => call.option === "MatchPreview").length === 1 &&
+        !malformedDialog.androidBackLocked && malformedDialog.footer.children.some(button =>
+            button.textContent === "重试搜索"),
+        "non-Series malformed previews must remain single-request and restore a retryable dialog instead of leaving busy controls stuck");
     malformedDialog.forceClose();
     delete apiResponses.MatchPreview;
 

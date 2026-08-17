@@ -5,8 +5,8 @@
 (function () {
     "use strict";
 
-    // V25 refreshes the installed UI while retaining the V21 mapping contract.
-    var INSTALL_FLAG = "__embyDanmuSmartMenuV25";
+    // V26 refreshes the installed UI while retaining the V21 mapping contract.
+    var INSTALL_FLAG = "__embyDanmuSmartMenuV26";
     var MAPPING_PROTOCOL_VERSION = 21;
     var BUTTON_ID = "danmu-bulk-download";
     var activeDialogs = [];
@@ -3869,7 +3869,14 @@
         if (status !== "cancelled") notify(message.textContent, true);
     }
 
-    async function runSmartDownload(item, dialog) {
+    function emptySeriesPreviewError(preview) {
+        var message = value(preview, "Message", "message", "");
+        var safeMessage = typeof message === "string" ? boundedText(message) : "";
+        return new Error(safeMessage || "服务器没有返回可匹配季度，请重试。");
+    }
+
+    async function runSmartDownload(item, dialog, allowEmptySeriesRetry) {
+        var retryEmptySeriesOnce = allowEmptySeriesRetry !== false;
         var preview = await runDialogSearch(
             dialog, item.Id, "provider-search", {},
             item.Type === "Series" ? "正在逐季请求服务器匹配结果，请稍候…" : "正在请求服务器匹配结果，请稍候…",
@@ -3878,6 +3885,13 @@
         var seasons = value(preview, "Seasons", "seasons", []) || [];
 
         if (item.Type === "Series") {
+            if (seasons.length === 0) {
+                if (retryEmptySeriesOnce) {
+                    return runSmartDownload(item, dialog, false);
+                }
+                renderInitialSearchFailure(dialog, item, "error", emptySeriesPreviewError(preview));
+                return;
+            }
             renderSeriesPicker(dialog, item, seasons, {}, {});
             return;
         }
