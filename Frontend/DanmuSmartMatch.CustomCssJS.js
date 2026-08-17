@@ -5,8 +5,8 @@
 (function () {
     "use strict";
 
-    // V26 refreshes the installed UI while retaining the V21 mapping contract.
-    var INSTALL_FLAG = "__embyDanmuSmartMenuV26";
+    // V27 refreshes the installed UI while retaining the V21 mapping contract.
+    var INSTALL_FLAG = "__embyDanmuSmartMenuV27";
     var MAPPING_PROTOCOL_VERSION = 21;
     var BUTTON_ID = "danmu-bulk-download";
     var activeDialogs = [];
@@ -412,7 +412,7 @@
             ".danmuSeasonProblem{padding:.75rem 0;border-bottom:1px solid rgba(255,255,255,.12)}",
             ".danmuSeasonSummary{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:.75rem;align-items:center;padding:.9rem;margin:.65rem 0;border:1px solid rgba(255,255,255,.16);border-radius:.45rem;background:rgba(255,255,255,.025)}",
             ".danmuSeasonSummary.matched{border-color:#2e7d32}.danmuSeasonSummary.unmatched{border-color:#c62828}.danmuSeasonSummaryTitle{font-weight:600}.danmuSeasonSummaryState{margin:.22rem 0;font-size:.92rem}.danmuSeasonSummary.matched .danmuSeasonSummaryState{color:#81c784}.danmuSeasonSummary.unmatched .danmuSeasonSummaryState{color:#ef9a9a}.danmuSeasonSummaryDetail{opacity:.78;font-size:.88rem;word-break:break-all}",
-            ".danmuCompositeSeason{margin:.7rem 0;padding:.8rem;border:1px solid rgba(255,255,255,.2);border-radius:.48rem;background:rgba(255,255,255,.02)}.danmuCompositeHeader{font-weight:600;margin-bottom:.45rem}.danmuCompositeHint,.danmuSeasonScopeSummary{opacity:.78;font-size:.88rem;margin:.25rem 0 .55rem}.danmuSeasonScopeSummary{padding:.45rem .55rem;border-radius:.3rem;background:rgba(255,255,255,.045)}.danmuVirtualSeason{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:.7rem;align-items:center;margin:.45rem 0;padding:.7rem;border-left:3px solid #666;border-radius:.35rem;background:rgba(255,255,255,.035)}.danmuVirtualSeason.matched{border-left-color:#2e7d32}.danmuVirtualSeason.unmatched{border-left-color:#ffb300}.danmuVirtualSeasonTitle{font-weight:600}.danmuVirtualSeasonDetail{opacity:.8;font-size:.88rem;overflow-wrap:anywhere}.danmuVirtualSeasonMappings{grid-column:1 / -1;min-width:0;max-width:100%;white-space:normal;overflow-wrap:anywhere}.danmuVirtualSeasonMappings summary{cursor:pointer}.danmuVirtualSeasonActions{grid-column:2;justify-self:end;display:flex;gap:.45rem}.danmuCompositeWarning{margin:.5rem 0;padding:.55rem .65rem;border-radius:.35rem;background:rgba(255,179,0,.15);color:#ffe082;font-size:.88rem}.danmuCompositeInputs{display:flex;flex-wrap:wrap;gap:.6rem;margin:.65rem 0}.danmuCompositeInputs label{display:flex;align-items:center;gap:.35rem;font-size:.9rem}.danmuCompositeInputs input{width:5.8rem;padding:.4rem;border:1px solid #777;border-radius:.3rem;background:#111;color:#fff}",
+            ".danmuCompositeSeason{margin:.7rem 0;padding:.8rem;border:1px solid rgba(255,255,255,.2);border-radius:.48rem;background:rgba(255,255,255,.02)}.danmuCompositeHeader{font-weight:600;margin-bottom:.45rem}.danmuEpisodeShortfallNotice{color:#ffd54f;font-size:.9rem;font-weight:600;margin:.25rem 0 .55rem}.danmuCompositeHint,.danmuSeasonScopeSummary{opacity:.78;font-size:.88rem;margin:.25rem 0 .55rem}.danmuSeasonScopeSummary{padding:.45rem .55rem;border-radius:.3rem;background:rgba(255,255,255,.045)}.danmuVirtualSeason{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:.7rem;align-items:center;margin:.45rem 0;padding:.7rem;border-left:3px solid #666;border-radius:.35rem;background:rgba(255,255,255,.035)}.danmuVirtualSeason.matched{border-left-color:#2e7d32}.danmuVirtualSeason.unmatched{border-left-color:#ffb300}.danmuVirtualSeasonTitle{font-weight:600}.danmuVirtualSeasonDetail{opacity:.8;font-size:.88rem;overflow-wrap:anywhere}.danmuVirtualSeasonMappings{grid-column:1 / -1;min-width:0;max-width:100%;white-space:normal;overflow-wrap:anywhere}.danmuVirtualSeasonMappings summary{cursor:pointer}.danmuVirtualSeasonActions{grid-column:2;justify-self:end;display:flex;gap:.45rem}.danmuCompositeWarning{margin:.5rem 0;padding:.55rem .65rem;border-radius:.35rem;background:rgba(255,179,0,.15);color:#ffe082;font-size:.88rem}.danmuCompositeInputs{display:flex;flex-wrap:wrap;gap:.6rem;margin:.65rem 0}.danmuCompositeInputs label{display:flex;align-items:center;gap:.35rem;font-size:.9rem}.danmuCompositeInputs input{width:5.8rem;padding:.4rem;border:1px solid #777;border-radius:.3rem;background:#111;color:#fff}",
             ".danmuProgressSeason{padding:.9rem;margin:.7rem 0;border:1px solid rgba(255,255,255,.14);border-radius:.45rem;background:rgba(255,255,255,.025)}",
             ".danmuProgressSeason.running{border-color:#00a4dc}.danmuProgressSeason.success{border-color:#2e7d32}.danmuProgressSeason.warning{border-color:#ffb300}.danmuProgressSeason.failed{border-color:#c62828}.danmuProgressSeason.cancelled{border-color:#777}",
             ".danmuProgressTitle{display:flex;justify-content:space-between;gap:1rem;font-weight:600}.danmuProgressMeta{opacity:.8;font-size:.9rem;margin:.3rem 0 .55rem}",
@@ -2385,6 +2385,12 @@
         header.className = "danmuCompositeHeader";
         header.textContent = seasonLibraryContextLine(season);
         container.appendChild(header);
+        if (value(season, "HasVerifiedSourceEpisodeSurplus", "hasVerifiedSourceEpisodeSurplus", false) === true) {
+            var shortfall = document.createElement("div");
+            shortfall.className = "danmuEpisodeShortfallNotice";
+            shortfall.textContent = "库内集数少于来源集数";
+            container.appendChild(shortfall);
+        }
         var scopeLine = scopeSummaryLine(season);
         if (scopeLine) {
             var scope = document.createElement("div");

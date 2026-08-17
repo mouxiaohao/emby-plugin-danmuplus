@@ -42,6 +42,7 @@ namespace Emby.Plugin.Danmu.RegressionTests
             PreservesOrdinaryScoresForContradictoryEvidence();
             ScoresSeasonEvidenceWithExactIndependentChannels();
             ScoresLiveOnePunchManThirdSeasonAliasFallback();
+            ScoresBookwormFourthSeasonDespiteAuthoritativeCountDifference();
             OrdersJojoSplitSeasonTitlesWithoutNumericLeakage();
             ReplacesCanonicalCandidatesForAutomaticSelection();
             PreservesLazyRoundOrderingAndShortCircuitContract();
@@ -287,16 +288,17 @@ namespace Emby.Plugin.Danmu.RegressionTests
             var manualBelow = ScoreSeason(
                 "One Punch Man Season 1", 2015, 6, "Season 3", 2025, false);
 
-            Assert(aboveThreshold.Score == 0.70 && belowThreshold.Score == 0.60 &&
+            Assert(aboveThreshold.Score == 0.60 && belowThreshold.Score == 0.60 &&
                    aboveThreshold.Score == OrdinaryNoKeywordScore(aboveThreshold) &&
                    belowThreshold.Score == OrdinaryNoKeywordScore(belowThreshold),
-                "conflicting Season/year evidence must receive only parent and exact positive metadata evidence: above=" +
+                "conflicting Season/year evidence must receive only the 60-point parent evidence: above=" +
                 aboveThreshold.Score + ", below=" + belowThreshold.Score);
             Assert(aboveThreshold.YearScore == 0 && belowThreshold.YearScore == 0 &&
+                   aboveThreshold.EpisodeScore == 0 && belowThreshold.EpisodeScore == 0 &&
                    aboveThreshold.Name.Contains("Season 1") && aboveThreshold.Year == 2015 &&
                    aboveThreshold.Reason.Contains("父剧名出现") &&
-                   aboveThreshold.Reason.Contains("集数吻合"),
-                "the retained candidate fields and positive reason evidence must still explain a conflicting result");
+                   !aboveThreshold.Reason.Contains("集数吻合"),
+                "Episode metadata must remain visible but neutral in both score fields and positive reasons");
             Assert(manualAbove.Score == aboveThreshold.Score && manualBelow.Score == belowThreshold.Score &&
                    manualAbove.Reason == aboveThreshold.Reason && manualBelow.Reason == belowThreshold.Reason,
                 "the legacy manual flag must remain score- and reason-neutral after removing the automatic cap");
@@ -332,7 +334,7 @@ namespace Emby.Plugin.Danmu.RegressionTests
         {
             return Math.Round(
                 candidate.ParentTitleScore * 0.60 + candidate.KeywordScore * 0.20 +
-                candidate.YearScore * 0.10 + candidate.EpisodeScore * 0.10,
+                candidate.YearScore * 0.20,
                 4,
                 MidpointRounding.AwayFromZero);
         }
@@ -345,9 +347,9 @@ namespace Emby.Plugin.Danmu.RegressionTests
             var youkuSecond = ScoreOnePunchMan("youku", "一拳超人 第二季", 2019, 13, null);
             var extraThirdKeyword = ScoreOnePunchMan(
                 "extra-third", "一拳超人 胆小鬼 第三季", 2025, 12, null);
-            Assert(correct.Score == 1 && bare.Score == 0.70 && second.Score == 0.70 &&
+            Assert(correct.Score == 1 && bare.Score == 0.60 && second.Score == 0.60 &&
                    youkuSecond.Score == 0.60,
-                "Season weights must be parent 60, whole-remainder Season 20, exact year 10, and exact episode count 10");
+                "Season weights must be parent 60, whole-remainder Season 20, exact year 20, and episode count 0");
             Assert(extraThirdKeyword.KeywordScore > 0 && extraThirdKeyword.KeywordScore < 1 &&
                    extraThirdKeyword.Score < 1,
                 "an equal numeric Season marker must not erase additional remainder keywords or receive the full 20-point Season score");
@@ -360,11 +362,24 @@ namespace Emby.Plugin.Danmu.RegressionTests
             var yearOffByOne = ScoreOnePunchMan("year", "一拳超人 第三季", 2024, 12, null);
             var episodesOffByOne = ScoreOnePunchMan("episodes", "一拳超人 第三季", 2025, 13, null);
             var missingMetadata = ScoreOnePunchMan("missing", "一拳超人 第三季", 0, 0, null);
-            Assert(yearOffByOne.YearScore == 0 && episodesOffByOne.EpisodeScore == 0 &&
+            Assert(correct.YearScore == 1 && correct.EpisodeScore == 0 &&
+                   yearOffByOne.YearScore == 0 && episodesOffByOne.EpisodeScore == 0 &&
                    missingMetadata.YearScore == 0 && missingMetadata.EpisodeScore == 0 &&
-                   yearOffByOne.Score == 0.90 && episodesOffByOne.Score == 0.90 &&
-                   missingMetadata.Score == 0.80,
-                "nearby or missing year/episode metadata must contribute zero instead of partial credit");
+                   yearOffByOne.Score == 0.80 && episodesOffByOne.Score == 1 &&
+                   missingMetadata.Score == 0.80 && episodesOffByOne.EpisodeSize == 13 &&
+                   DanmuMatchScorer.SelectAutoCandidate(new[] { episodesOffByOne })?.Id == "episodes" &&
+                   !episodesOffByOne.Reason.Contains("集数吻合"),
+                "exact year must contribute 20 points while Episode metadata remains visible and cannot reduce an otherwise automatic Season match");
+
+            var movie = DanmuMatchScorer.ScoreMovie(new ScraperSearchInfo
+            {
+                Id = "movie-unchanged",
+                Name = "一拳超人",
+                Category = "电影",
+                Year = 2025,
+            }, "dandan", "DandanPlay", 0, "一拳超人", 2025);
+            Assert(movie.Score == 1 && movie.TitleScore == 1 && movie.YearScore == 1,
+                "the Season-only 60/20/20/0 refinement must not change Movie scoring");
 
             var firstSeasonBare = DanmuMatchScorer.Score(new ScraperSearchInfo
             {
@@ -534,8 +549,9 @@ namespace Emby.Plugin.Danmu.RegressionTests
                    integratedCandidates[0].ParentTitleScore == 1 &&
                    integratedCandidates[0].Score == 1,
                 "the real SearchTmdbTermAsync Season path must explicitly carry original/local parent aliases into alias-only parent scoring");
-            Assert(firstSeason.Score == 0.70 && secondSeason.Score == 0.70,
-                "bare and conflicting localized Seasons must stay below the alias threshold with parent plus episode evidence only: first=" +
+            Assert(firstSeason.Score == 0.60 && secondSeason.Score == 0.60 &&
+                   firstSeason.EpisodeScore == 0 && secondSeason.EpisodeScore == 0,
+                "bare and conflicting localized Seasons must stay below the alias threshold with parent evidence only: first=" +
                 firstSeason.Score + ", second=" + secondSeason.Score);
 
             var aliasResult = new DanmuMatchSearchResult
@@ -571,6 +587,47 @@ namespace Emby.Plugin.Danmu.RegressionTests
                 Aliases = new List<string> { searchTerm },
             }, "dandan", "DandanPlay", 0, searchTerm, season, 2025, 12,
                 new[] { "一拳超人" }, new[] { season }, true, 3, true);
+        }
+
+        private static void ScoresBookwormFourthSeasonDespiteAuthoritativeCountDifference()
+        {
+            const string originalSeries = "爱书的下克上";
+            const string originalSeason = "爱书的下克上 S4";
+            const string aliasTerm = "小书痴";
+            var calls = new List<string>();
+            var candidates = new List<DanmuMatchCandidate>();
+            var reachedAliasThreshold = InvokeAliasTermWithContext(
+                new DanmuMatchSearchResult(),
+                new TermFixtureScraper(calls, term => new List<ScraperSearchInfo>
+                {
+                    new ScraperSearchInfo
+                    {
+                        Id = "bookworm-s4",
+                        Name = "小书痴第四季",
+                        Category = "动漫",
+                        Year = 2026,
+                        EpisodeSize = 24,
+                    },
+                }),
+                aliasTerm,
+                candidates,
+                new HashSet<string>(StringComparer.OrdinalIgnoreCase),
+                originalSeries,
+                originalSeason,
+                4,
+                2026,
+                16,
+                null,
+                null,
+                CancellationToken.None);
+
+            var candidate = candidates.Single();
+            Assert(reachedAliasThreshold && calls.SequenceEqual(new[] { aliasTerm }) &&
+                   candidate.Score == 1 && candidate.ParentTitleScore == 1 &&
+                   candidate.KeywordScore == 1 && candidate.YearScore == 1 &&
+                   candidate.EpisodeScore == 0 && candidate.EpisodeSize == 24 &&
+                   DanmuMatchScorer.SelectAutoCandidate(candidates)?.Id == "bookworm-s4",
+                "爱书的下克上 S4 / 小书痴第四季 / 2026 must score 100 and auto-select when local 16 differs from source 24");
         }
 
         private static void OrdersJojoSplitSeasonTitlesWithoutNumericLeakage()

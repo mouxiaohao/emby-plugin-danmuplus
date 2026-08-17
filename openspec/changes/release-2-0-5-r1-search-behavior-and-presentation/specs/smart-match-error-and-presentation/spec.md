@@ -35,3 +35,26 @@ Non-TMDB provider failure diagnostics SHALL remain visible under the provider-fa
 #### Scenario: User activates parent-title rematch
 - **WHEN** the user activates `重新匹配` from the alias-exhaustion state
 - **THEN** the subsequent parent-title automatic candidate result SHALL replace that state without restoring stale alias rows or diagnostics
+
+### Requirement: Verified source Episode surplus is shown once in yellow
+After a successful authoritative Season mapping, the browser SHALL show the exact visible text `库内集数少于来源集数` in a yellow warning when the server reports that a selected source's verified Episode inventory exceeds the target Season's full eligible local inventory. Whole-Series and single-Season smart matching SHALL use the same Season-level presentation. The warning MUST NOT be inferred from search-candidate `EpisodeSize`, mapping-row count, displayed library count, or browser-authored values, and MUST NOT appear before an authoritative plan exists.
+
+#### Scenario: Whole-Series matching binds an updating Season
+- **WHEN** a whole-Series result contains a successfully mapped Season whose server-authoritative source-surplus state is true
+- **THEN** that Season card SHALL show `库内集数少于来源集数` exactly once in yellow without changing its successful state
+
+#### Scenario: Single-Season matching binds an updating Season
+- **WHEN** a single-Season result contains a successfully mapped Season whose server-authoritative source-surplus state is true
+- **THEN** the same yellow warning SHALL appear exactly once in the Season summary
+
+#### Scenario: Browser sees only candidate Episode metadata
+- **WHEN** a candidate advertises more Episodes but no authoritative mapping has established the source-surplus state
+- **THEN** the browser SHALL show no source-surplus warning
+
+#### Scenario: Local inventory is equal to or larger than source inventory
+- **WHEN** the server-authoritative source-surplus state is false or absent
+- **THEN** the warning SHALL not render, including when remaining local Episodes form an existing temporary Season
+
+#### Scenario: Result is rebuilt
+- **WHEN** a rematch or composite-plan rebuild changes the authoritative source-surplus state
+- **THEN** the current Season summary SHALL reflect only the new state without retaining or duplicating a stale warning

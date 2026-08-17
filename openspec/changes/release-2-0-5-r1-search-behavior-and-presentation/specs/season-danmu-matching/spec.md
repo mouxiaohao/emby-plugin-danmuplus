@@ -39,7 +39,7 @@ Automatic processing SHALL remain fail-closed when the target inventory or autho
 
 #### Scenario: Manual and automatic paths observe foreign Episodes
 - **WHEN** a target Season display includes Episodes whose parent season differs from the target
-- **THEN** both paths SHALL exclude the same foreign ItemIds before automatic episode-count scoring, mapping, temporary-run construction, and execution
+- **THEN** both paths SHALL exclude the same foreign ItemIds before ordinary Season scoring, neutral Episode-inventory inspection, mapping, temporary-run construction, and execution
 
 #### Scenario: Successful provider remains automatically usable after sibling failure
 - **WHEN** one provider fails but another completed provider supplies the unique ordinarily high-confidence candidate and its resolved mapping plan is structurally valid
@@ -144,12 +144,12 @@ Activating that action SHALL issue one fresh search using exactly the parent Ser
 - **THEN** the system SHALL return a retryable no-title state without issuing an empty provider request or restoring alias candidates
 
 ### Requirement: Automatic confidence excludes the removed score overrides
-Season automatic confidence SHALL use the ordinary composite score without capping a candidate at `0.79` because of contradictory explicit Season or year evidence. Contradictory evidence MAY remain available as a reason or diagnostic and ordinary evidence weights SHALL remain unchanged.
+Season automatic confidence SHALL use the ordinary composite score without capping a candidate at `0.79` because of contradictory explicit Season or year evidence. Contradictory evidence MAY remain available as a reason or diagnostic. The later explicit Season-evidence distribution requirement defines the current ordinary weights.
 
 Fidelity evidence MAY continue to distinguish otherwise equal-score candidates, but it MUST NOT promote a candidate whose ordinary composite score is `0.85` or otherwise below the standard automatic-confidence threshold to that threshold. No equivalent replacement bonus or alternate bridge SHALL be introduced.
 
 #### Scenario: Candidate contains contradictory evidence
-- **WHEN** a candidate's ordinary title, year, and episode evidence produces a score above `0.79` while its explicit Season number or known year conflicts with the target
+- **WHEN** a candidate's ordinary title and year evidence produces a score above `0.79` while its explicit Season number or known year conflicts with the target
 - **THEN** the candidate SHALL retain its ordinary composite score instead of being capped at `0.79`
 
 #### Scenario: Unique fidelity candidate has a base score of 0.85
@@ -159,3 +159,47 @@ Fidelity evidence MAY continue to distinguish otherwise equal-score candidates, 
 #### Scenario: Equal-score candidates differ in fidelity
 - **WHEN** candidates have the same ordinary composite score but different fidelity evidence
 - **THEN** fidelity MAY resolve their ordering or uniqueness without changing either candidate's confidence score
+
+### Requirement: Season confidence uses 60-20-20 title and year evidence
+Season matching SHALL calculate its ordinary confidence from parent-title evidence worth 60 points, Season-name evidence worth 20 points, and exact known-year evidence worth 20 points. Episode-count evidence SHALL contribute zero points, SHALL NOT break an otherwise eligible automatic match, and SHALL NOT alter candidate ordering through a hidden equivalent bonus. The Episode count MAY remain visible as neutral evidence and SHALL remain available to the authoritative mapping operation. Movie scoring SHALL remain unchanged.
+
+For Season 1, the Season-name target set SHALL continue to include an empty Season name in addition to the authoritative Season title and a Season-1 label, so a source result containing only the parent title can receive the Season-name component. TMDB Chinese-alias, English-title, and Japanese-title rounds SHALL continue comparing their active parent term with the original parent Series title and eligible local aliases, taking the best parent-title result without adding scores across alternatives.
+
+#### Scenario: Candidate has the correct titles and year but a different Episode count
+- **WHEN** a Season candidate matches the parent-title and Season-name evidence and its known year exactly matches the target while its Episode count is smaller or larger
+- **THEN** it SHALL receive the same 100-point ordinary score as the equal-count candidate and Episode-count difference SHALL NOT block automatic confidence
+
+#### Scenario: Only the parent title and year match
+- **WHEN** a candidate earns the full parent-title component and exact known-year component but earns no Season-name component
+- **THEN** it SHALL receive 80 points regardless of its Episode count; this MAY satisfy the separate TMDB-alias acceptance threshold where applicable, while the ordinary automatic threshold remains unchanged
+
+#### Scenario: Candidate year differs or is unavailable
+- **WHEN** the candidate and target years are known but differ, or exact-year evidence is unavailable
+- **THEN** the candidate SHALL receive zero year points rather than a partial year score
+
+#### Scenario: Movie matching runs
+- **WHEN** the target is a Movie rather than a Season
+- **THEN** this Season-only distribution SHALL NOT change the Movie scoring formula
+
+### Requirement: Source Episode surplus is advisory after authoritative mapping
+Episode-count differences SHALL be evaluated only from the authoritative local Season scope and the actual provider Episode details used to build the current mapping plan. Search-candidate Episode metadata MUST NOT be trusted to produce this result. When an authoritative plan has at least one applied mapping and any selected source contains more verified Episodes than the target Season's full eligible local inventory, the Season result SHALL expose an advisory source-surplus state. This state MUST NOT change the score, confidence classification, selection, mapping, download eligibility, or persistence behavior.
+
+#### Scenario: Verified source has more Episodes than the local Season
+- **WHEN** a valid authoritative mapping is built for 16 eligible local Episodes from a selected source whose resolved media contains 24 usable Episodes
+- **THEN** matching SHALL remain successful and the Season result SHALL expose the source-surplus advisory state
+
+#### Scenario: Local and source Episode counts are equal
+- **WHEN** the authoritative local and source Episode counts are equal
+- **THEN** the Season result SHALL NOT expose the source-surplus advisory state
+
+#### Scenario: Local Season has more Episodes than the selected source
+- **WHEN** the eligible local inventory exceeds the verified source inventory
+- **THEN** the Season result SHALL NOT expose the source-surplus advisory state and the existing unmatched-run temporary-Season workflow SHALL remain unchanged
+
+#### Scenario: Mapping authority is unavailable
+- **WHEN** the plan is missing, cancelled, stale, evidence-invalid, provider-invalid, or contains no applied mapping
+- **THEN** the system SHALL fail closed for that plan and SHALL NOT infer a source-surplus advisory from candidate metadata
+
+#### Scenario: Composite mapping uses several sources
+- **WHEN** an authoritative plan uses more than one selected source
+- **THEN** each source's verified Episode inventory SHALL be compared independently with the local eligible inventory and source counts MUST NOT be summed into a synthetic total

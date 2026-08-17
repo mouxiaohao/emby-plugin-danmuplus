@@ -1859,6 +1859,7 @@ namespace Emby.Plugin.Danmu.Core.Controllers
             }
 
             response.CompositePlan = build.Plan;
+            response.HasVerifiedSourceEpisodeSurplus = build.HasVerifiedSourceEpisodeSurplus;
             response.PlanFingerprint = build.PlanFingerprint;
             RegisterPreviewPlanFingerprint(latest.Id.ToString(), response.PlanGeneration,
                 build.PlanFingerprint);
@@ -2055,6 +2056,7 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                     direct.PlanFingerprint);
                 result.PlanFingerprint = direct.PlanFingerprint;
                 result.CompositePlan = direct.Plan;
+                result.HasVerifiedSourceEpisodeSurplus = direct.HasVerifiedSourceEpisodeSurplus;
                 result.CompositeGroups = CompositeSeasonMatchService.ToGroups(
                     direct.Plan, direct.Episodes, direct.SourceEpisodeNames);
                 result.RequiresCompositeMapping = true;
@@ -2092,6 +2094,7 @@ namespace Emby.Plugin.Danmu.Core.Controllers
             }
 
             result.CompositePlan = build.Plan;
+            result.HasVerifiedSourceEpisodeSurplus = build.HasVerifiedSourceEpisodeSurplus;
             result.PlanFingerprint = build.PlanFingerprint;
             RegisterPreviewPlanFingerprint(season.Id.ToString(), result.PlanGeneration,
                 build.PlanFingerprint);
@@ -2975,6 +2978,7 @@ namespace Emby.Plugin.Danmu.Core.Controllers
             public List<DanmuCompositeSeasonSelection> Selections { get; set; } =
                 new List<DanmuCompositeSeasonSelection>();
             public List<string> ExcludedItemIds { get; set; } = new List<string>();
+            public bool HasVerifiedSourceEpisodeSurplus { get; set; }
             public string Error { get; set; } = string.Empty;
         }
 
@@ -3020,6 +3024,7 @@ namespace Emby.Plugin.Danmu.Core.Controllers
             build.StructureFingerprint = context.StructureFingerprint;
             var local = context.LocalEpisodes;
             var mappings = new List<CompositeSeasonEpisodeMapping>();
+            var hasVerifiedSourceEpisodeSurplus = false;
             var effectiveExclusions = MergeEpisodeExclusions(excludedLocalEpisodeItemIds, null);
             var canonicalSelections = (selections ?? Enumerable.Empty<DanmuCompositeSeasonSelection>())
                 .Select(CloneSeasonPlanSelection).ToList();
@@ -3155,6 +3160,8 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 var appliedMappings = plan.Mappings
                     .Where(mapping => !beforeLocalIds.Contains(mapping.LocalEpisodeItemId))
                     .ToList();
+                hasVerifiedSourceEpisodeSurplus |= ShouldReportVerifiedSourceEpisodeSurplus(
+                    sourceEpisodes.Count, context.LocalEpisodes.Count, appliedMappings.Count);
                 if (appliedMappings.Count > 0)
                 {
                     selection.LocalStartEpisodeItemId = appliedMappings[0].LocalEpisodeItemId;
@@ -3194,9 +3201,20 @@ namespace Emby.Plugin.Danmu.Core.Controllers
             }
 
             build.Plan = plan;
+            build.HasVerifiedSourceEpisodeSurplus = plan.Mappings.Count > 0 &&
+                hasVerifiedSourceEpisodeSurplus;
             build.PlanFingerprint = SeasonPlanningContextBuilder.CreatePlanFingerprint(
                 context, canonicalSelections, plan);
             return build;
+        }
+
+        private static bool ShouldReportVerifiedSourceEpisodeSurplus(
+            int verifiedSourceEpisodeCount,
+            int eligibleLocalEpisodeCount,
+            int appliedMappingCount)
+        {
+            return appliedMappingCount > 0 &&
+                   verifiedSourceEpisodeCount > eligibleLocalEpisodeCount;
         }
 
         private static DanmuCompositeSeasonSelection CloneSeasonPlanSelection(

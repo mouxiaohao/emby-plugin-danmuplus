@@ -56,6 +56,7 @@ namespace Emby.Plugin.Danmu.RegressionTests
             PreservesSourceMetadataAcrossEveryBindingEntryPoint();
             ProjectsBoundedSourceEpisodeNamesWithoutChangingPlanAuthority();
             PreservesExactBindingScoreIntoSelectedCandidate();
+            DerivesSourceSurplusOnlyFromAppliedAuthoritativeDetails();
         }
 
         private static void PreservesExplicitEvidenceAndBuildsRemainingRuns()
@@ -1260,6 +1261,125 @@ namespace Emby.Plugin.Danmu.RegressionTests
                    typeof(DanmuCompositeSeasonSelection).GetProperty("SourceEpisodeName") == null &&
                    typeof(DanmuEpisodeDownloadResult).GetProperty("SourceEpisodeName") == null,
                 "source display titles must not alter fingerprints, compact selections, or download task snapshots");
+        }
+
+        private static void DerivesSourceSurplusOnlyFromAppliedAuthoritativeDetails()
+        {
+            var predicate = typeof(DanmuController).GetMethod(
+                "ShouldReportVerifiedSourceEpisodeSurplus",
+                BindingFlags.NonPublic | BindingFlags.Static);
+            Assert(predicate != null,
+                "the controller must keep one closed predicate for authoritative source-surplus evidence");
+
+            bool Reports(int authoritativeSourceCount, int localCount, int appliedCount) =>
+                (bool)predicate.Invoke(null, new object[]
+                {
+                    authoritativeSourceCount, localCount, appliedCount,
+                });
+
+            var candidateOverstates = new DanmuMatchCandidate { EpisodeSize = 99 };
+            var candidateUnderstates = new DanmuMatchCandidate { EpisodeSize = 1 };
+            Assert(candidateOverstates.EpisodeSize > 3 && !Reports(2, 3, 2) &&
+                   candidateUnderstates.EpisodeSize < 3 && Reports(4, 3, 3),
+                "candidate EpisodeSize must not override the opposite count resolved from authoritative provider details");
+            Assert(!Reports(4, 3, 0),
+                "a source with no successfully applied mapping must never publish surplus state");
+
+            Assert(CompositeSeasonPlanner.TryCreatePlan(LocalEpisodes(1, 3), null,
+                out var localSmallerPlan, out var error), error);
+            var longerSource = Enumerable.Range(1, 4)
+                .Select(number => Source("long-source-" + number, "long-comment-" + number, number))
+                .ToList();
+            Assert(CompositeSeasonPlanner.TryApplySegment(localSmallerPlan,
+                Segment("local-1", "DandanID", "long-source", "long-source-1", longerSource),
+                out localSmallerPlan, out var localSmallerApplied, out error), error);
+            Assert(localSmallerApplied == 3 && localSmallerPlan.Mappings.Count == 3 &&
+                   localSmallerPlan.UnmatchedRuns.Count == 0 &&
+                   Reports(longerSource.Count, 3, localSmallerApplied),
+                "a verified longer source must remain mappable and publish the advisory state");
+
+            Assert(CompositeSeasonPlanner.TryCreatePlan(LocalEpisodes(1, 3), null,
+                out var equalPlan, out error), error);
+            var equalSource = Enumerable.Range(1, 3)
+                .Select(number => Source("equal-source-" + number, "equal-comment-" + number, number))
+                .ToList();
+            Assert(CompositeSeasonPlanner.TryApplySegment(equalPlan,
+                Segment("local-1", "DandanID", "equal-source", "equal-source-1", equalSource),
+                out equalPlan, out var equalApplied, out error), error);
+            Assert(equalApplied == 3 && !Reports(equalSource.Count, 3, equalApplied),
+                "equal authoritative source and local counts must not publish surplus state");
+
+            Assert(CompositeSeasonPlanner.TryCreatePlan(LocalEpisodes(1, 4), null,
+                out var localLargerPlan, out error), error);
+            var shorterSource = Enumerable.Range(1, 3)
+                .Select(number => Source("short-source-" + number, "short-comment-" + number, number))
+                .ToList();
+            Assert(CompositeSeasonPlanner.TryApplySegment(localLargerPlan,
+                Segment("local-1", "DandanID", "short-source", "short-source-1", shorterSource),
+                out localLargerPlan, out var localLargerApplied, out error), error);
+            Assert(localLargerApplied == 3 && !Reports(shorterSource.Count, 4, localLargerApplied) &&
+                   localLargerPlan.UnmatchedRuns.Count == 1 &&
+                   RunIds(localLargerPlan.UnmatchedRuns[0]) == "local-4",
+                "a shorter source must keep the established unmatched-run workflow without a surplus advisory");
+
+            var firstIndependentSource = Reports(2, 3, 2);
+            var secondIndependentSource = Reports(2, 3, 1);
+            Assert(2 + 2 > 3 && !(firstIndependentSource || secondIndependentSource),
+                "several source counts must be compared independently and never summed into synthetic surplus");
+
+            Assert(typeof(DanmuSeasonMatchResult).GetProperty(
+                       "HasVerifiedSourceEpisodeSurplus") != null &&
+                   !new DanmuSeasonMatchResult().HasVerifiedSourceEpisodeSurplus &&
+                   typeof(DanmuMatchCandidate).GetProperty(
+                       "HasVerifiedSourceEpisodeSurplus") == null &&
+                   typeof(DanmuCompositeSeasonSelection).GetProperty(
+                       "HasVerifiedSourceEpisodeSurplus") == null &&
+                   typeof(DanmuParams).GetProperty(
+                       "HasVerifiedSourceEpisodeSurplus") == null,
+                "verified source surplus must remain response-only and absent from candidates and requests");
+            var responseJson = JsonSerializer.Serialize(new DanmuSeasonMatchResult
+            {
+                HasVerifiedSourceEpisodeSurplus = true,
+            });
+            Assert(responseJson.Contains(
+                    "\"HasVerifiedSourceEpisodeSurplus\":true", StringComparison.Ordinal),
+                "the authoritative Season response must project the advisory state on the wire");
+
+            var repositoryRoot = Path.GetFullPath(Path.Combine(
+                AppContext.BaseDirectory, "..", "..", "..", ".."));
+            var controller = File.ReadAllText(Path.Combine(
+                repositoryRoot, "Core", "Controllers", "DanmuController.cs")).Replace("\r\n", "\n");
+            var builder = SliceSource(controller,
+                "private async Task<CompositePlanBuild> BuildCompositePlanAsync(",
+                "private static DanmuCompositeSeasonSelection CloneSeasonPlanSelection(");
+            Assert(builder.Contains(
+                       "var sourceEpisodes = CompositeSeasonMatchService.GetSourceEpisodes(media);") &&
+                   builder.Contains(
+                       "sourceEpisodes.Count, context.LocalEpisodes.Count, appliedMappings.Count") &&
+                   builder.Contains("hasVerifiedSourceEpisodeSurplus |=") &&
+                   builder.Contains("plan.Mappings.Count > 0") &&
+                   !builder.Contains("EpisodeSize"),
+                "BuildCompositePlanAsync must derive the advisory only from applied authoritative detail Episodes");
+            Assert(builder.IndexOf("build.HasVerifiedSourceEpisodeSurplus =", StringComparison.Ordinal) >
+                   builder.IndexOf("build.Plan = plan;", StringComparison.Ordinal),
+                "failed, cancelled, or zero-plan builds must retain the response default false");
+
+            var compositePreview = SliceSource(controller,
+                "private async Task<DanmuSeasonMatchResult> GetCompositeSeasonPlanPreview(",
+                "private async Task PopulateCompositePreviewIfRequired(");
+            var populatedPreview = SliceSource(controller,
+                "private async Task PopulateCompositePreviewIfRequired(",
+                "private static bool IsRematch(");
+            Assert(compositePreview.Contains(
+                       "response.HasVerifiedSourceEpisodeSurplus = build.HasVerifiedSourceEpisodeSurplus;") &&
+                   compositePreview.IndexOf(
+                       "response.HasVerifiedSourceEpisodeSurplus =", StringComparison.Ordinal) >
+                   compositePreview.IndexOf("if (build.Plan == null)", StringComparison.Ordinal) &&
+                   populatedPreview.Contains(
+                       "result.HasVerifiedSourceEpisodeSurplus = direct.HasVerifiedSourceEpisodeSurplus;") &&
+                   populatedPreview.Contains(
+                       "result.HasVerifiedSourceEpisodeSurplus = build.HasVerifiedSourceEpisodeSurplus;"),
+                "whole-Series, single-Season, and explicit plan rebuild responses must project the current authoritative state");
         }
 
         private static string MappingSnapshot(CompositeSeasonEpisodeMapping mapping)

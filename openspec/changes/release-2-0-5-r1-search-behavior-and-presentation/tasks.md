@@ -79,13 +79,13 @@
 - [x] 12.1 Set assembly/file version to `2.0.5.1`, informational and configuration version to `2.0.5r1`, and advance the established frontend/configuration cache marker needed to load the changed JavaScript and page resource without changing plugin/page identity.
 - [x] 12.2 Add a cumulative 2.0.5r1 entry to `UPDATE.md` and update README current-version/behavior text while preserving all prior release history, screenshots, demonstration images, installation compatibility notes, and the explicit retained seven-day/download-timeout behavior.
 - [x] 12.3 Add `artifacts/2.0.5r1/VERIFICATION.md` with the baseline, l1-l10 commit map, planned checks, artifact/hash placeholders, approval gates, and no credentials or raw authenticated data.
-- [ ] 12.4 Run version/resource/documentation consistency checks, stage only metadata, cumulative docs, OpenSpec progress, and verification records, commit separately as `release: prepare 2.0.5r1 verification`, and record its hash outside the l1-l10 rollback map.
+- [x] 12.4 Run version/resource/documentation consistency checks, stage only metadata, cumulative docs, OpenSpec progress, and verification records, commit separately as `release: prepare 2.0.5r1 verification`, and record its hash outside the l1-l10 rollback map.
 
 ## 13. Full local verification
 
 - [ ] 13.1 Run the main backend regression and every affected specialized regression project sequentially, including bounded search, r3 search quality, search-term policy, title fidelity, TMDB alias, candidate detail/evidence, single-target download, and seven-day replay coverage.
 - [ ] 13.2 Run the complete frontend smart-match regression and configuration source/generated-resource assertions; verify manual-keyword rows display only server scores/reasons in server order without browser re-scoring, re-sorting, preselection, or internal-value exposure, and verify TMDB-exhaustion results expose no alias candidates or TMDB diagnostics.
-- [ ] 13.3 Run a clean sequential Release build, capture DLL version/size/SHA-256, and verify no competing .NET process caused mapped-file output locks.
+- [x] 13.3 Run a clean sequential Release build, capture DLL version/size/SHA-256, and verify no competing .NET process caused mapped-file output locks.
 - [ ] 13.4 Run `openspec.cmd validate release-2-0-5-r1-search-behavior-and-presentation --strict`, final OpenSpec status, `git diff --check`, and a changed-file allowlist/scope audit.
 - [ ] 13.5 Audit source, staged files, logs, verification records, DLL-visible configuration strings, and any local package manifest for credential values without printing secrets; verify TMDB keys/tokens, Dandan credentials, signatures, authorization headers, and private deployment details are absent.
 
@@ -108,3 +108,12 @@
 - [ ] 16.1 Have a Sol high-reasoning reviewer inspect the final diff, l boundaries, specs/tasks coherence, failure/cancellation/persistence safety, scored manual-keyword explicit-selection boundary, TMDB state transition, and all verification evidence; resolve every blocking finding before handoff.
 - [ ] 16.2 Confirm the delivered worktree is clean at the reviewed candidate, the original dirty checkout remains untouched, every l hash is recorded, and no push/merge/release/deployment occurred without its explicit gate.
 - [ ] 16.3 Present the 2.0.5r1 implementation, verification summary, local artifact paths/hashes, ten recorded rollback commands without claiming waived inverse tests, residual risks, and live-validation result to the user for the next decision.
+
+## 17. Post-slice Season score and verified source-surplus refinement
+
+- [x] 17.1 Replace only the Season ordinary score distribution with parent title 60, Season name 20, exact known year 20, and Episode count 0; keep the automatic threshold, Movie score, TMDB parent-term maximum policy, and authoritative Episode mapping unchanged.
+- [x] 17.2 Add focused scorer and TMDB-alias fixtures proving Episode-count mismatch neither changes score nor blocks an otherwise 80-plus Season, exact year contributes 20, missing/conflicting year contributes zero, and Movie behavior remains unchanged.
+- [x] 17.3 Add a response-only authoritative Season source-surplus state derived from the actual provider Episode details used by a successfully applied composite plan; do not trust candidate `EpisodeSize`, sum several sources, or publish the state for failed, cancelled, stale, evidence-invalid, or zero-mapping plans.
+- [x] 17.4 Render `库内集数少于来源集数` once in yellow in the shared whole-Series/single-Season composite summary only when that state is true; do not render it on candidate or temporary-Season cards, and clear it on a false/absent rerender.
+- [x] 17.5 Add composite planner/controller and frontend regressions for local-smaller, equal, local-larger with retained temporary runs, candidate/detail count disagreement, multi-source independence, failed authority, whole-Series, single-Season, and rerender behavior.
+- [ ] 17.6 Run the affected focused suites, full backend/frontend regressions, sequential Release build, strict OpenSpec validation, diff/scope/credential checks, Sol-high final review, then back up and deploy the verified DLL/CustomCssJS pair under the existing authorization without initiating a download during live testing.

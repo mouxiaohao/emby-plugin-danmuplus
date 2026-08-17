@@ -168,6 +168,9 @@ namespace Emby.Plugin.Danmu.Model
         // special).  These groups are a plugin-side presentation only; Emby's
         // actual Season membership is never altered.
         public bool RequiresCompositeMapping { get; set; }
+        // Response-only advisory derived from provider Episode details consumed
+        // by the authoritative plan. It is never accepted as planning evidence.
+        public bool HasVerifiedSourceEpisodeSurplus { get; set; }
         public CompositeSeasonPlan CompositePlan { get; set; }
         public List<DanmuCompositeSeasonGroup> CompositeGroups { get; set; } =
             new List<DanmuCompositeSeasonGroup>();

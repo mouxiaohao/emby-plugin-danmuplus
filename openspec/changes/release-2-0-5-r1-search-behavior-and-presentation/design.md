@@ -105,6 +105,14 @@ The final metadata slice sets assembly/file version `2.0.5.1`, informational/con
 
 Record every l commit hash and its focused evidence without rewriting or squashing those commits. The user has explicitly waived the exhaustive ten-tree inverse test matrix for this cycle and requested live deployment testing first; the independent commit boundaries and rollback commands remain documented.
 
+### 9. Make Episode-count differences advisory and server-authoritative
+
+The current Season scorer is refined to 60 percent parent-title evidence, 20 percent Season-name evidence, and 20 percent exact known-year evidence. Episode count contributes zero and cannot affect confidence, candidate order, or threshold classification. It remains part of the candidate explanation only as neutral metadata and remains an input to the authoritative Episode planner. Movie scoring is not changed.
+
+Do not let the browser compare candidate `EpisodeSize` with a displayed or mapped count. Search metadata can be stale, incomplete, or describe a different provider projection. Add one response-only Season result flag, `HasVerifiedSourceEpisodeSurplus`, whose only authority is the provider Episode detail actually consumed while building the current `CompositePlan`. The planner compares every successfully applied source independently with the full `SeasonPlanningContext.LocalEpisodes` eligible inventory and ORs the result; it never sums multiple sources. A missing, failed, cancelled, stale, evidence-invalid, or zero-mapping plan leaves the flag false.
+
+Both whole-Series and single-Season flows already converge on the same composite Season summary. Render the yellow `库内集数少于来源集数` notice there exactly once and only when the response flag is true. The flag is advisory: local shortages do not create synthetic Episodes or block matching, mapping, download, or persistence. Equal counts produce no notice. A larger local inventory also produces no notice and continues through the existing `UnmatchedRuns` temporary-Season behavior.
+
 ## Risks / Trade-offs
 
 - [A provider can remain hung indefinitely after shared deadlines are removed] → Preserve explicit cancellation, provider-native transport safeguards, per-provider gate ownership, and visible in-progress state; document that the user may need to cancel a non-cooperative search.
@@ -116,6 +124,8 @@ Record every l commit hash and its focused evidence without rewriting or squashi
 - [Removing the fidelity bridge lowers recall for symbol-sensitive near-threshold matches] → This is intentional; preserve fidelity as tie evidence and require ordinary scoring to reach the threshold.
 - [l6 and l10 touch adjacent search plumbing and may make a simple Git revert conflict] → Give each slice independent additive discriminators and result states, prohibit cross-references to symbols owned by the other slice, avoid opportunistic refactors, and record exact per-l commit hashes and rollback commands.
 - [Configuration-page resource caching can mask l4/l5 during live checks] → advance the established configuration cache token/build resource and verify both source HTML and generated Release resource without changing the page route.
+- [Search metadata can exaggerate or understate source Episode count] → compute the warning only from the provider Episode details used by the authoritative plan and expose a response-only Boolean; never infer it in the browser.
+- [A source surplus could be mistaken for a structural mapping failure] → keep the state advisory and require only that the current plan already has an applied mapping; do not change scoring, confidence, mapping, download, or persistence gates.
 
 ## Migration Plan
 

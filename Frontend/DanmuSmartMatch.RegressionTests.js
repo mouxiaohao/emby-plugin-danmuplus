@@ -232,9 +232,9 @@ function fakeResponse(status, statusText, body, contentType) {
 }
 
 async function main() {
-    assert((source.match(/__embyDanmuSmartMenuV26/g) || []).length === 1 &&
-        !source.includes("__embyDanmuSmartMenuV25") && !source.includes("__embyDanmuSmartMenuV24"),
-        "the 2.0.5r1 frontend installation flag should be V26 exactly once");
+    assert((source.match(/__embyDanmuSmartMenuV27/g) || []).length === 1 &&
+        !source.includes("__embyDanmuSmartMenuV26") && !source.includes("__embyDanmuSmartMenuV25"),
+        "the 2.0.5r1 frontend installation flag should be V27 exactly once");
     assert(!source.includes("MAPPING_PROTOCOL_GENERATION") && source.includes("var MAPPING_PROTOCOL_VERSION = 21"),
         "the 2.0.5r1 UI must retain the backend numeric V21 mapping protocol and server-authored plan generation");
     const compositeFailure = "复合季映射需要重新确认：Selected candidate evidence expired or belongs to another Season.";
@@ -1083,6 +1083,55 @@ async function main() {
             Episodes: group.Episodes.map(episode => Object.assign({}, episode, { ParentSeasonNumber: 3 }))
         }))
     });
+    const episodeShortfallText = "库内集数少于来源集数";
+    const verifiedShortfallSeason = Object.assign({}, groupOnlySeason, {
+        HasVerifiedSourceEpisodeSurplus: true,
+        CompositeGroups: groupOnlySeason.CompositeGroups.map(group => Object.assign({}, group, {
+            HasVerifiedSourceEpisodeSurplus: true
+        }))
+    });
+    const episodeShortfallDialog = hooks.openDialog("verified source episode surplus");
+    hooks.renderSeriesPicker(episodeShortfallDialog,
+        { Id: "series", Type: "Series", Name: "shortfall fixture" },
+        [verifiedShortfallSeason], {}, {});
+    assert(episodeShortfallDialog.body.querySelectorAll(".danmuEpisodeShortfallNotice").length === 1 &&
+        allVisibleText(episodeShortfallDialog.body).split(episodeShortfallText).length === 2,
+        "a whole-Series result must show the verified source-episode surplus notice exactly once per Season, not once per temporary group");
+    hooks.renderCompositeTargetPicker(episodeShortfallDialog,
+        { Id: "group-only", Type: "Season", Name: "Group only" }, verifiedShortfallSeason);
+    assert(episodeShortfallDialog.body.querySelectorAll(".danmuEpisodeShortfallNotice").length === 1 &&
+        allVisibleText(episodeShortfallDialog.body).split(episodeShortfallText).length === 2,
+        "a single-Season result must reuse the same verified source-episode surplus notice exactly once");
+    hooks.renderSeriesPicker(episodeShortfallDialog,
+        { Id: "series", Type: "Series", Name: "shortfall fixture" },
+        [Object.assign({}, groupOnlySeason, {
+            HasVerifiedSourceEpisodeSurplus: false, EpisodeCount: 12,
+            SelectedCandidate: { EpisodeSize: 12 }
+        }), Object.assign({}, secondGroupOnlySeason, {
+            EpisodeCount: 13, SelectedCandidate: { EpisodeSize: 12 }
+        })], {}, {});
+    assert(episodeShortfallDialog.body.querySelectorAll(".danmuEpisodeShortfallNotice").length === 0 &&
+        !allVisibleText(episodeShortfallDialog.body).includes(episodeShortfallText),
+        "false or missing verified surplus state, including equal or local-greater counts, must render no notice and a rerender must not retain stale notice DOM");
+    hooks.renderCandidatePicker(episodeShortfallDialog,
+        { Id: "season", Type: "Season", Name: "candidate shortfall fixture" },
+        { SeasonId: "candidate-shortfall", SeasonNumber: 1, SeasonName: "Candidate shortfall",
+            EpisodeCount: 2, Candidates: [{ Site: "Dandan", Id: "candidate-surplus", Name: "Candidate surplus",
+                EpisodeSize: 99, HasVerifiedSourceEpisodeSurplus: true }] }, "");
+    assert(episodeShortfallDialog.body.querySelectorAll(".danmuEpisodeShortfallNotice").length === 0 &&
+        !allVisibleText(episodeShortfallDialog.body).includes(episodeShortfallText),
+        "candidate-reported episode counts or surplus fields must not create the authoritative Season notice");
+    hooks.renderSeriesPicker(episodeShortfallDialog,
+        { Id: "series", Type: "Series", Name: "failed plan fixture" },
+        [{ SeasonId: "failed-plan", SeasonNumber: 1, SeasonName: "Failed plan",
+            MappingProtocolVersion: 21, PlanGeneration: 0, RequiresCompositeMapping: true,
+            HasVerifiedSourceEpisodeSurplus: true, CompositePlan: verifiedShortfallSeason.CompositePlan }], {}, {});
+    assert(episodeShortfallDialog.body.querySelectorAll(".danmuEpisodeShortfallNotice").length === 0,
+        "a failed or non-authoritative composite plan must not render the response-only surplus notice");
+    assert(source.includes(".danmuEpisodeShortfallNotice{color:#ffd54f;") &&
+        source.includes('shortfall.textContent = "' + episodeShortfallText + '";'),
+        "the verified source-episode surplus notice must use a clearly distinguishable yellow style and exact required wording");
+    episodeShortfallDialog.forceClose();
     const compositeHintDialog = hooks.openDialog("composite mapping hint");
     hooks.renderSeriesPicker(compositeHintDialog,
         { Id: "series", Type: "Series", Name: "mapping hint fixture" },

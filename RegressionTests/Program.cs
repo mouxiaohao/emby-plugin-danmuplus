@@ -546,10 +546,12 @@ namespace Emby.Plugin.Danmu.RegressionTests
                 source, "AliasID", "Alias", 0, "abcdefghij", "abcdefghij", 2024, 12);
             Assert(Math.Abs(standard.Score - Math.Round(
                        standard.ParentTitleScore * 0.60 + standard.KeywordScore * 0.20 +
-                       standard.YearScore * 0.10 + standard.EpisodeScore * 0.10,
+                       standard.YearScore * 0.20,
                        4,
                        MidpointRounding.AwayFromZero)) < 0.0001,
-                "fixed-term Season discovery must use the 60/20/10/10 evidence weights");
+                "fixed-term Season discovery must use the 60/20/20/0 evidence weights");
+            Assert(standard.EpisodeScore == 0 && !standard.Reason.Contains("集数吻合"),
+                "fixed-term Season discovery must keep Episode evidence score- and reason-neutral");
 
             var unrelated = DanmuMatchScorer.Score(
                 new ScraperSearchInfo

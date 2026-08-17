@@ -214,6 +214,9 @@ namespace Emby.Plugin.Danmu.Scraper
             // Retained for source compatibility with existing callers; contradiction
             // evidence no longer changes the ordinary composite score.
             _ = applyContradictionCap;
+            // Episode counts remain visible on candidates and available to the
+            // authoritative mapper, but are neutral Season confidence evidence.
+            _ = expectedEpisodes;
             var targetSeasonNumber = expectedSeasonNumber ?? ParseExplicitSeasonNumber(seasonName);
             var seasonParentTitles = BuildNormalizedTitleSet(
                 new[] { seriesName }.Concat(localSeriesTitleAliases ?? Enumerable.Empty<string>()));
@@ -228,9 +231,9 @@ namespace Emby.Plugin.Danmu.Scraper
             var seasonScore = titleEvidence.SeasonScore;
             var titleScore = (parentScore * 0.60 + seasonScore * 0.20) / 0.80;
             var yearScore = GetExactYearScore(expectedYear, source.Year);
-            var episodeScore = GetExactEpisodeScore(expectedEpisodes, source.EpisodeSize);
+            const double episodeScore = 0;
             var score = Clamp(parentScore * 0.60 + seasonScore * 0.20 +
-                              yearScore * 0.10 + episodeScore * 0.10);
+                              yearScore * 0.20);
             var fidelityTitleEvidence = GetSeasonFidelityTitleEvidence(
                 seriesName,
                 seasonName,
@@ -255,7 +258,7 @@ namespace Emby.Plugin.Danmu.Scraper
                 KeywordScore = Round(seasonScore),
                 YearScore = Round(yearScore),
                 EpisodeScore = Round(episodeScore),
-                Reason = BuildReason(parentScore, seasonScore, yearScore, episodeScore),
+                Reason = BuildReason(parentScore, seasonScore, yearScore),
                 MatchOrigin = string.IsNullOrWhiteSpace(source.SearchAlias) ? string.Empty : "tmdb-alias",
                 DecisionReason = string.IsNullOrWhiteSpace(source.SearchAlias) ? string.Empty : "tmdb-alias:" + source.SearchAlias,
                 FidelityTitleEvidence = fidelityTitleEvidence,
@@ -875,11 +878,6 @@ namespace Emby.Plugin.Danmu.Scraper
                 : 0;
         }
 
-        private static double GetExactEpisodeScore(int expected, int actual)
-        {
-            return expected > 0 && actual > 0 && expected == actual ? 1 : 0;
-        }
-
         private static double GetEpisodeScore(int expected, int actual)
         {
             if (expected <= 0 || actual <= 0)
@@ -904,14 +902,12 @@ namespace Emby.Plugin.Danmu.Scraper
         private static string BuildReason(
             double parent,
             double season,
-            double year,
-            double episodes)
+            double year)
         {
             var parts = new List<string>();
             if (parent >= 0.95) parts.Add("父剧名出现");
             if (season >= 0.95) parts.Add("季名吻合");
             if (year >= 0.95) parts.Add("年份吻合");
-            if (episodes >= 0.95) parts.Add("集数吻合");
             return parts.Count > 0 ? string.Join("、", parts) : "需要人工确认";
         }
 
