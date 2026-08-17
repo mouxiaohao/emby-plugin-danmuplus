@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Net;
+using System.Reflection;
 using System.Runtime.Serialization.Json;
 using System.Text;
 using System.Threading;
@@ -13,6 +14,7 @@ using Emby.Plugin.Danmu.Scraper;
 using Emby.Plugin.Danmu.Scraper.Entity;
 using Emby.Plugin.Danmu.Scraper.Tmdb;
 using MediaBrowser.Common.Net;
+using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.TV;
 using MediaBrowser.Model.Entities;
 
@@ -39,6 +41,7 @@ namespace Emby.Plugin.Danmu.RegressionTests
             ScoresLiveOnePunchManThirdSeasonAliasFallback();
             ReplacesCanonicalCandidatesForAutomaticSelection();
             PreservesLazyRoundOrderingAndShortCircuitContract();
+            TracksCompletedAliasProviderCalls();
         }
 
         private static void ParsesTvResultsIntoChineseAliasSearchPlan()
@@ -394,6 +397,96 @@ namespace Emby.Plugin.Danmu.RegressionTests
             Assert(chineseIndex >= 0 && englishIndex > chineseIndex && japaneseIndex > englishIndex &&
                    source.Contains("if (reachedThreshold)") && source.Contains("break;"),
                 "Chinese rounds must precede lazy English/Japanese primary details and stop after the first 0.80 round");
+        }
+
+        private static void TracksCompletedAliasProviderCalls()
+        {
+            var successful = new DanmuMatchSearchResult { IsComplete = false };
+            InvokeAliasTerm(successful, new AliasFixtureScraper("DandanID", false), CancellationToken.None);
+            Assert(successful.HasCompletedProviders && successful.CompletedProviderCount == 1 &&
+                   successful.CompletedProviderIds.SequenceEqual(new[] { "DandanID" }),
+                "a successful TMDB alias provider call, including an empty response, must count as completed-provider coverage");
+            InvokeAliasTerm(successful, new AliasFixtureScraper("DandanID", false), CancellationToken.None);
+            Assert(successful.CompletedProviderCount == 1,
+                "repeated alias calls from the same provider must not duplicate completed-provider coverage");
+
+            successful.CanonicalCandidates.Add(new DanmuMatchCandidate
+            {
+                Id = "alias-high-confidence",
+                Site = "dandan",
+                SourceOrder = 0,
+                Score = 0.90,
+                MatchOrigin = "tmdb-alias",
+            });
+            Classify(successful);
+            Assert(successful.Decision == "confident" &&
+                   successful.SelectedCandidate?.Id == "alias-high-confidence",
+                "an alias-completed provider must restore ordinary confident classification after the initial round failed");
+
+            var allAliasFailed = new DanmuMatchSearchResult { IsComplete = false };
+            InvokeAliasTerm(allAliasFailed, new AliasFixtureScraper("DandanID", true), CancellationToken.None);
+            Classify(allAliasFailed);
+            Assert(!allAliasFailed.HasCompletedProviders && allAliasFailed.Decision == "retryable-incomplete",
+                "all failed alias calls must not fabricate completed-provider coverage or escape the retryable path");
+
+            using (var cancellation = new CancellationTokenSource())
+            {
+                cancellation.Cancel();
+                var parentCancelled = new DanmuMatchSearchResult { IsComplete = false, WasCancelled = true };
+                InvokeAliasTerm(parentCancelled, new AliasFixtureScraper("DandanID", false), cancellation.Token);
+                Classify(parentCancelled);
+                Assert(!parentCancelled.HasCompletedProviders && parentCancelled.Decision == "cancelled" &&
+                       parentCancelled.SelectedCandidate == null,
+                    "parent cancellation during an alias call must remain terminal even if a provider would otherwise be available");
+            }
+        }
+
+        private static void InvokeAliasTerm(
+            DanmuMatchSearchResult result,
+            AbstractScraper scraper,
+            CancellationToken cancellationToken)
+        {
+            var method = typeof(DanmuMatchSearchEngine).GetMethod(
+                "SearchTmdbTermAsync", BindingFlags.Static | BindingFlags.NonPublic);
+            var task = (Task<bool>)method.Invoke(null, new object[]
+            {
+                result, scraper, "alias", new List<DanmuMatchCandidate>(),
+                new HashSet<string>(StringComparer.OrdinalIgnoreCase), 0, "Series", "Season 1", 1,
+                2024, 12, false, null, cancellationToken,
+            });
+            task.GetAwaiter().GetResult();
+        }
+
+        private static void Classify(DanmuMatchSearchResult result)
+        {
+            var method = typeof(DanmuMatchSearchEngine).GetMethod(
+                "ClassifyResult", BindingFlags.Static | BindingFlags.NonPublic);
+            method.Invoke(null, new object[] { result });
+        }
+
+        private sealed class AliasFixtureScraper : AbstractScraper
+        {
+            private readonly string _providerId;
+            private readonly bool _throws;
+
+            public AliasFixtureScraper(string providerId, bool throws) : base(null)
+            {
+                _providerId = providerId;
+                _throws = throws;
+            }
+
+            public override string Name => _providerId;
+            public override string ProviderName => _providerId;
+            public override string ProviderId => _providerId;
+            public override Task<List<ScraperSearchInfo>> Search(BaseItem item) =>
+                Task.FromResult(new List<ScraperSearchInfo>());
+            public override Task<string> SearchMediaId(BaseItem item) => Task.FromResult(string.Empty);
+            public override Task<List<ScraperSearchInfo>> SearchForApi(string keyword) => _throws
+                ? Task.FromException<List<ScraperSearchInfo>>(new InvalidOperationException("alias fixture failure"))
+                : Task.FromResult(new List<ScraperSearchInfo>());
+            public override Task<ScraperMedia> GetMedia(BaseItem item, string id) => Task.FromResult<ScraperMedia>(null);
+            public override Task<ScraperEpisode> GetMediaEpisode(BaseItem item, string id) => Task.FromResult<ScraperEpisode>(null);
+            public override Task<ScraperDanmaku> GetDanmuContent(BaseItem item, string commentId) => Task.FromResult<ScraperDanmaku>(null);
         }
 
         private static TmdbAlternativeTitleResponse Deserialize(string json)

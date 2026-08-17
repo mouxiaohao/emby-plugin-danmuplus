@@ -532,8 +532,10 @@ namespace Emby.Plugin.Danmu.RegressionTests
                    movie.CanonicalCandidates.Any(candidate => candidate.Site == "OtherID"),
                 "a typed-page failure must retain Bilibili and cross-provider Movie candidates");
             Assert(movie.CompletionDiagnostics.Any(diagnostic =>
-                    diagnostic.Provider == "BilibiliID" && diagnostic.Status == "partial_failure"),
-                "the Movie consumer must receive the Bilibili typed-page diagnostic");
+                    diagnostic.Provider == "BilibiliID" && diagnostic.Status == "partial_failure") &&
+                   movie.HasCompletedProviders && movie.CompletedProviderCount == 2 &&
+                   movie.HasProviderLocalFaults && !movie.IsComplete,
+                "the Movie consumer must retain completed-provider coverage beside the Bilibili typed-page diagnostic");
 
             var season = DanmuMatchSearchEngine.SearchSeasonAsync(
                 scrapers,
@@ -547,8 +549,10 @@ namespace Emby.Plugin.Danmu.RegressionTests
                    season.CanonicalCandidates.Any(candidate => candidate.Site == "OtherID"),
                 "a typed-page failure must retain Bilibili and cross-provider Season candidates");
             Assert(season.CompletionDiagnostics.Any(diagnostic =>
-                    diagnostic.Provider == "BilibiliID" && diagnostic.Status == "partial_failure"),
-                "the Season consumer must receive the same Bilibili typed-page diagnostic channel");
+                    diagnostic.Provider == "BilibiliID" && diagnostic.Status == "partial_failure") &&
+                   season.HasCompletedProviders && season.CompletedProviderCount == 2 &&
+                   season.HasProviderLocalFaults && !season.IsComplete,
+                "the Season consumer must retain completed-provider coverage beside the typed-page diagnostic");
         }
 
         private static ScraperSearchResult Result(ScraperSearchInfo candidate, bool diagnostic)

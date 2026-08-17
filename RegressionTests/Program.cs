@@ -566,9 +566,13 @@ namespace Emby.Plugin.Danmu.RegressionTests
                     null)
                 .GetAwaiter().GetResult();
 
-            Assert(search.Candidates.Count == 1, "successful movie providers should still contribute candidates");
-            Assert(search.SearchErrors.Count == 1 && search.SearchErrors[0].Contains("DandanID"),
-                "a failed Dandan proxy provider should be isolated in diagnostics");
+            Assert(search.Candidates.Count == 1 && search.HasCompletedProviders &&
+                   search.CompletedProviderIds.SequenceEqual(new[] { "WorkingID" }) &&
+                   search.SelectedCandidate?.Id == "1" && search.Decision == "confident",
+                "a successful movie provider should remain normally selectable after a sibling failure");
+            Assert(search.SearchErrors.Count == 1 && search.SearchErrors[0].Contains("DandanID") &&
+                   search.HasProviderLocalFaults && !search.IsComplete,
+                "a failed Dandan proxy provider should remain isolated in diagnostics");
         }
 
         private static void VerifiesLazyCandidateDetailContract()

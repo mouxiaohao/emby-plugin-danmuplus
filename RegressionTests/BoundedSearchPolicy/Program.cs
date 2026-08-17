@@ -408,8 +408,17 @@ namespace Emby.Plugin.Danmu.BoundedSearchPolicyRegression
             Assert(controller.Contains("[DataMember(Name=\"searchOperationId\")]", StringComparison.Ordinal) &&
                    controller.Contains("[DataMember(Name=\"searchScope\")]", StringComparison.Ordinal) &&
                    controller.Contains("SearchOperations.TryCancel(searchOperationId)", StringComparison.Ordinal) &&
-                   controller.Contains("if (!search.IsComplete)", StringComparison.Ordinal),
-                "Controller must bind operation scalar fields, route CancelSearch, and gate automatic selection on complete search coverage");
+                   controller.Contains("if (search.WasCancelled)", StringComparison.Ordinal) &&
+                   CountOccurrences(controller, "if (!search.HasCompletedProviders && !search.IsComplete)") == 3 &&
+                   !controller.Contains("\"partial-confident\"", StringComparison.Ordinal),
+                "Movie, Season/whole-Series, and temporary-range previews must prioritize cancellation and only retry when no provider completed");
+            var temporary = Slice(controller,
+                "private async Task<DanmuSeasonMatchResult> GetCompositeSeasonPlanPreview(",
+                "private async Task PopulateCompositePreviewIfRequired(");
+            Assert(temporary.Contains("response.Status = \"cancelled\"", StringComparison.Ordinal) &&
+                   temporary.Contains("response.Status = response.Candidates.Count == 0 ? \"no_match\" : \"ambiguous\"", StringComparison.Ordinal) &&
+                   temporary.Contains("\"manual-selection-required\"", StringComparison.Ordinal),
+                "a temporary range with completed-provider candidates must return an ordinary selectable response, while cancellation stays fail-closed");
         }
 
         private static void PreservesStableConfiguredProviderOrdering()
@@ -437,7 +446,7 @@ namespace Emby.Plugin.Danmu.BoundedSearchPolicyRegression
             var movie = Slice(helper,
                 "var movieSearch = await DanmuMatchSearchEngine.SearchMovieAsync(",
                 "movieMatchSearched = true;");
-            Assert(movie.Contains("if (!IsCompleteAutomaticSearch(movieSearch))") &&
+            Assert(movie.Contains("if (!CanUseAutomaticSearch(movieSearch))") &&
                    movie.Contains("else\n                                    {\n                                        selectedMovieCandidate = DanmuMatchScorer.SelectAutoCandidate") &&
                    movie.IndexOf("LogIncompleteAutomaticSearch", StringComparison.Ordinal) <
                    movie.IndexOf("selectedMovieCandidate = DanmuMatchScorer.SelectAutoCandidate", StringComparison.Ordinal),
@@ -446,7 +455,7 @@ namespace Emby.Plugin.Danmu.BoundedSearchPolicyRegression
             var season = Slice(helper,
                 "var search = await DanmuMatchSearchEngine.SearchSeasonAsync(\n                                scrapers,",
                 "var media = await selectedScraper.GetMedia(season, selectedMediaId);");
-            var seasonGuard = season.IndexOf("if (!IsCompleteAutomaticSearch(search))", StringComparison.Ordinal);
+            var seasonGuard = season.IndexOf("if (!CanUseAutomaticSearch(search))", StringComparison.Ordinal);
             var seasonContinue = season.IndexOf("continue;", seasonGuard, StringComparison.Ordinal);
             var seasonSelect = season.IndexOf("selectedCandidate = DanmuMatchScorer.SelectAutoCandidate", StringComparison.Ordinal);
             Assert(seasonGuard >= 0 && seasonContinue > seasonGuard && seasonSelect > seasonContinue,
@@ -455,7 +464,7 @@ namespace Emby.Plugin.Danmu.BoundedSearchPolicyRegression
             var residual = Slice(helper,
                 "while (plan.UnmatchedRuns.Count > 0)",
                 "if (plan.Mappings.Count == 0 || plan.UnmatchedRuns.Count > 0) return false;");
-            var residualGuard = residual.IndexOf("if (!IsCompleteAutomaticSearch(search))", StringComparison.Ordinal);
+            var residualGuard = residual.IndexOf("if (!CanUseAutomaticSearch(search))", StringComparison.Ordinal);
             var residualAbort = residual.IndexOf("return false;", residualGuard, StringComparison.Ordinal);
             var residualSelect = residual.IndexOf("SelectResidualCandidate", StringComparison.Ordinal);
             Assert(residualGuard >= 0 && residualAbort > residualGuard && residualSelect > residualAbort,
@@ -483,6 +492,18 @@ namespace Emby.Plugin.Danmu.BoundedSearchPolicyRegression
             Assert(start >= 0 && end > start,
                 "source-contract markers must remain discoverable: " + startMarker + " -> " + endMarker);
             return source.Substring(start, end - start);
+        }
+
+        private static int CountOccurrences(string source, string value)
+        {
+            var count = 0;
+            var index = 0;
+            while ((index = source.IndexOf(value, index, StringComparison.Ordinal)) >= 0)
+            {
+                count++;
+                index += value.Length;
+            }
+            return count;
         }
 
         private static void UpdateMaximum(ref int target, int value)

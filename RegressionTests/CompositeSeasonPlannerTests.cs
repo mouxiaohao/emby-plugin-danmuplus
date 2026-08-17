@@ -640,10 +640,10 @@ namespace Emby.Plugin.Danmu.RegressionTests
         private static void RejectsIncompleteAutomaticSeasonAndResidualSearches()
         {
             var completeness = typeof(Emby.Plugin.Danmu.LibraryManagerEventsHelper).GetMethod(
-                "IsCompleteAutomaticSearch",
+                "CanUseAutomaticSearch",
                 BindingFlags.Static | BindingFlags.NonPublic);
             Assert(completeness != null,
-                "automatic matching must expose one shared completeness predicate for initial and residual searches");
+                "automatic matching must expose one shared completed-provider predicate for initial and residual searches");
 
             var unique = new DanmuMatchCandidate
             {
@@ -652,6 +652,7 @@ namespace Emby.Plugin.Danmu.RegressionTests
             var incomplete = new DanmuMatchSearchResult
             {
                 IsComplete = false,
+                CompletedProviderCount = 1,
                 Candidates = new List<DanmuMatchCandidate> { unique },
                 CompletionDiagnostics = new List<DanmuSearchCompletionDiagnostic>
                 {
@@ -659,12 +660,32 @@ namespace Emby.Plugin.Danmu.RegressionTests
                     new DanmuSearchCompletionDiagnostic { Provider = "Bilibili", Status = "unstarted", Cancelled = true },
                 },
             };
-            Assert(!(bool)completeness.Invoke(null, new object[] { incomplete }),
-                "a unique partial candidate must remain unusable after any timed-out or unstarted planned call");
+            Assert((bool)completeness.Invoke(null, new object[] { incomplete }),
+                "a unique completed-provider candidate must remain usable after a sibling provider fault");
+
+            var allFailed = new DanmuMatchSearchResult
+            {
+                IsComplete = false,
+                CompletionDiagnostics = new List<DanmuSearchCompletionDiagnostic>
+                {
+                    new DanmuSearchCompletionDiagnostic { Provider = "Bilibili", Status = "failed" },
+                },
+            };
+            Assert(!(bool)completeness.Invoke(null, new object[] { allFailed }),
+                "all-provider failure must stop before candidate selection, binding, or download");
+
+            var cancelled = new DanmuMatchSearchResult
+            {
+                CompletedProviderCount = 1,
+                WasCancelled = true,
+            };
+            Assert(!(bool)completeness.Invoke(null, new object[] { cancelled }),
+                "parent or user cancellation must override completed-provider coverage");
 
             var complete = new DanmuMatchSearchResult
             {
                 IsComplete = true,
+                CompletedProviderCount = 1,
                 Candidates = new List<DanmuMatchCandidate> { unique },
             };
             Assert((bool)completeness.Invoke(null, new object[] { complete }) &&
@@ -676,7 +697,7 @@ namespace Emby.Plugin.Danmu.RegressionTests
             var automatic = File.ReadAllText(Path.Combine(repositoryRoot, "LibraryManagerEventsHelper.cs"))
                 .Replace("\r\n", "\n");
             var initialGuard = automatic.IndexOf(
-                "if (!IsCompleteAutomaticSearch(search))\n                            {\n                                LogIncompleteAutomaticSearch(originalSeasonName, \"season\", search);\n                                continue;",
+                "if (!CanUseAutomaticSearch(search))\n                            {\n                                LogIncompleteAutomaticSearch(originalSeasonName, \"season\", search);\n                                continue;",
                 StringComparison.Ordinal);
             var initialSelection = automatic.IndexOf(
                 "selectedCandidate = DanmuMatchScorer.SelectAutoCandidate(search.CanonicalCandidates);",
@@ -691,18 +712,18 @@ namespace Emby.Plugin.Danmu.RegressionTests
                 "var outcome = await DownloadEpisodeForProgress(episode, exact, sourceScraper, false, 1)",
                 StringComparison.Ordinal);
             var movieGuard = automatic.IndexOf(
-                "if (!IsCompleteAutomaticSearch(movieSearch))",
+                "if (!CanUseAutomaticSearch(movieSearch))",
                 StringComparison.Ordinal);
             var movieSelection = automatic.IndexOf(
                 "selectedMovieCandidate = DanmuMatchScorer.SelectAutoCandidate(movieSearch.CanonicalCandidates);",
                 StringComparison.Ordinal);
             Assert(initialGuard >= 0 && initialGuard < initialSelection,
-                "initial automatic Season search must reject incomplete coverage before selecting a candidate");
+                "initial automatic Season search must reject missing completed-provider coverage before selecting a candidate");
             Assert(residualGuard >= 0 && residualGuard < residualSelection && residualSelection < firstDownload &&
                    automatic.Substring(residualGuard, residualSelection - residualGuard).Contains("return false;"),
-                "an incomplete residual search must abort deterministically before selection, binding, or any file download");
+                "a residual search without completed-provider coverage must abort before selection, binding, or any file download");
             Assert(movieGuard >= 0 && movieGuard < movieSelection,
-                "automatic Movie search must reject incomplete coverage before selecting, binding, or downloading a partial candidate");
+                "automatic Movie search without completed-provider coverage must reject selection, binding, or downloading");
         }
 
         private static void PreservesDirectMetadataAcrossRemoveReplacementAndRestore()

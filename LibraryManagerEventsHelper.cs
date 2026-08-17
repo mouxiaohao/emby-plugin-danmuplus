@@ -593,7 +593,7 @@ namespace Emby.Plugin.Danmu
                                 {
                                     var movieSearch = await DanmuMatchSearchEngine.SearchMovieAsync(
                                         enabledScrapers, currentItem, null, _logger).ConfigureAwait(false);
-                                    if (!IsCompleteAutomaticSearch(movieSearch))
+                                    if (!CanUseAutomaticSearch(movieSearch))
                                     {
                                         LogIncompleteAutomaticSearch(currentItem.Name, "movie", movieSearch);
                                     }
@@ -1000,7 +1000,7 @@ namespace Emby.Plugin.Danmu
                                 continue;
                             }
 
-                            if (!IsCompleteAutomaticSearch(search))
+                            if (!CanUseAutomaticSearch(search))
                             {
                                 LogIncompleteAutomaticSearch(originalSeasonName, "season", search);
                                 continue;
@@ -1202,7 +1202,7 @@ namespace Emby.Plugin.Danmu
                     new[] { residualSeasonOriginalTitle }).ConfigureAwait(false);
                 if (!SeasonPlanGenerationCoordinator.Shared.IsCurrent(seasonId, automaticGeneration))
                     return false;
-                if (!IsCompleteAutomaticSearch(search))
+                if (!CanUseAutomaticSearch(search))
                 {
                     LogIncompleteAutomaticSearch(season.Name, "residual-range", search);
                     // Plan construction precedes every file write.  Aborting
@@ -1450,9 +1450,9 @@ namespace Emby.Plugin.Danmu
             return snapshot;
         }
 
-        internal static bool IsCompleteAutomaticSearch(DanmuMatchSearchResult search)
+        internal static bool CanUseAutomaticSearch(DanmuMatchSearchResult search)
         {
-            return search != null && search.IsComplete;
+            return search != null && !search.WasCancelled && search.HasCompletedProviders;
         }
 
         private static bool IsDistinctSeasonIdentity(
@@ -1473,6 +1473,14 @@ namespace Emby.Plugin.Danmu
             string searchScope,
             DanmuMatchSearchResult search)
         {
+            if (search?.WasCancelled == true)
+            {
+                _logger.LogInformation(
+                    "[SmartMatch] Automatic {0} search was cancelled; no binding or download will run. season={1}",
+                    searchScope,
+                    seasonName);
+                return;
+            }
             var diagnostics = search?.CompletionDiagnostics ?? new List<DanmuSearchCompletionDiagnostic>();
             var summary = string.Join(", ", diagnostics
                 .Where(item => item != null &&
@@ -1480,7 +1488,7 @@ namespace Emby.Plugin.Danmu
                 .Select(item => (item.Provider ?? string.Empty) + ":" + (item.Status ?? string.Empty))
                 .Distinct(StringComparer.OrdinalIgnoreCase));
             _logger.LogInformation(
-                "[SmartMatch] Automatic {0} search incomplete; no binding or download will run. season={1}, diagnostics={2}",
+                "[SmartMatch] Automatic {0} search has no completed-provider coverage; no binding or download will run. season={1}, diagnostics={2}",
                 searchScope,
                 seasonName,
                 summary);

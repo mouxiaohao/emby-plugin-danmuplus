@@ -129,7 +129,7 @@ namespace Emby.Plugin.Danmu.R3SearchQualityRegression
                     "one punch man", null)
                 .GetAwaiter().GetResult();
             Assert(partial.CanonicalCandidates.Any(candidate => candidate.Id == "dandan-s3") &&
-                partial.Decision == "partial-manual" && partial.SelectedCandidate == null &&
+                partial.HasCompletedProviders && partial.Decision == "manual" && partial.SelectedCandidate == null &&
                 partial.CompletionDiagnostics.Any(diagnostic => diagnostic.Status == "failed"),
                 "manual custom search must isolate provider failures without promoting a low-confidence candidate");
         }
@@ -186,12 +186,83 @@ namespace Emby.Plugin.Danmu.R3SearchQualityRegression
                     new AbstractScraper[] { completed, failed }, "SPY x FAMILY", "Season 1", 2022, 25,
                     null, null, policy, CancellationToken.None)
                 .GetAwaiter().GetResult();
-            Assert(!partial.IsComplete && partial.Decision == "partial-confident" &&
+            Assert(!partial.IsComplete && partial.HasCompletedProviders &&
+                   partial.CompletedProviderIds.SequenceEqual(new[] { "completed" }) &&
+                   partial.HasProviderLocalFaults && partial.Decision == "confident" &&
                    partial.SelectedCandidate?.Id == "winner" && partial.Candidates.Count == 1 &&
                    partial.Candidates[0].MatchScore == partial.Candidates[0].Score &&
                    partial.Candidates[0].ScoreOrigin == "search-confidence" &&
                    partial.CompletionDiagnostics.Any(diagnostic => diagnostic.Status == "failed"),
-                "provider-local failure must retain a confident completed-provider candidate and diagnostics");
+                "provider-local failure must retain a normally confident completed-provider candidate and diagnostics");
+
+            var ambiguous = DanmuMatchSearchEngine.SearchSeasonAsync(
+                    new AbstractScraper[]
+                    {
+                        new ResultScraper("ambiguous", new[]
+                        {
+                            Info("first", "SPY x FAMILY", "动漫", 25, 2022),
+                            Info("second", "SPY x FAMILY", "动漫", 25, 2022),
+                        }),
+                        failed,
+                    }, "SPY x FAMILY", "Season 1", 2022, 25, null, null, policy, CancellationToken.None)
+                .GetAwaiter().GetResult();
+            Assert(ambiguous.HasCompletedProviders && ambiguous.SelectedCandidate == null &&
+                   ambiguous.Decision == "manual" && ambiguous.CanonicalCandidates.Count == 2,
+                "a provider fault must not turn an ambiguous completed-provider result into an automatic match");
+
+            var allFailed = DanmuMatchSearchEngine.SearchSeasonAsync(
+                    new AbstractScraper[] { new ThrowingScraper("failed-only") },
+                    "SPY x FAMILY", "Season 1", 2022, 25, null, null, policy, CancellationToken.None)
+                .GetAwaiter().GetResult();
+            Assert(!allFailed.HasCompletedProviders && allFailed.HasProviderLocalFaults &&
+                   allFailed.Decision == "retryable-incomplete" && allFailed.SelectedCandidate == null,
+                "all-provider failure must remain retryable and never select a candidate");
+
+            var selfCancelled = DanmuMatchSearchEngine.SearchSeasonAsync(
+                    new AbstractScraper[] { new SelfCancellingScraper("self-cancelled") },
+                    "SPY x FAMILY", "Season 1", 2022, 25, null, null, policy, CancellationToken.None)
+                .GetAwaiter().GetResult();
+            Assert(!selfCancelled.WasCancelled && selfCancelled.HasProviderLocalFaults &&
+                   !selfCancelled.HasCompletedProviders && selfCancelled.Decision == "retryable-incomplete",
+                "a provider-only cancellation without parent cancellation must remain a retryable provider-local fault");
+
+            var providerPartial = DanmuMatchSearchEngine.SearchSeasonAsync(
+                    new AbstractScraper[] { new PartialDiagnosticScraper("partial", new[]
+                    {
+                        Info("partial-winner", "SPY x FAMILY", "动漫", 25, 2022),
+                    }) }, "SPY x FAMILY", "Season 1", 2022, 25, null, null, policy, CancellationToken.None)
+                .GetAwaiter().GetResult();
+            Assert(providerPartial.HasCompletedProviders && !providerPartial.IsComplete &&
+                   providerPartial.HasProviderLocalFaults && providerPartial.SelectedCandidate?.Id == "partial-winner" &&
+                   providerPartial.Decision == "confident" &&
+                   providerPartial.CompletionDiagnostics.Any(diagnostic => diagnostic.Status == "partial_failure"),
+                "a provider-native partial failure must retain its completed high-confidence candidate");
+
+            var delayedProvider = new TaskCompletionSource<List<ScraperSearchInfo>>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            var timeoutPolicy = new BoundedSearchPolicy(new BoundedSearchPolicyOptions(
+                TimeSpan.FromMilliseconds(20), TimeSpan.FromMilliseconds(200), TimeSpan.FromMilliseconds(200)));
+            var timedOutSibling = DanmuMatchSearchEngine.SearchSeasonAsync(
+                    new AbstractScraper[]
+                    {
+                        new ResultScraper("timely", new[] { Info("timely-winner", "SPY x FAMILY", "动漫", 25, 2022) }),
+                        new DeferredScraper("timed-out", delayedProvider),
+                    }, "SPY x FAMILY", "Season 1", 2022, 25, null, null, timeoutPolicy, CancellationToken.None)
+                .GetAwaiter().GetResult();
+            delayedProvider.TrySetResult(new List<ScraperSearchInfo>());
+            Assert(timedOutSibling.HasCompletedProviders && !timedOutSibling.IsComplete &&
+                   timedOutSibling.HasProviderLocalFaults && timedOutSibling.SelectedCandidate?.Id == "timely-winner" &&
+                   timedOutSibling.Decision == "confident" &&
+                   timedOutSibling.CompletionDiagnostics.Any(diagnostic => diagnostic.Status == "timed_out"),
+                "a ProviderTimedOut sibling must not make a completed high-confidence candidate provisional");
+
+            var completedEmpty = DanmuMatchSearchEngine.SearchSeasonAsync(
+                    new AbstractScraper[] { new ResultScraper("empty", Array.Empty<ScraperSearchInfo>()) },
+                    "SPY x FAMILY", "Season 1", 2022, 25, null, null, policy, CancellationToken.None)
+                .GetAwaiter().GetResult();
+            Assert(completedEmpty.HasCompletedProviders && completedEmpty.IsComplete &&
+                   completedEmpty.Decision == "no_match" && completedEmpty.SelectedCandidate == null,
+                "a normally completed empty provider result must remain an ordinary no-match result");
 
             using (var cancelled = new CancellationTokenSource())
             {
@@ -200,8 +271,25 @@ namespace Emby.Plugin.Danmu.R3SearchQualityRegression
                         new AbstractScraper[] { completed }, "SPY x FAMILY", "Season 1", 2022, 25,
                         null, null, policy, cancelled.Token)
                     .GetAwaiter().GetResult();
-                Assert(result.WasCancelled && result.Decision == "cancelled" && result.SelectedCandidate == null,
+                Assert(result.WasCancelled && !result.HasProviderLocalFaults &&
+                       result.Decision == "cancelled" && result.SelectedCandidate == null,
                     "whole-operation cancellation must never expose a confirmable provisional candidate");
+            }
+
+            using (var cancelledAfterCompletion = new CancellationTokenSource())
+            {
+                var result = DanmuMatchSearchEngine.SearchSeasonAsync(
+                        new AbstractScraper[]
+                        {
+                            new CancellingSuccessfulScraper("completed-before-cancel", new[]
+                            {
+                                Info("completed-before-cancel", "SPY x FAMILY", "动漫", 25, 2022),
+                            }, cancelledAfterCompletion),
+                        }, "SPY x FAMILY", "Season 1", 2022, 25, null, null, policy,
+                        cancelledAfterCompletion.Token)
+                    .GetAwaiter().GetResult();
+                Assert(result.WasCancelled && result.SelectedCandidate == null && result.Decision == "cancelled",
+                    "parent cancellation after a provider completes must still clear automatic selection");
             }
 
             using (var childBudget = new CancellationTokenSource())
@@ -293,6 +381,70 @@ namespace Emby.Plugin.Danmu.R3SearchQualityRegression
             public ThrowingScraper(string id) : base(id, Array.Empty<ScraperSearchInfo>()) { }
             public override Task<List<ScraperSearchInfo>> SearchForApi(string keyword) =>
                 throw new InvalidOperationException("fixture failure");
+        }
+
+        private sealed class PartialDiagnosticScraper : ResultScraper
+        {
+            public PartialDiagnosticScraper(string id, IEnumerable<ScraperSearchInfo> results) : base(id, results) { }
+
+            public override async Task<ScraperSearchResult> SearchForApiWithDiagnostics(
+                string keyword, CancellationToken cancellationToken)
+            {
+                return new ScraperSearchResult
+                {
+                    Candidates = await SearchForApi(keyword).ConfigureAwait(false),
+                    Diagnostics = new List<ScraperSearchDiagnostic>
+                    {
+                        new ScraperSearchDiagnostic { Status = "partial_failure", Message = "fixture partial failure" },
+                    },
+                };
+            }
+
+        }
+
+        private sealed class SelfCancellingScraper : ResultScraper
+        {
+            public SelfCancellingScraper(string id) : base(id, Array.Empty<ScraperSearchInfo>()) { }
+
+            public override Task<List<ScraperSearchInfo>> SearchForApi(string keyword)
+            {
+                var cancellation = new CancellationTokenSource();
+                cancellation.Cancel();
+                return Task.FromCanceled<List<ScraperSearchInfo>>(cancellation.Token);
+            }
+        }
+
+        private sealed class DeferredScraper : ResultScraper
+        {
+            private readonly TaskCompletionSource<List<ScraperSearchInfo>> _result;
+
+            public DeferredScraper(string id, TaskCompletionSource<List<ScraperSearchInfo>> result)
+                : base(id, Array.Empty<ScraperSearchInfo>())
+            {
+                _result = result;
+            }
+
+            public override Task<List<ScraperSearchInfo>> SearchForApi(string keyword) => _result.Task;
+        }
+
+        private sealed class CancellingSuccessfulScraper : ResultScraper
+        {
+            private readonly CancellationTokenSource _cancellation;
+
+            public CancellingSuccessfulScraper(
+                string id,
+                IEnumerable<ScraperSearchInfo> results,
+                CancellationTokenSource cancellation) : base(id, results)
+            {
+                _cancellation = cancellation;
+            }
+
+            public override Task<List<ScraperSearchInfo>> SearchForApi(string keyword)
+            {
+                var result = base.SearchForApi(keyword);
+                _cancellation.Cancel();
+                return result;
+            }
         }
     }
 }

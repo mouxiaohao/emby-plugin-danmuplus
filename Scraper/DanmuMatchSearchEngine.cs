@@ -273,7 +273,7 @@ namespace Emby.Plugin.Danmu.Scraper
             foreach (var alias in aliases?.BuildSearchPlan(seriesOrMovieName) ?? Enumerable.Empty<TmdbAliasTitle>())
             {
                 reachedThreshold = await SearchTmdbTermAsync(
-                    dandan, alias?.Title, aliasCandidates, attemptedTerms, sourceOrder,
+                    result, dandan, alias?.Title, aliasCandidates, attemptedTerms, sourceOrder,
                     seriesOrMovieName, seasonName, targetSeasonNumber, expectedYear,
                     expectedEpisodes, isMovie, logger, executionCancellationToken).ConfigureAwait(false);
                 if (executionCancellationToken.IsCancellationRequested)
@@ -303,7 +303,7 @@ namespace Emby.Plugin.Danmu.Scraper
                 }
 
                 reachedThreshold = await SearchTmdbTermAsync(
-                    dandan,
+                    result, dandan,
                     TmdbAliasClient.GetLocalizedPrimaryTitle(englishDetails, isMovie),
                     aliasCandidates, attemptedTerms, sourceOrder, seriesOrMovieName, seasonName,
                     targetSeasonNumber, expectedYear, expectedEpisodes, isMovie, logger,
@@ -330,7 +330,7 @@ namespace Emby.Plugin.Danmu.Scraper
                 }
 
                 await SearchTmdbTermAsync(
-                    dandan, japaneseTitle, aliasCandidates, attemptedTerms, sourceOrder,
+                    result, dandan, japaneseTitle, aliasCandidates, attemptedTerms, sourceOrder,
                     seriesOrMovieName, seasonName, targetSeasonNumber, expectedYear,
                     expectedEpisodes, isMovie, logger, executionCancellationToken).ConfigureAwait(false);
             }
@@ -339,6 +339,7 @@ namespace Emby.Plugin.Danmu.Scraper
         }
 
         private static async Task<bool> SearchTmdbTermAsync(
+            DanmuMatchSearchResult result,
             AbstractScraper dandan,
             string term,
             List<DanmuMatchCandidate> aliasCandidates,
@@ -374,6 +375,7 @@ namespace Emby.Plugin.Danmu.Scraper
                 {
                     searchResults = await dandan.SearchForApi(term, cancellationToken).ConfigureAwait(false);
                 }
+                RegisterCompletedProvider(result, dandan);
 
                 var sources = (searchResults ?? new List<ScraperSearchInfo>())
                     .Where(source => source != null && !string.IsNullOrWhiteSpace(source.Id) &&
@@ -518,6 +520,7 @@ namespace Emby.Plugin.Danmu.Scraper
                 {
                     case BoundedSearchExecutionStatus.Completed:
                         var providerResult = execution.Result ?? new ScraperSearchResult();
+                        outcome.HasCompletedCall = true;
                         foreach (var searchInfo in providerResult.Candidates)
                         {
                             if (include(searchInfo))
@@ -582,10 +585,19 @@ namespace Emby.Plugin.Danmu.Scraper
             foreach (var outcome in outcomes ?? Enumerable.Empty<ProviderSearchOutcome>())
             {
                 result.CompletionDiagnostics.AddRange(outcome.Diagnostics);
+                if (outcome.HasCompletedCall)
+                {
+                    RegisterCompletedProvider(result, outcome.Scraper);
+                }
                 if (outcome.Diagnostics.Any(diagnostic =>
                     !string.Equals(diagnostic.Status, "completed", StringComparison.OrdinalIgnoreCase)))
                 {
                     result.IsComplete = false;
+                }
+                if (outcome.Diagnostics.Any(diagnostic => IsProviderLocalFault(
+                    diagnostic, result.WasCancelled)))
+                {
+                    result.HasProviderLocalFaults = true;
                 }
 
                 foreach (var diagnostic in outcome.Diagnostics.Where(diagnostic =>
@@ -614,6 +626,41 @@ namespace Emby.Plugin.Danmu.Scraper
             }
 
             return sources;
+        }
+
+        internal static void RegisterCompletedProvider(
+            DanmuMatchSearchResult result,
+            AbstractScraper scraper)
+        {
+            var providerId = scraper?.ProviderId;
+            if (result == null || string.IsNullOrWhiteSpace(providerId) ||
+                result.CompletedProviderIds.Any(id =>
+                    string.Equals(id, providerId, StringComparison.OrdinalIgnoreCase)))
+            {
+                return;
+            }
+
+            result.CompletedProviderIds.Add(providerId);
+            result.CompletedProviderCount++;
+        }
+
+        private static bool IsProviderLocalFault(
+            DanmuSearchCompletionDiagnostic diagnostic,
+            bool parentOrUserCancelled)
+        {
+            if (diagnostic == null ||
+                string.Equals(diagnostic.Status, "completed", StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            if (parentOrUserCancelled && (diagnostic.Cancelled ||
+                string.Equals(diagnostic.Status, "unstarted", StringComparison.OrdinalIgnoreCase)))
+            {
+                return false;
+            }
+
+            return !string.Equals(diagnostic.Status, "unstarted", StringComparison.OrdinalIgnoreCase);
         }
 
         private static List<DanmuMatchCandidate> ScoreMovieCandidates(
@@ -764,7 +811,7 @@ namespace Emby.Plugin.Danmu.Scraper
             }
 
             var selected = DanmuMatchScorer.SelectAutoCandidate(result.CanonicalCandidates);
-            if (result.IsComplete)
+            if (result.HasCompletedProviders)
             {
                 result.Decision = selected != null
                     ? "confident"
@@ -773,15 +820,15 @@ namespace Emby.Plugin.Danmu.Scraper
                 return;
             }
 
-            if (result.CanonicalCandidates.Count == 0)
+            if (!result.IsComplete)
             {
                 result.Decision = "retryable-incomplete";
                 result.SelectedCandidate = null;
                 return;
             }
 
-            result.Decision = selected != null ? "partial-confident" : "partial-manual";
-            result.SelectedCandidate = selected;
+            result.Decision = "no_match";
+            result.SelectedCandidate = null;
         }
 
         private static string BuildKey(string providerId, string id)
@@ -815,6 +862,7 @@ namespace Emby.Plugin.Danmu.Scraper
                 new Dictionary<string, DiscoveredSearchInfo>(StringComparer.OrdinalIgnoreCase);
             public List<DanmuSearchCompletionDiagnostic> Diagnostics { get; } =
                 new List<DanmuSearchCompletionDiagnostic>();
+            public bool HasCompletedCall { get; set; }
 
             public void AddDiagnostic(
                 string status,
@@ -851,6 +899,10 @@ namespace Emby.Plugin.Danmu.Scraper
         public List<string> SearchErrors { get; set; } = new List<string>();
         public List<DanmuSearchCompletionDiagnostic> CompletionDiagnostics { get; set; } =
             new List<DanmuSearchCompletionDiagnostic>();
+        public int CompletedProviderCount { get; set; }
+        public List<string> CompletedProviderIds { get; set; } = new List<string>();
+        public bool HasCompletedProviders => CompletedProviderCount > 0;
+        public bool HasProviderLocalFaults { get; set; }
         public bool IsComplete { get; set; } = true;
         public bool WasCancelled { get; set; }
         public bool UsedTmdbAlias { get; set; }

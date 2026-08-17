@@ -627,6 +627,25 @@ async function main() {
     assert(compositeHintDialog.body.querySelectorAll(".danmuCompositeHint").length === 0,
         "a result without mapping cards must not show the mapping hint");
     compositeHintDialog.forceClose();
+    const providerFailureDialog = hooks.openDialog("provider failure isolation");
+    const diagnosedComposite = Object.assign({}, groupOnlySeason, {
+        SearchCompletionDiagnostics: [{ Provider: "Bilibili", Status: "failed", Message: "fixture fault" }]
+    });
+    hooks.renderSeriesPicker(providerFailureDialog,
+        { Id: "series", Type: "Series", Name: "provider failure fixture" }, [diagnosedComposite], {}, {});
+    assert(allVisibleText(providerFailureDialog.body).includes("搜索诊断：Bilibili 失败") &&
+        providerFailureDialog.body.querySelectorAll(".danmuVirtualSeason").length === 2,
+        "a failed provider must remain a visible diagnostic without blocking usable successful-provider mappings");
+    hooks.renderCandidatePicker(providerFailureDialog,
+        { Id: "season", Type: "Season", Name: "provider failure fixture" },
+        { SeasonId: "candidate-s1", SeasonNumber: 1, SeasonName: "Candidate Season",
+            SearchCompletionDiagnostics: [{ Provider: "Bilibili", Status: "failed" }],
+            Candidates: [{ Site: "Dandan", SiteName: "弹弹Play", Id: "candidate", Name: "Usable candidate",
+                Year: 2024, EpisodeSize: 12, Category: "动漫" }] }, "");
+    assert(allVisibleText(providerFailureDialog.body).includes("搜索诊断：Bilibili 失败") &&
+        providerFailureDialog.body.querySelectorAll(".danmuCandidate").length === 1,
+        "a failed provider diagnostic must not block a completed-provider candidate from remaining selectable");
+    providerFailureDialog.forceClose();
     const unmatchedScoreDialog = hooks.openDialog("unmatched score visibility");
     hooks.renderCompositeSeasonSummary(unmatchedScoreDialog,
         { Id: "series", Type: "Series", Name: "score fixture" },

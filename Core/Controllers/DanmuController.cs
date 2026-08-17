@@ -1298,15 +1298,13 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 result.Message = "The interactive search was cancelled; its provisional candidates cannot be confirmed.";
                 return result;
             }
-            if (!search.IsComplete)
+            if (!search.HasCompletedProviders && !search.IsComplete)
             {
                 result.Status = "incomplete";
                 result.DecisionReason = string.IsNullOrWhiteSpace(search.Decision)
                     ? "retryable-incomplete" : search.Decision;
-                result.Message = selected == null
-                    ? "Some provider searches were incomplete; choose a completed-provider candidate manually or retry."
-                    : "Some provider searches were incomplete; review the provisional mapping before download.";
-                if (selected == null) return result;
+                result.Message = "No provider search completed; retry before selecting a candidate.";
+                return result;
             }
             if (selected != null)
             {
@@ -1317,8 +1315,8 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 result.SelectedSite = selected.Site;
                 result.SelectedSiteName = selected.SiteName;
                 result.MatchOrigin = search.UsedTmdbAlias ? "tmdb-alias" : "scored";
-                result.DecisionReason = search.IsComplete
-                    ? (search.UsedTmdbAlias ? "tmdb-alias-high-confidence" : "confident-site-priority") : "partial-confident";
+                result.DecisionReason = search.UsedTmdbAlias
+                    ? "tmdb-alias-high-confidence" : "confident-site-priority";
             }
             else if (result.Candidates.Count == 0)
             {
@@ -1539,18 +1537,13 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 result.Message = "The interactive search was cancelled; its provisional candidates cannot be confirmed.";
                 return result;
             }
-            if (!search.IsComplete)
+            if (!search.HasCompletedProviders && !search.IsComplete)
             {
                 result.Status = "incomplete";
                 result.DecisionReason = string.IsNullOrWhiteSpace(search.Decision)
                     ? "retryable-incomplete" : search.Decision;
-                result.Message = selected == null
-                    ? "Some provider searches were incomplete; choose a completed-provider candidate manually or retry."
-                    : "Some provider searches were incomplete; review the provisional Episode mapping before download.";
-                if (selected == null)
-                {
-                    return result;
-                }
+                result.Message = "No provider search completed; retry before selecting a candidate.";
+                return result;
             }
 
             if (selected != null)
@@ -1562,8 +1555,8 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 result.SelectedSite = selected.Site;
                 result.SelectedSiteName = selected.SiteName;
                 result.MatchOrigin = search.UsedTmdbAlias ? "tmdb-alias" : "scored";
-                result.DecisionReason = search.IsComplete
-                    ? (search.UsedTmdbAlias ? "tmdb-alias-high-confidence" : "confident-site-priority") : "partial-confident";
+                result.DecisionReason = search.UsedTmdbAlias
+                    ? "tmdb-alias-high-confidence" : "confident-site-priority";
                 if (!metadataOnly)
                 {
                     await PopulateCompositePreviewIfRequired(latest, result, selected, "scored",
@@ -1712,14 +1705,28 @@ namespace Emby.Plugin.Danmu.Core.Controllers
             StampSeasonCandidateEvidence(latest, response.Candidates);
             response.SearchErrors.AddRange(search.SearchErrors);
             response.SearchCompletionDiagnostics.AddRange(search.CompletionDiagnostics);
-            if (!search.IsComplete)
+            if (search.WasCancelled)
+            {
+                response.Status = "cancelled";
+                response.AutoSelected = false;
+                response.DecisionReason = "cancelled";
+                response.Message = "Temporary range search was cancelled; the draft was not changed.";
+                return response;
+            }
+            if (!search.HasCompletedProviders && !search.IsComplete)
             {
                 response.Status = "retryable";
                 response.AutoSelected = false;
                 response.DecisionReason = "search-incomplete";
                 response.Message = "Temporary range search did not complete; retry without changing the draft.";
                 response.SearchErrors.Add("search-incomplete");
+                return response;
             }
+            response.Status = response.Candidates.Count == 0 ? "no_match" : "ambiguous";
+            response.DecisionReason = response.Candidates.Count == 0 ? "no-candidates" : "manual-selection-required";
+            response.Message = response.Candidates.Count == 0
+                ? "Temporary range search returned no candidates."
+                : "Choose a candidate to validate the temporary range mapping.";
             return response;
         }
 
