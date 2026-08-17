@@ -16,10 +16,14 @@ credentials.
 - Release-preparation commit: `6e4c3c09df81150a3fa0d49fe9d5f11dc405d490`
 - Post-slice Season score/source-surplus commit: `872aa157a39cd1b235b52f7a7b630305e7201a3d`
 - Post-slice TMDB alias terminal-marker correction: `6d20fc0a7ac0027aea0309ac78b4f316256f7516`
+- Post-slice strict full-title Season fallback: `b8b5ab26aeaf2eae26025eba5ebe4e8c61aa4f85`
 - No push, tag, merge, GitHub Release, or package publication is authorized.
 - Synology/Emby backup, replacement, restart, and live checks are user-authorized.
   The final V27 candidate was backed up, deployed, read back, and live-validated
   under that authorization without initiating a download.
+- That historical authorization and result apply to the previously deployed
+  `6d20fc0` candidate. The new `b8b5ab2` candidate has not been deployed and
+  requires fresh authorization before any server change.
 
 ## l1-l10 commit map
 
@@ -77,9 +81,21 @@ All .NET commands must run sequentially to avoid shared output-file contention.
 | Credential-safe artifact audit | n/a | PASS | Source, staged implementation, and final V27 review package contain no private addresses or credential assignments |
 | l1-l10 independent inverse matrix | Release/focused | WAIVED | User requested live deployment testing first; no inverse result claimed |
 
-## Artifact and hash placeholders
+## Current local undeployed candidate
 
-The Release artifacts below were rebuilt from the reviewed post-slice commit.
+The following DLL was rebuilt from the committed `b8b5ab2` source after the
+final review. It is a local candidate only and is not part of the live state
+recorded below.
+
+| Artifact | Repository-relative location | Size | SHA-256 |
+| --- | --- | --- | --- |
+| Release DLL | `bin/Release/netstandard2.0/Emby.Plugin.Danmu.dll` | 1633792 | `c6bc151af19f95e69740f4516a61c61c492bea9064c0fa2e9f8df1c550c1778c` |
+
+## Previously deployed V27 artifact and hashes
+
+The artifacts below document the previously deployed and live-validated V27
+candidate. They are retained as historical rollback evidence and are not the
+current local `b8b5ab2` candidate.
 
 | Artifact | Repository-relative location | Size | SHA-256 |
 | --- | --- | --- | --- |
@@ -123,9 +139,12 @@ The Release artifacts below were rebuilt from the reviewed post-slice commit.
 ## Final sign-off placeholders
 
 - Release-preparation commit: `6e4c3c09df81150a3fa0d49fe9d5f11dc405d490`
-- Reviewed candidate commit: `6d20fc0a7ac0027aea0309ac78b4f316256f7516`
-- Independent reviewer findings: final Sol-high review reported no P0 or P1 finding and approved deployment
-- Full local verification result: PASS; one initial `--no-restore` missing-assets invocation was rerun successfully after normal restore
-- Local package result: PASS; six allowlisted final V27 files, checksum readback, source/package equality, and credential audit verified
+- Reviewed local candidate commit: `b8b5ab26aeaf2eae26025eba5ebe4e8c61aa4f85`
+- Independent reviewer findings: final Sol-high review reported no P0, P1, or P2 finding and approved local submission; it did not authorize deployment
+- Full local verification result: PASS; TitleFidelity, TMDB alias, SearchTermPolicy, R3 search quality, complete backend regression, clean sequential Release build, strict OpenSpec validation, and scope/credential/diff checks passed
+- Current local DLL: 1633792 bytes; SHA-256 `c6bc151af19f95e69740f4516a61c61c492bea9064c0fa2e9f8df1c550c1778c`
+- Current `b8b5ab2` package result: NOT CREATED; the committed DLL and hash are recorded locally without repackaging or publication
+- Historical V27 local package result: PASS; six allowlisted files, checksum readback, source/package equality, and credential audit verified
 - External publication approval: not granted
-- Live validation result: PASS; final V27 deployed and read back, rollback backup verified, whole-Series and single-Season previews passed, and no download was initiated
+- Current `b8b5ab2` live validation result: NOT RUN; fresh deployment authorization is required
+- Historical `6d20fc0` live validation result: PASS; final V27 deployed and read back, rollback backup verified, whole-Series and single-Season previews passed, and no download was initiated

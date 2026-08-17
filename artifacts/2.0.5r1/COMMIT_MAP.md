@@ -102,3 +102,12 @@ and rollback boundaries without claiming that an inverse tree was exercised.
 - Checks: TMDB alias; TitleFidelity; SearchTermPolicy; R3 search quality; main backend; composite-season planner; frontend syntax and full regression; clean Release build; strict OpenSpec; final Sol-high review; staged scope, secret-pattern, and diff checks.
 - Independent rollback: `git revert 6d20fc0a7ac0027aea0309ac78b4f316256f7516`
 - This correction refines `872aa157a39cd1b235b52f7a7b630305e7201a3d`; reverting it retains the `60/20/20/0` score and source-surplus notice while removing only the alias-continuation recovery.
+
+## Post-slice strict full-title Season fallback
+
+- Commit: `b8b5ab26aeaf2eae26025eba5ebe4e8c61aa4f85`
+- Behavior: When one concrete library Season title and one source-title item both lose their complete Season residual after the same matched parent is removed by loose normalization, strict complete-title NFKC fidelity equality may supply the existing 20-point Season-name component. Parent-only titles, different symbols, conflicting Season markers, one-sided residuals, cross-channel evidence, l9 confidence, Season 1, and Movie scoring remain unchanged.
+- Checks: TitleFidelity; TMDB alias; SearchTermPolicy; R3 search quality; complete main backend regression; clean sequential Release build; strict OpenSpec validation; final Sol-high review with no P0, P1, or P2 finding; staged scope, secret-pattern, and diff checks.
+- Release DLL: 1633792 bytes; SHA-256 `c6bc151af19f95e69740f4516a61c61c492bea9064c0fa2e9f8df1c550c1778c`.
+- Independent rollback: `git revert b8b5ab26aeaf2eae26025eba5ebe4e8c61aa4f85`
+- This local candidate has not been pushed, published, or deployed. The previously deployed V27 pair remains unchanged until fresh authorization is granted.
