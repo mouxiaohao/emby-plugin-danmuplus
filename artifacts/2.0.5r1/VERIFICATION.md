@@ -81,17 +81,18 @@ All .NET commands must run sequentially to avoid shared output-file contention.
 | Credential-safe artifact audit | n/a | PASS | Source, staged implementation, and final V27 review package contain no private addresses or credential assignments |
 | l1-l10 independent inverse matrix | Release/focused | WAIVED | User requested live deployment testing first; no inverse result claimed |
 
-## Current local undeployed candidate
+## Current deployed strict-title candidate
 
 The following DLL was rebuilt from artifact source commit `68279e8`, the
-documentation-only child of the reviewed `b8b5ab2` implementation commit. It
-is a local candidate only and is not part of the live state recorded below.
+documentation-only child of the reviewed `b8b5ab2` implementation commit. The
+local artifact and deployed DLL were read back with the same hash during the
+authorized strict-title live validation.
 
 | Artifact | Repository-relative location | Size | SHA-256 |
 | --- | --- | --- | --- |
 | Release DLL | `bin/Release/netstandard2.0/Emby.Plugin.Danmu.dll` | 1633792 | `009f03c73b956057a1807e0c2122f6b0d111c9c68626ed613e52afc09f62c7a6` |
 
-## Previously deployed V27 artifact and hashes
+## Previous V27 rollback artifact and hashes
 
 The artifacts below document the previously deployed and live-validated V27
 candidate. They are retained as historical rollback evidence and are not the
@@ -123,11 +124,32 @@ current local `b8b5ab2` candidate.
 
 ## Authorized live validation
 
-- Deployed DLL SHA-256: `127d3ca0938d1307482cc7dd827353589221385b4061e9e13b628d65f239fe9f`.
+- Current deployed DLL SHA-256: `009f03c73b956057a1807e0c2122f6b0d111c9c68626ed613e52afc09f62c7a6`.
 - Deployed CustomCssJS configuration SHA-256: `552f384a3b4cc19785e8f39c0ce4e735930b16a9ab0b96b1fe9edfbc8b4e636b`.
 - Deployed plugin configuration SHA-256: `02519afd92022babacf9e6d516c44c0dde0117a2744593501d8cb29222536069`.
 - V27 installation marker count was exactly one; service health and the directly
   usable three-file rollback backup checksum readback passed after restart.
+- Emby 4.9.5.0 loaded `Emby.Plugin.Danmu, Version=2.0.5.1`; the bounded startup
+  log contained no Danmu load/DI error and the public health endpoint returned
+  HTTP 200 after replacement.
+- Single-Season preview for `妄想学生会` Season 2 returned the exact starred
+  Dandanplay title at 100 (`60 + 20 + 20 + 0`) and selected it automatically.
+  The markerless Dandanplay title carried source year 2010 against the library
+  Season year 2014, so it remained unpromoted at 60 rather than the provisional
+  80 expectation; this is the correct known-year-conflict result under the
+  frozen score contract.
+- Single-Season preview for Season 1 returned the markerless title at 100 and
+  selected it automatically, confirming that the pre-existing both-empty
+  residual rule still wins before the strict complete-title fallback.
+- Only `MatchPreview` was invoked for the strict-title checks; no download
+  endpoint was invoked.
+- The prior deployed DLL SHA-256
+  `127d3ca0938d1307482cc7dd827353589221385b4061e9e13b628d65f239fe9f`
+  remains in the freshly checksum-verified rollback set together with the
+  unchanged CustomCssJS and plugin configurations.
+
+Historical V27 validation retained for rollback context:
+
 - Whole-Series preview for Bookworm returned four Seasons and 52 local Episodes.
   S1 matched at 80; S2, S3, and S4 matched their corresponding Season titles at
   100; all four Seasons were selected. S4 alone displayed exactly one visible
@@ -147,5 +169,5 @@ current local `b8b5ab2` candidate.
 - Current `b8b5ab2` package result: NOT CREATED; the committed DLL and hash are recorded locally without repackaging or publication
 - Historical V27 local package result: PASS; six allowlisted files, checksum readback, source/package equality, and credential audit verified
 - External publication approval: not granted
-- Current `b8b5ab2` live validation result: NOT RUN; fresh deployment authorization is required
+- Current `b8b5ab2` live validation result: PASS; deployed hash readback, paired rollback checksum, Emby health/plugin load, Season 2 starred 100, markerless known-year-conflict 60, unchanged Season 1 100, and no-download checks passed
 - Historical `6d20fc0` live validation result: PASS; final V27 deployed and read back, rollback backup verified, whole-Series and single-Season previews passed, and no download was initiated

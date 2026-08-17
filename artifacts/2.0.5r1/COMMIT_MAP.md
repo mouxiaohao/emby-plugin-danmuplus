@@ -111,4 +111,4 @@ and rollback boundaries without claiming that an inverse tree was exercised.
 - Artifact source commit: `68279e8847d6de4d91a286ca51cf25c2f1fe1e1a`, the documentation-only child of the reviewed implementation commit.
 - Release DLL: 1633792 bytes; SHA-256 `009f03c73b956057a1807e0c2122f6b0d111c9c68626ed613e52afc09f62c7a6`.
 - Independent rollback: `git revert b8b5ab26aeaf2eae26025eba5ebe4e8c61aa4f85`
-- This local candidate has not been pushed, published, or deployed. The previously deployed V27 pair remains unchanged until fresh authorization is granted.
+- This candidate has not been pushed or published. Under fresh authorization it was deployed DLL-only and read back at the recorded hash; the V27 CustomCssJS and plugin configuration remained byte-identical, and a fresh checksum-verified three-file rollback set retains the previous DLL.
