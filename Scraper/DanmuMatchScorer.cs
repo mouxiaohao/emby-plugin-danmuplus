@@ -19,8 +19,6 @@ namespace Emby.Plugin.Danmu.Scraper
     {
         public const double SeasonCandidateTitleEligibilityFloor = 0.58;
         public const double AutomaticConfidenceThreshold = 0.90;
-        public const double FidelityBridgeBaseFloor = 0.85;
-        public const double FidelityBridgeBonus = 0.05;
 
         private static readonly Regex SeasonNumberRegex = new Regex(
             @"(?:第\s*[0-9一二三四五六七八九十百零〇两]+\s*季|season\s*\d+)",
@@ -451,25 +449,9 @@ namespace Emby.Plugin.Danmu.Scraper
             DanmuMatchCandidate candidate,
             IEnumerable<DanmuMatchCandidate> candidates)
         {
-            if (candidate == null || candidate.Score < FidelityBridgeBaseFloor ||
-                candidate.Score >= AutomaticConfidenceThreshold ||
-                candidate.Score + FidelityBridgeBonus < AutomaticConfidenceThreshold ||
-                candidate.FidelityTitleEvidence != 2)
-            {
-                return Clamp(candidate?.Score ?? 0);
-            }
-
-            var sameBaseProviderGroup = (candidates ?? Enumerable.Empty<DanmuMatchCandidate>())
-                .Where(peer => peer != null && peer.SourceOrder == candidate.SourceOrder &&
-                               peer.Score == candidate.Score)
-                .ToList();
-            var isUniqueSeasonExact = sameBaseProviderGroup.Count(peer =>
-                peer.FidelityTitleEvidence == 2) == 1;
-            var hasLowerFidelityPeer = sameBaseProviderGroup.Any(peer =>
-                peer.FidelityTitleEvidence < candidate.FidelityTitleEvidence);
-            return isUniqueSeasonExact && hasLowerFidelityPeer
-                ? AutomaticConfidenceThreshold
-                : Clamp(candidate.Score);
+            // Fidelity remains positive evidence for resolving an otherwise
+            // equal-score tie, but it never changes ordinary confidence.
+            return Clamp(candidate?.Score ?? 0);
         }
 
         public static string Normalize(string value)

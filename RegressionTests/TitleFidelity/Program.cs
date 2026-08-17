@@ -15,8 +15,8 @@ namespace Emby.Plugin.Danmu.TitleFidelityTests
             KeepsLooseNormalizationAndMismatchScoringUnchanged();
             AppliesEvidenceThroughMoviePrimaryAndSeasonParentPaths();
             SelectsStudentCouncilStarAndPreservesTrueTies();
-            BridgesOnlyUniqueSeasonExactCompetition();
-            PreservesThresholdClampProviderAndMovieBoundaries();
+            KeepsSubThresholdFidelityAtOrdinaryConfidence();
+            PreservesThresholdTieProviderAliasAndMovieBoundaries();
             SeparatesSeasonAndParentAliasRoles();
             Console.WriteLine("Title fidelity regression checks passed.");
             return 0;
@@ -180,7 +180,7 @@ namespace Emby.Plugin.Danmu.TitleFidelityTests
                 "a genuine same-provider evidence tie must remain ambiguous regardless of source order");
         }
 
-        private static void BridgesOnlyUniqueSeasonExactCompetition()
+        private static void KeepsSubThresholdFidelityAtOrdinaryConfidence()
         {
             const string localSeries = "妄想学生会";
             const string localSeason = "妄想学生会＊";
@@ -194,32 +194,36 @@ namespace Emby.Plugin.Danmu.TitleFidelityTests
 
             var markerless = Candidate("markerless", 0.85, 1);
             var starred = Candidate("starred", 0.85, 2);
-            Assert(DanmuMatchScorer.SelectAutoCandidate(new[] { markerless, starred }) == starred,
-                "a unique rank-2 Season exact match must bridge the live 0.85 tie");
-            Assert(markerless.MatchScore == 0.85 && starred.MatchScore == 0.90,
-                "only the unique rank-2 candidate should expose the bounded effective confidence");
+            Assert(DanmuMatchScorer.SelectAutoCandidate(new[] { markerless, starred }) == null &&
+                   markerless.MatchScore == 0.85 && starred.MatchScore == 0.85,
+                "a unique rank-2 Season exact match at 0.85 must remain below automatic confidence");
+            Assert(DanmuMatchScorer.GetEffectiveConfidence(starred, new[] { markerless, starred }) == 0.85 &&
+                   typeof(DanmuMatchScorer).GetField("FidelityBridgeBaseFloor") == null &&
+                   typeof(DanmuMatchScorer).GetField("FidelityBridgeBonus") == null,
+                "no fidelity bridge constant or effective-confidence promotion may remain");
 
-            var firstExact = Candidate("first-exact", 0.85, 2);
-            var secondExact = Candidate("second-exact", 0.85, 2);
+            var nearThreshold = Candidate("near-threshold", 0.89, 2);
+            var nearThresholdPeer = Candidate("near-threshold-peer", 0.89, 0);
+            Assert(DanmuMatchScorer.SelectAutoCandidate(new[] { nearThresholdPeer, nearThreshold }) == null &&
+                   nearThreshold.MatchScore == 0.89 && nearThresholdPeer.MatchScore == 0.89,
+                "fidelity must not promote an ordinary 0.89 score to the 0.90 threshold");
+
+            var firstExact = Candidate("first-exact", 0.90, 2);
+            var secondExact = Candidate("second-exact", 0.90, 2);
             Assert(DanmuMatchScorer.SelectAutoCandidate(new[] { firstExact, secondExact }) == null &&
-                   firstExact.MatchScore == 0.85 && secondExact.MatchScore == 0.85,
-                "two rank-2 exact candidates must remain ambiguous without a bridge");
+                   DanmuMatchScorer.SelectAutoCandidate(new[] { secondExact, firstExact }) == null &&
+                   firstExact.MatchScore == 0.90 && secondExact.MatchScore == 0.90,
+                "same-score candidates with the same fidelity must remain ambiguous regardless of input order");
 
+            var seasonExact = Candidate("season-exact", 0.90, 2);
             var parentExact = Candidate("parent-exact", 0.90, 1);
-            var noExact = Candidate("no-exact", 0.90, 0);
-            Assert(DanmuMatchScorer.SelectAutoCandidate(new[] { noExact, parentExact }) == parentExact &&
-                   parentExact.MatchScore == 0.90,
-                "rank-1 parent evidence is a positive tie-break but never receives the bridge bonus");
+            Assert(DanmuMatchScorer.SelectAutoCandidate(new[] { parentExact, seasonExact }) == seasonExact &&
+                   seasonExact.MatchScore == 0.90 && parentExact.MatchScore == 0.90,
+                "at the ordinary threshold, stronger fidelity must still resolve an equal-score tie");
         }
 
-        private static void PreservesThresholdClampProviderAndMovieBoundaries()
+        private static void PreservesThresholdTieProviderAliasAndMovieBoundaries()
         {
-            var below = Candidate("below", 0.8499, 2);
-            var belowPeer = Candidate("below-peer", 0.8499, 0);
-            Assert(DanmuMatchScorer.SelectAutoCandidate(new[] { below, belowPeer }) == null &&
-                   below.MatchScore == 0.8499,
-                "a base score below 0.85 must not bridge");
-
             var alreadyConfident = Candidate("already-confident", 0.98, 2);
             var confidentPeer = Candidate("confident-peer", 0.98, 0);
             Assert(DanmuMatchScorer.GetEffectiveConfidence(
@@ -231,24 +235,31 @@ namespace Emby.Plugin.Danmu.TitleFidelityTests
                        new[] { alreadyConfident, confidentPeer, higherExisting }) == higherExisting,
                 "rank-2 evidence at 0.98 must not overtake an existing 0.99 candidate");
 
-            var bridged = Candidate("bridged", 0.85, 2);
-            var bridgedPeer = Candidate("bridged-peer", 0.85, 0);
-            var existing = Candidate("existing", 0.91, 0);
-            Assert(DanmuMatchScorer.SelectAutoCandidate(new[] { bridged, bridgedPeer, existing }) == existing,
-                "an existing 0.91 candidate must beat a bridged 0.90 candidate");
+            var fidelityAtThreshold = Candidate("fidelity-at-threshold", 0.90, 2);
+            var ordinaryHigher = Candidate("ordinary-higher", 0.91, 0);
+            Assert(DanmuMatchScorer.SelectAutoCandidate(
+                       new[] { fidelityAtThreshold, ordinaryHigher }) == ordinaryHigher &&
+                   fidelityAtThreshold.MatchScore == 0.90 && ordinaryHigher.MatchScore == 0.91,
+                "an ordinary 0.91 score must beat 0.90 fidelity evidence");
 
-            var preferredBridge = Candidate("preferred-bridge", 0.85, 2, 0);
-            var preferredPeer = Candidate("preferred-peer", 0.85, 0, 0);
+            var preferredThreshold = Candidate("preferred-threshold", 0.90, 2, 0);
+            var preferredPeer = Candidate("preferred-peer", 0.90, 0, 0);
             var lowerProvider = Candidate("lower-provider", 0.99, 0, 1);
             Assert(DanmuMatchScorer.SelectAutoCandidate(
-                       new[] { lowerProvider, preferredPeer, preferredBridge }) == preferredBridge,
+                       new[] { lowerProvider, preferredPeer, preferredThreshold }) == preferredThreshold,
                 "provider priority must still apply after effective-confidence filtering");
+
+            var alias = Candidate("tmdb-alias", 0.80, 0);
+            alias.MatchOrigin = "tmdb-alias";
+            Assert(DanmuMatchScorer.SelectAutoCandidate(new[] { alias }) == alias &&
+                   alias.MatchScore == 0.80,
+                "the independent TMDB alias threshold must remain 0.80");
 
             var movieExact = Candidate("movie-exact", 0.85, 1);
             var moviePeer = Candidate("movie-peer", 0.85, 0);
             Assert(DanmuMatchScorer.SelectAutoCandidate(new[] { movieExact, moviePeer }) == null &&
-                   movieExact.MatchScore == 0.85,
-                "Movie rank-1 fidelity must not expand the Season-only bridge");
+                   movieExact.MatchScore == 0.85 && moviePeer.MatchScore == 0.85,
+                "Movie fidelity at 0.85 must remain below automatic confidence");
         }
 
         private static void SeparatesSeasonAndParentAliasRoles()
