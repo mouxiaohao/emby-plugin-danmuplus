@@ -5,8 +5,8 @@
 (function () {
     "use strict";
 
-    // V24 refreshes the installed UI while retaining the V21 mapping contract.
-    var INSTALL_FLAG = "__embyDanmuSmartMenuV24";
+    // V25 refreshes the installed UI while retaining the V21 mapping contract.
+    var INSTALL_FLAG = "__embyDanmuSmartMenuV25";
     var MAPPING_PROTOCOL_VERSION = 21;
     var BUTTON_ID = "danmu-bulk-download";
     var activeDialogs = [];
@@ -1829,6 +1829,15 @@
         return verified.concat(manual);
     }
 
+    function authoritativeCompositeFailureMessage(confirmed) {
+        var fallback = "服务器没有返回权威复合季映射";
+        if (!confirmed) return fallback;
+        var message = boundedText(value(confirmed, "Message", "message", ""));
+        if (message) return message;
+        var reason = boundedText(value(confirmed, "DecisionReason", "decisionReason", ""));
+        return reason ? boundedText("服务器拒绝复合季映射：" + reason) : fallback;
+    }
+
     async function requestAuthoritativeCompositePlan(dialog, item, season, compactSelections) {
         if (!hasCurrentMappingContract(season)) {
             throw new Error("stale-protocol-generation");
@@ -1842,7 +1851,7 @@
         if (!preview) throw new Error("逐集映射验证已取消或失败");
         var confirmed = (value(preview, "Seasons", "seasons", []) || [])[0];
         if (!confirmed || !compositePlan(confirmed)) {
-            throw new Error("服务器没有返回权威复合季映射");
+            throw new Error(authoritativeCompositeFailureMessage(confirmed));
         }
         return confirmed;
     }
@@ -4060,6 +4069,7 @@
         decodeApiResult: decodeApiResult,
         normalizeRejectedApiError: normalizeRejectedApiError,
         publicErrorMessage: publicErrorMessage,
+        authoritativeCompositeFailureMessage: authoritativeCompositeFailureMessage,
         providerDisplayName: providerDisplayName,
         sourceMetadataPublicLabel: sourceMetadataPublicLabel,
         localEpisodeLabel: localEpisodeLabel,

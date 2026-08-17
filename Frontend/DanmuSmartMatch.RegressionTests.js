@@ -232,11 +232,22 @@ function fakeResponse(status, statusText, body, contentType) {
 }
 
 async function main() {
-    assert((source.match(/__embyDanmuSmartMenuV24/g) || []).length === 1 &&
-        !source.includes("__embyDanmuSmartMenuV23") && !source.includes("__embyDanmuSmartMenuV22"),
-        "the 2.0.5r1 frontend installation flag should be V24 exactly once");
+    assert((source.match(/__embyDanmuSmartMenuV25/g) || []).length === 1 &&
+        !source.includes("__embyDanmuSmartMenuV24") && !source.includes("__embyDanmuSmartMenuV23"),
+        "the 2.0.5r1 frontend installation flag should be V25 exactly once");
     assert(!source.includes("MAPPING_PROTOCOL_GENERATION") && source.includes("var MAPPING_PROTOCOL_VERSION = 21"),
         "the 2.0.5r1 UI must retain the backend numeric V21 mapping protocol and server-authored plan generation");
+    const compositeFailure = "复合季映射需要重新确认：Selected candidate evidence expired or belongs to another Season.";
+    assert(hooks.authoritativeCompositeFailureMessage({ Message: compositeFailure,
+            DecisionReason: "hidden-fallback" }) === compositeFailure &&
+        hooks.authoritativeCompositeFailureMessage({ Message: "", DecisionReason: "stale-protocol-generation",
+            SearchErrors: ["private-provider-diagnostic"], SelectionEvidenceToken: "private-evidence" }) ===
+            "服务器拒绝复合季映射：stale-protocol-generation" &&
+        hooks.authoritativeCompositeFailureMessage(null) === "服务器没有返回权威复合季映射" &&
+        hooks.authoritativeCompositeFailureMessage({ Message: "x".repeat(1200) }).length <= 800 &&
+        hooks.authoritativeCompositeFailureMessage({ Message: "x".repeat(1200) }).endsWith("…") &&
+        source.includes("throw new Error(authoritativeCompositeFailureMessage(confirmed));"),
+        "authoritative composite failures must expose only the bounded public server reason and retain a generic fallback");
     const compositeMappingHint = "下列卡片仅用于本次下载映射，不会改变Emby 的季归属。";
     assert(!source.includes("该季包含多个来源或存在未识别区间；") &&
         (source.match(new RegExp(compositeMappingHint, "g")) || []).length === 1 &&
