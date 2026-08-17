@@ -165,6 +165,8 @@ Season matching SHALL calculate its ordinary confidence from parent-title eviden
 
 For Season 1, the Season-name target set SHALL continue to include an empty Season name in addition to the authoritative Season title and a Season-1 label, so a source result containing only the parent title can receive the Season-name component. TMDB Chinese-alias, English-title, and Japanese-title rounds SHALL continue comparing their active parent term with the original parent Series title and eligible local aliases, taking the best parent-title result without adding scores across alternatives.
 
+Only in a TMDB alias parent-maximum round, when every usable real authoritative Season-title remainder is generic and at least one equals the expected positive Season label, the scorer MAY recognize an unconsumed continuation of a short parent alias before the source's Season marker. This recovery SHALL operate within one source-title channel, SHALL require exactly one correct terminal generic Season marker, and SHALL require a prefix of at least four characters containing at least one letter whose best strictly equal-length window similarity against a known parent title is at least `0.90`. It SHALL only reduce the residual used for the 20-point Season-name comparison and MUST NOT add parent-title points, combine separate source-title channels, activate for a named Season or ordinary search, accept a prefix longer than the compared parent, or alter Movie scoring or global title normalization.
+
 #### Scenario: Candidate has the correct titles and year but a different Episode count
 - **WHEN** a Season candidate matches the parent-title and Season-name evidence and its known year exactly matches the target while its Episode count is smaller or larger
 - **THEN** it SHALL receive the same 100-point ordinary score as the equal-count candidate and Episode-count difference SHALL NOT block automatic confidence
@@ -172,6 +174,14 @@ For Season 1, the Season-name target set SHALL continue to include an empty Seas
 #### Scenario: Only the parent title and year match
 - **WHEN** a candidate earns the full parent-title component and exact known-year component but earns no Season-name component
 - **THEN** it SHALL receive 80 points regardless of its Episode count; this MAY satisfy the separate TMDB-alias acceptance threshold where applicable, while the ordinary automatic threshold remains unchanged
+
+#### Scenario: Short alias leaves a verified parent-title continuation
+- **WHEN** a TMDB alias round targets a generic Season 2 label and one source title contains the matched short parent alias, a four-or-more-character continuation containing a letter and verified at `0.90` or higher against a strictly equal-length window of a known parent title, and one terminal `第二季` marker
+- **THEN** that source-title channel SHALL receive the full Season-name component while the parent-title component remains capped at 60 points
+
+#### Scenario: Prefix or Season marker is not safely recoverable
+- **WHEN** the search is ordinary, the target is named rather than generic, the prefix is short, numeric, longer than the compared parent, unrelated to every known parent title, the marker is followed by text, or the source contains a wrong or conflicting Season marker
+- **THEN** the scorer SHALL NOT use short-parent recovery and SHALL retain the ordinary whole-residual comparison or conflicting-marker zero result
 
 #### Scenario: Candidate year differs or is unavailable
 - **WHEN** the candidate and target years are known but differ, or exact-year evidence is unavailable

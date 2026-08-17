@@ -43,6 +43,7 @@ namespace Emby.Plugin.Danmu.RegressionTests
             ScoresSeasonEvidenceWithExactIndependentChannels();
             ScoresLiveOnePunchManThirdSeasonAliasFallback();
             ScoresBookwormFourthSeasonDespiteAuthoritativeCountDifference();
+            ScoresOnlyValidatedShortParentAliasExtensions();
             OrdersJojoSplitSeasonTitlesWithoutNumericLeakage();
             ReplacesCanonicalCandidatesForAutomaticSelection();
             PreservesLazyRoundOrderingAndShortCircuitContract();
@@ -513,9 +514,9 @@ namespace Emby.Plugin.Danmu.RegressionTests
             Assert(thirdSeason.Score == 1 && japaneseThirdSeason.Score == 1 &&
                    chineseOnlyThirdSeason.Score == 1 && englishOnlyThirdSeason.Score == 1,
                 "TMDB Season rounds must score either the original localized parent or the current English/Japanese term as independent 60-point parent evidence");
-            Assert(bothParents.ParentTitleScore == 1 && bothParents.KeywordScore < 1 &&
-                   bothParents.Score < 1,
-                "matching both original and current alias parents must take the best single-parent combination without removing or stacking both parents");
+            Assert(bothParents.ParentTitleScore == 1 && bothParents.KeywordScore == 1 &&
+                   bothParents.Score == 1,
+                "a second known parent in the same source-title channel may be validated as the trailing Season marker's parent-like prefix, without stacking parent points");
 
             var integratedCalls = new List<string>();
             var integratedCandidates = new List<DanmuMatchCandidate>();
@@ -628,6 +629,147 @@ namespace Emby.Plugin.Danmu.RegressionTests
                    candidate.EpisodeScore == 0 && candidate.EpisodeSize == 24 &&
                    DanmuMatchScorer.SelectAutoCandidate(candidates)?.Id == "bookworm-s4",
                 "爱书的下克上 S4 / 小书痴第四季 / 2026 must score 100 and auto-select when local 16 differs from source 24");
+        }
+
+        private static void ScoresOnlyValidatedShortParentAliasExtensions()
+        {
+            const string aliasTerm = "小书痴的下克上";
+            const string originalParent = "爱书的下克上：为了成为图书管理员不择手段！";
+            const string extendedAliasParent = "小书痴的下克上 〜为了成为图书管理员而不择手段〜";
+            const string originalSecondSeason = originalParent + " 第二季";
+            var calls = new List<string>();
+            var candidates = new List<DanmuMatchCandidate>();
+            var reachedAliasThreshold = InvokeAliasTermWithContext(
+                new DanmuMatchSearchResult(),
+                new TermFixtureScraper(calls, term => new List<ScraperSearchInfo>
+                {
+                    new ScraperSearchInfo
+                    {
+                        Id = "bookworm-live-s2",
+                        Name = extendedAliasParent + " 第二季",
+                        Category = "动漫",
+                        Year = 2020,
+                        EpisodeSize = 12,
+                    },
+                    new ScraperSearchInfo
+                    {
+                        Id = "bookworm-live-ova",
+                        Name = extendedAliasParent + " OVA",
+                        Category = "动漫",
+                        Year = 2020,
+                        EpisodeSize = 12,
+                    },
+                }),
+                aliasTerm,
+                candidates,
+                new HashSet<string>(StringComparer.OrdinalIgnoreCase),
+                originalParent,
+                originalSecondSeason,
+                2,
+                2020,
+                12,
+                null,
+                null,
+                CancellationToken.None);
+
+            var correct = candidates.Single(candidate => candidate.Id == "bookworm-live-s2");
+            var ova = candidates.Single(candidate => candidate.Id == "bookworm-live-ova");
+            Assert(reachedAliasThreshold && calls.SequenceEqual(new[] { aliasTerm }) &&
+                   correct.ParentTitleScore == 1 && correct.KeywordScore == 1 &&
+                   correct.YearScore == 1 && correct.Score == 1 &&
+                   ova.ParentTitleScore == 1 && ova.KeywordScore == 0 &&
+                   ova.YearScore == 1 && ova.Score == 0.80 &&
+                   DanmuMatchScorer.SelectAutoCandidate(candidates)?.Id == "bookworm-live-s2",
+                "the live Bookworm alias round must score the extended-parent S2 as 60/20/20=100, keep OVA at 80, and uniquely auto-select S2");
+
+            foreach (var seasonNumber in new[] { 2, 3, 4 })
+            {
+                var marker = seasonNumber == 2 ? "第二季" : seasonNumber == 3 ? "第三季" : "第四季";
+                var scored = ScoreBookwormExtendedAlias(
+                    "bookworm-s" + seasonNumber,
+                    extendedAliasParent + marker,
+                    originalParent + marker,
+                    aliasTerm,
+                    originalParent,
+                    seasonNumber);
+                Assert(scored.ParentTitleScore == 1 && scored.KeywordScore == 1 &&
+                       scored.YearScore == 1 && scored.Score == 1,
+                    "validated Bookworm extended-parent S" + seasonNumber +
+                    " must retain exact 60/20/20 evidence");
+            }
+
+            var syntheticOnly = ScoreBookwormExtendedAlias(
+                "synthetic-only", extendedAliasParent + "第二季", aliasTerm,
+                aliasTerm, originalParent, 2);
+            var trailingText = ScoreBookwormExtendedAlias(
+                "trailing-text", extendedAliasParent + "第二季新章", originalSecondSeason,
+                aliasTerm, originalParent, 2);
+            var conflictingMarkers = ScoreBookwormExtendedAlias(
+                "conflicting", extendedAliasParent + "第二季第三季", originalSecondSeason,
+                aliasTerm, originalParent, 2);
+            var numericPrefix = ScoreBookwormExtendedAlias(
+                "numeric-prefix", aliasTerm + "1234第二季", originalSecondSeason,
+                aliasTerm, originalParent, 2);
+            var shortPrefix = ScoreBookwormExtendedAlias(
+                "short-prefix", aliasTerm + "为了成第二季", originalSecondSeason,
+                aliasTerm, originalParent, 2);
+            var validatedFourLetterPrefix = ScoreBookwormExtendedAlias(
+                "valid-prefix", aliasTerm + "为了成为第二季", originalSecondSeason,
+                aliasTerm, originalParent, 2);
+            Assert(syntheticOnly.KeywordScore < 1 && trailingText.KeywordScore < 1 &&
+                   conflictingMarkers.KeywordScore == 0 && numericPrefix.KeywordScore < 1 &&
+                   shortPrefix.KeywordScore < 1 && validatedFourLetterPrefix.KeywordScore == 1,
+                "short-parent recovery must require real target evidence, one correct trailing marker, and a 4-letter parent-similar prefix");
+
+            var ordinarySearch = ScoreBookwormExtendedAlias(
+                "ordinary-search", extendedAliasParent + "第二季", originalSecondSeason,
+                aliasTerm, originalParent, 2, false);
+            Assert(ordinarySearch.ParentTitleScore == 1 && ordinarySearch.KeywordScore < 1 &&
+                   ordinarySearch.Score < 1,
+                "ordinary Season scoring must retain whole-remainder similarity even when alias-extension conditions otherwise match");
+
+            var longerThanKnownParent = ScoreBookwormExtendedAlias(
+                "overlong-prefix", aliasTerm + "无关字" + originalParent + "第二季",
+                originalSecondSeason, aliasTerm, originalParent, 2);
+            Assert(longerThanKnownParent.KeywordScore < 1,
+                "an unrelated prefix followed by a complete known parent must be rejected when the extension is longer than that parent");
+
+            var namedTargetWithGenericAlias = DanmuMatchScorer.Score(new ScraperSearchInfo
+            {
+                Id = "named-target-with-generic-alias",
+                Name = extendedAliasParent + "第二季",
+                Category = "动漫",
+                Year = 2020,
+                EpisodeSize = 12,
+                SearchAlias = aliasTerm,
+            }, "dandan", "DandanPlay", 0, aliasTerm, "星尘斗士", 2020, 12,
+                new[] { originalParent }, new[] { "Season 2" }, true, 2, true);
+            Assert(namedTargetWithGenericAlias.ParentTitleScore == 1 &&
+                   namedTargetWithGenericAlias.KeywordScore < 1 &&
+                   namedTargetWithGenericAlias.Score < 1,
+                "a named target remainder must fail closed even when another local Season alias is the expected generic Season 2 label");
+        }
+
+        private static DanmuMatchCandidate ScoreBookwormExtendedAlias(
+            string id,
+            string sourceTitle,
+            string originalSeason,
+            string aliasTerm,
+            string originalParent,
+            int expectedSeasonNumber,
+            bool includeLocalSeriesAliasesForParentScoring = true)
+        {
+            return DanmuMatchScorer.Score(new ScraperSearchInfo
+            {
+                Id = id,
+                Name = sourceTitle,
+                Category = "动漫",
+                Year = 2020,
+                EpisodeSize = 12,
+                SearchAlias = aliasTerm,
+            }, "dandan", "DandanPlay", 0, aliasTerm, aliasTerm, 2020, 12,
+                new[] { originalParent }, new[] { originalSeason }, true,
+                expectedSeasonNumber, includeLocalSeriesAliasesForParentScoring);
         }
 
         private static void OrdersJojoSplitSeasonTitlesWithoutNumericLeakage()
