@@ -175,8 +175,8 @@ namespace Emby.Plugin.Danmu.RegressionTests
                    TmdbAliasClient.GetJapaneseOriginalPrimaryTitle(englishDetails, false) == "本好きの下剋上" &&
                    TmdbAliasClient.GetLocalizedPrimaryTitle(japaneseDetails, false) == "本好きの下剋上",
                 "fallback rounds must use en-US primary first, then Japanese original or ja-JP primary data");
-            Assert(TmdbAliasClient.UserAgent == "DanmuPlus/2.0.4r2",
-                "TMDB requests must identify the r2 build without retaining the r1 user-agent");
+            Assert(TmdbAliasClient.UserAgent == "DanmuPlus/2.0.5r1",
+                "TMDB requests must identify the 2.0.5r1 build");
         }
 
         private static void ExercisesTmdbClientFallbackCachingAndCancellation()

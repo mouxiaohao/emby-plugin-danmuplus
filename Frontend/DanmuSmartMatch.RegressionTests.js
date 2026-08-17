@@ -232,11 +232,11 @@ function fakeResponse(status, statusText, body, contentType) {
 }
 
 async function main() {
-    assert((source.match(/__embyDanmuSmartMenuV23/g) || []).length === 1 &&
-        !source.includes("__embyDanmuSmartMenuV22") && !source.includes("__embyDanmuSmartMenuV21"),
-        "the r7 frontend installation flag should be V23 exactly once");
+    assert((source.match(/__embyDanmuSmartMenuV24/g) || []).length === 1 &&
+        !source.includes("__embyDanmuSmartMenuV23") && !source.includes("__embyDanmuSmartMenuV22"),
+        "the 2.0.5r1 frontend installation flag should be V24 exactly once");
     assert(!source.includes("MAPPING_PROTOCOL_GENERATION") && source.includes("var MAPPING_PROTOCOL_VERSION = 21"),
-        "the r7 UI must retain the backend numeric V21 mapping protocol and server-authored plan generation");
+        "the 2.0.5r1 UI must retain the backend numeric V21 mapping protocol and server-authored plan generation");
     const compositeMappingHint = "下列卡片仅用于本次下载映射，不会改变Emby 的季归属。";
     assert(!source.includes("该季包含多个来源或存在未识别区间；") &&
         (source.match(new RegExp(compositeMappingHint, "g")) || []).length === 1 &&
