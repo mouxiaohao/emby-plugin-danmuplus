@@ -167,6 +167,8 @@ For Season 1, the Season-name target set SHALL continue to include an empty Seas
 
 Only in a TMDB alias parent-maximum round, when every usable real authoritative Season-title remainder is generic and at least one equals the expected positive Season label, the scorer MAY recognize an unconsumed continuation of a short parent alias before the source's Season marker. This recovery SHALL operate within one source-title channel, SHALL require exactly one correct terminal generic Season marker, and SHALL require a prefix of at least four characters containing at least one letter whose best strictly equal-length window similarity against a known parent title is at least `0.90`. It SHALL only reduce the residual used for the 20-point Season-name comparison and MUST NOT add parent-title points, combine separate source-title channels, activate for a named Season or ordinary search, accept a prefix longer than the compared parent, or alter Movie scoring or global title normalization.
 
+When the ordinary Season-name comparison for one concrete library Season title, one source-title item, and one matched parent does not produce full Season-name evidence and both parent-stripped loose Season remainders are empty, the scorer SHALL attempt a strict complete-title fallback. It SHALL compare the complete library Season title and that same complete source title after Unicode NFKC, case folding, and whitespace removal, without removing the parent, deleting punctuation, rewriting Season markers, or applying fuzzy similarity. Exact equality SHALL supply the existing 20-point Season-name component only when the complete library Season title is not fidelity-equivalent to any applicable complete parent title and no explicit Season marker conflicts with the expected Season. Ordinary remainder evidence and this fallback SHALL be combined by maximum, never addition. The fallback MUST NOT combine different source-title items, restore the removed fidelity bridge, change the Season 1 empty-name rule, or affect Movie scoring.
+
 #### Scenario: Candidate has the correct titles and year but a different Episode count
 - **WHEN** a Season candidate matches the parent-title and Season-name evidence and its known year exactly matches the target while its Episode count is smaller or larger
 - **THEN** it SHALL receive the same 100-point ordinary score as the equal-count candidate and Episode-count difference SHALL NOT block automatic confidence
@@ -182,6 +184,26 @@ Only in a TMDB alias parent-maximum round, when every usable real authoritative 
 #### Scenario: Prefix or Season marker is not safely recoverable
 - **WHEN** the search is ordinary, the target is named rather than generic, the prefix is short, numeric, longer than the compared parent, unrelated to every known parent title, the marker is followed by text, or the source contains a wrong or conflicting Season marker
 - **THEN** the scorer SHALL NOT use short-parent recovery and SHALL retain the ordinary whole-residual comparison or conflicting-marker zero result
+
+#### Scenario: Compatibility-equivalent complete titles recover symbol-only Season identity
+- **WHEN** Season 2 is named `妄想学生会＊`, the matched source title is `妄想学生会*`, both loose parent-stripped remainders are empty, the complete parent title is `妄想学生会`, and the known years match
+- **THEN** NFKC strict complete-title equality SHALL supply the Season-name component and the candidate SHALL receive 100 points
+
+#### Scenario: Markerless or different-symbol source does not use complete-title fallback
+- **WHEN** Season 2 is named `妄想学生会＊` and the source title is `妄想学生会`, `妄想学生会!`, `妄想学生会**`, or `妄想学生会★`
+- **THEN** the complete-title fallback SHALL supply zero Season-name points and an otherwise exact parent/year candidate SHALL remain at 80 points
+
+#### Scenario: Only one loose Season remainder is empty
+- **WHEN** one side of a concrete library/source/matched-parent pair has an empty loose Season remainder but the other side does not
+- **THEN** the complete-title fallback SHALL fail closed and SHALL NOT supply Season-name points
+
+#### Scenario: Complete local Season title is only the parent title
+- **WHEN** the complete library Season title is fidelity-equivalent to an applicable complete parent title
+- **THEN** the strict complete-title fallback SHALL be disabled so the parent cannot supply both the parent-title and Season-name components; the existing Season 1 empty-name exception remains unchanged
+
+#### Scenario: Evidence exists in different source-title items
+- **WHEN** parent evidence is available from one source title item while strict complete-title equality is available only from another source title item
+- **THEN** the scorer SHALL NOT combine those items into one parent-plus-Season score
 
 #### Scenario: Candidate year differs or is unavailable
 - **WHEN** the candidate and target years are known but differ, or exact-year evidence is unavailable

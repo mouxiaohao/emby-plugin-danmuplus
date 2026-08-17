@@ -222,19 +222,28 @@ namespace Emby.Plugin.Danmu.Scraper
             // authoritative mapper, but are neutral Season confidence evidence.
             _ = expectedEpisodes;
             var targetSeasonNumber = expectedSeasonNumber ?? ParseExplicitSeasonNumber(seasonName);
-            var seasonParentTitles = BuildNormalizedTitleSet(
-                new[] { seriesName }.Concat(localSeriesTitleAliases ?? Enumerable.Empty<string>()));
-            var parentTitles = includeLocalSeriesAliasesForParentScoring
-                ? seasonParentTitles
-                : BuildNormalizedTitleSet(new[] { seriesName });
+            var localSeriesAliases = (localSeriesTitleAliases ?? Enumerable.Empty<string>()).ToList();
+            var localSeasonAliases = (localSeasonTitleAliases ?? Enumerable.Empty<string>()).ToList();
+            var seasonParentTitleValues = new[] { seriesName }
+                .Concat(localSeriesAliases)
+                .ToList();
+            var applicableParentTitleValues = includeLocalSeriesAliasesForParentScoring
+                ? seasonParentTitleValues
+                : new List<string> { seriesName };
+            var localSeasonTitleValues = new[] { seasonName }
+                .Concat(localSeasonAliases)
+                .ToList();
+            var seasonParentTitles = BuildNormalizedTitleSet(seasonParentTitleValues);
+            var parentTitles = BuildNormalizedTitleSet(applicableParentTitleValues);
             var seasonTitles = BuildSeasonTitleVariants(
-                seasonName, localSeasonTitleAliases, seasonParentTitles, targetSeasonNumber);
+                seasonName, localSeasonAliases, seasonParentTitles, targetSeasonNumber);
             var hasRealExpectedGenericSeasonLabel = includeLocalSeriesAliasesForParentScoring &&
                 HasRealExpectedGenericSeasonLabel(
-                    seasonName, localSeasonTitleAliases, seasonParentTitles, targetSeasonNumber);
+                    seasonName, localSeasonAliases, seasonParentTitles, targetSeasonNumber);
             var titleEvidence = GetBestSeasonTitleEvidence(
                 GetSourceTitles(source), parentTitles, seasonTitles, seasonParentTitles,
-                targetSeasonNumber, hasRealExpectedGenericSeasonLabel);
+                localSeasonTitleValues, seasonParentTitleValues, targetSeasonNumber,
+                hasRealExpectedGenericSeasonLabel);
             var parentScore = titleEvidence.ParentScore;
             var seasonScore = titleEvidence.SeasonScore;
             var titleScore = (parentScore * 0.60 + seasonScore * 0.20) / 0.80;
@@ -245,8 +254,8 @@ namespace Emby.Plugin.Danmu.Scraper
             var fidelityTitleEvidence = GetSeasonFidelityTitleEvidence(
                 seriesName,
                 seasonName,
-                localSeriesTitleAliases,
-                localSeasonTitleAliases,
+                localSeriesAliases,
+                localSeasonAliases,
                 GetSourceTitles(source));
             return new DanmuMatchCandidate
             {
@@ -586,6 +595,8 @@ namespace Emby.Plugin.Danmu.Scraper
             IList<string> parentTitles,
             IList<string> seasonTitles,
             IList<string> seasonParentTitles,
+            IList<string> localSeasonTitles,
+            IList<string> parentIdentityTitles,
             int? expectedSeasonNumber,
             bool hasRealExpectedGenericSeasonLabel)
         {
@@ -615,17 +626,21 @@ namespace Emby.Plugin.Danmu.Scraper
 
                 foreach (var parent in matchedParents)
                 {
-                    var sourceSeasonTitle = normalizedSource.Replace(parent, string.Empty);
-                    sourceSeasonTitle = GetValidatedShortParentAliasSeasonLabel(
-                        sourceSeasonTitle, seasonParentTitles, expectedSeasonNumber,
+                    var looseSourceSeasonTitle = normalizedSource.Replace(parent, string.Empty);
+                    var sourceSeasonTitle = GetValidatedShortParentAliasSeasonLabel(
+                        looseSourceSeasonTitle, seasonParentTitles, expectedSeasonNumber,
                         hasRealExpectedGenericSeasonLabel);
+                    var ordinarySeasonScore = BestSeasonSimilarity(
+                        sourceSeasonTitle, seasonTitles, expectedSeasonNumber);
+                    var strictCompleteTitleScore = ordinarySeasonScore < 1
+                        ? GetStrictCompleteTitleSeasonFallback(
+                            sourceTitle, looseSourceSeasonTitle, parent, localSeasonTitles,
+                            parentIdentityTitles, expectedSeasonNumber)
+                        : 0;
                     SelectBetterSeasonTitleEvidence(best, new SeasonTitleEvidence
                     {
                         ParentScore = 1,
-                        SeasonScore = BestSeasonSimilarity(
-                            sourceSeasonTitle,
-                            seasonTitles,
-                            expectedSeasonNumber),
+                        SeasonScore = Math.Max(ordinarySeasonScore, strictCompleteTitleScore),
                         MatchedParentLength = parent.Length,
                     });
                 }
@@ -743,6 +758,68 @@ namespace Emby.Plugin.Danmu.Scraper
                     extraPrefix.Distance(parent.Substring(index, extraPrefix.Length)));
             }
             return Clamp(best);
+        }
+
+        private static double GetStrictCompleteTitleSeasonFallback(
+            string sourceTitle,
+            string looseSourceSeasonTitle,
+            string matchedParent,
+            IEnumerable<string> localSeasonTitles,
+            IEnumerable<string> parentIdentityTitles,
+            int? expectedSeasonNumber)
+        {
+            if (!string.IsNullOrEmpty(looseSourceSeasonTitle) ||
+                string.IsNullOrEmpty(matchedParent))
+            {
+                return 0;
+            }
+
+            if (expectedSeasonNumber.GetValueOrDefault() > 0 &&
+                HasConflictingExplicitSeasonMarker(sourceTitle, expectedSeasonNumber.Value))
+            {
+                return 0;
+            }
+
+            var sourceFidelity = NormalizeFidelity(sourceTitle);
+            if (sourceFidelity.Length == 0)
+            {
+                return 0;
+            }
+
+            var parentFidelities = new HashSet<string>(
+                (parentIdentityTitles ?? Enumerable.Empty<string>())
+                .Select(NormalizeFidelity)
+                .Where(value => value.Length > 0),
+                StringComparer.Ordinal);
+            foreach (var localSeasonTitle in localSeasonTitles ?? Enumerable.Empty<string>())
+            {
+                if (expectedSeasonNumber.GetValueOrDefault() > 0 &&
+                    HasConflictingExplicitSeasonMarker(
+                        localSeasonTitle, expectedSeasonNumber.Value))
+                {
+                    continue;
+                }
+
+                var localLooseTitle = Normalize(localSeasonTitle);
+                if (!localLooseTitle.Contains(matchedParent) ||
+                    localLooseTitle.Replace(matchedParent, string.Empty).Length != 0)
+                {
+                    continue;
+                }
+
+                var localFidelity = NormalizeFidelity(localSeasonTitle);
+                if (localFidelity.Length == 0 ||
+                    parentFidelities.Contains(localFidelity))
+                {
+                    continue;
+                }
+
+                if (string.Equals(localFidelity, sourceFidelity, StringComparison.Ordinal))
+                {
+                    return 1;
+                }
+            }
+            return 0;
         }
 
         private static bool IsExpectedGenericSeasonLabel(

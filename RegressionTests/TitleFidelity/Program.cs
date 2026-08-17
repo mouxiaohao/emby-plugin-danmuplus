@@ -14,6 +14,7 @@ namespace Emby.Plugin.Danmu.TitleFidelityTests
             PreservesArbitrarySymbolSequences();
             KeepsLooseNormalizationAndMismatchScoringUnchanged();
             AppliesEvidenceThroughMoviePrimaryAndSeasonParentPaths();
+            AppliesStrictCompleteTitleSeasonFallback();
             SelectsStudentCouncilStarAndPreservesTrueTies();
             KeepsSubThresholdFidelityAtOrdinaryConfidence();
             PreservesThresholdTieProviderAliasAndMovieBoundaries();
@@ -158,6 +159,96 @@ namespace Emby.Plugin.Danmu.TitleFidelityTests
                 "the applicable source parent-media title should use the same fidelity channel");
             Assert(season.SourceMetadata != null && season.SourceMetadata.Title == "Parent\u27E1!?",
                 "scoring should retain a cloned source metadata value");
+        }
+
+        private static void AppliesStrictCompleteTitleSeasonFallback()
+        {
+            const string parent = "妄想学生会";
+            const string localSeason = "妄想学生会＊";
+            var markerless = ScoreStrictSeason(
+                "markerless-s2", parent, localSeason, parent, 2);
+            var starred = ScoreStrictSeason(
+                "starred-s2", parent, localSeason, "妄想学生会*", 2);
+            var differentSymbol = ScoreStrictSeason(
+                "different-symbol-s2", parent, localSeason, "妄想学生会!", 2);
+            var differentCount = ScoreStrictSeason(
+                "different-count-s2", parent, localSeason, "妄想学生会**", 2);
+            var differentStar = ScoreStrictSeason(
+                "different-star-s2", parent, localSeason, "妄想学生会★", 2);
+
+            Assert(starred.ParentTitleScore == 1 && starred.KeywordScore == 1 &&
+                   starred.YearScore == 1 && starred.Score == 1 &&
+                   markerless.KeywordScore == 0 && markerless.Score == 0.80 &&
+                   differentSymbol.KeywordScore == 0 && differentSymbol.Score == 0.80 &&
+                   differentCount.KeywordScore == 0 && differentCount.Score == 0.80 &&
+                   differentStar.KeywordScore == 0 && differentStar.Score == 0.80,
+                "only NFKC-equivalent complete Season titles may recover the existing 20-point Season component");
+            Assert(DanmuMatchScorer.SelectAutoCandidate(new[]
+                   {
+                       markerless, differentSymbol, differentCount, differentStar, starred,
+                   }) == starred,
+                "妄想学生会＊/* must be the unique ordinary automatic candidate while markerless and mismatched symbols remain at 80");
+
+            var sourceRemainderOnly = ScoreStrictSeason(
+                "source-remainder", parent, localSeason, "妄想学生会*续篇", 2);
+            var localRemainderOnly = ScoreStrictSeason(
+                "local-remainder", parent, "妄想学生会续篇＊", "妄想学生会*", 2);
+            var bothRemainders = ScoreStrictSeason(
+                "both-remainders", parent, "妄想学生会续篇＊", "妄想学生会续篇*", 2);
+            Assert(sourceRemainderOnly.KeywordScore == 0 &&
+                   localRemainderOnly.KeywordScore == 0,
+                "strict complete-title fallback must stay disabled when only one loose parent-stripped remainder is empty");
+            Assert(bothRemainders.KeywordScore == 1 && bothRemainders.Score == 1,
+                "when both residuals are non-empty, the existing exact residual score must remain one and must not receive an additive fallback bonus");
+
+            var parentOnly = ScoreStrictSeason(
+                "parent-only", localSeason, localSeason, "妄想学生会*", 2);
+            var localParentAlias = ScoreStrictSeason(
+                "local-parent-alias-guard", parent, localSeason, "妄想学生会*", 2,
+                new[] { localSeason });
+            Assert(parentOnly.KeywordScore == 0 && parentOnly.Score == 0.80 &&
+                   localParentAlias.KeywordScore == 0 && localParentAlias.Score == 0.80,
+                "a complete local Season equal to the primary or local parent identity must not count the parent twice");
+
+            var parentPunctuation = ScoreStrictSeason(
+                "parent-punctuation", "妄想学生会！", localSeason, "妄想学生会*", 2);
+            var kOn = ScoreStrictSeason(
+                "k-on", "K-ON!", "K-ON!!", "K-ON！！", 2);
+            Assert(parentPunctuation.KeywordScore == 1 && parentPunctuation.Score == 1 &&
+                   kOn.ParentTitleScore == 1 && kOn.KeywordScore == 1 && kOn.Score == 1,
+                "parent punctuation must remain fidelity-sensitive, including K-ON! to NFKC-equivalent K-ON!!");
+
+            var conflictingMarker = ScoreStrictSeason(
+                "conflicting-marker", "妄想学生会 第三季",
+                "妄想学生会 第三季＊", "妄想学生会 第三季*", 2);
+            Assert(conflictingMarker.ParentTitleScore == 1 &&
+                   conflictingMarker.KeywordScore == 0 && conflictingMarker.Score == 0.80,
+                "a conflicting explicit Season marker must reject strict complete-title recovery before fidelity equality");
+
+            var crossChannel = DanmuMatchScorer.Score(new ScraperSearchInfo
+            {
+                Id = "cross-channel",
+                Name = "本地父剧",
+                Category = "anime",
+                Year = 2014,
+                EpisodeSize = 13,
+                SourceMetadata = new SourceMetadata { Title = "英文父剧*" },
+            }, "DandanID", "DandanPlay", 0, "本地父剧", "英文父剧＊", 2014, 13,
+                new[] { "英文父剧" }, null, true, 2);
+            Assert(crossChannel.ParentTitleScore == 1 && crossChannel.KeywordScore == 0 &&
+                   crossChannel.Score == 0.80,
+                "parent evidence from one source-title item must not combine with strict equality from another item");
+
+            var firstSeason = ScoreStrictSeason(
+                "first-season", parent, parent, parent, 1);
+            Assert(firstSeason.ParentTitleScore == 1 && firstSeason.KeywordScore == 1 &&
+                   firstSeason.Score == 1,
+                "the pre-existing Season 1 empty-remainder rule must run before the strict fallback");
+
+            var movie = ScoreMovie(
+                "strict-fallback-movie", localSeason, "妄想学生会*", 2014);
+            Assert(movie.TitleScore == 1 && movie.YearScore == 1 && movie.Score == 1,
+                "the strict complete-title Season fallback must not change Movie scoring");
         }
 
         private static void SelectsStudentCouncilStarAndPreservesTrueTies()
@@ -380,6 +471,28 @@ namespace Emby.Plugin.Danmu.TitleFidelityTests
                 },
                 "DandanID", "DandanPlay", 0,
                 localSeries, localSeason, 2014, 13);
+        }
+
+        private static DanmuMatchCandidate ScoreStrictSeason(
+            string id,
+            string localSeries,
+            string localSeason,
+            string sourceTitle,
+            int expectedSeasonNumber,
+            IEnumerable<string> localSeriesAliases = null)
+        {
+            return DanmuMatchScorer.Score(
+                new ScraperSearchInfo
+                {
+                    Id = id,
+                    Name = sourceTitle,
+                    Category = "anime",
+                    Year = 2014,
+                    EpisodeSize = 13,
+                },
+                "DandanID", "DandanPlay", 0,
+                localSeries, localSeason, 2014, 13,
+                localSeriesAliases, null, true, expectedSeasonNumber);
         }
 
         private static DanmuMatchCandidate Candidate(
