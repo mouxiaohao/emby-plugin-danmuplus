@@ -1950,6 +1950,8 @@ namespace Emby.Plugin.Danmu.RegressionTests
                 .GetRawConstantValue();
             var informationalVersion = assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
 
+            Assert(assembly.GetName().Name == "Emby.Plugin.Danmu",
+                "the configuration heading must not change the plugin assembly identity");
             Assert(token == NormalizeCacheToken(informationalVersion) &&
                    Regex.IsMatch(token, "^[A-Za-z0-9_-]+$"),
                 "the generated cache token should normalize informational-version metadata to a URL-safe identifier");
@@ -1964,11 +1966,55 @@ namespace Emby.Plugin.Danmu.RegressionTests
                    !html.Contains("__DANMU_CONFIG_CACHE_TOKEN__", StringComparison.Ordinal),
                 "the embedded configuration page should contain the matching generated controller without a placeholder");
 
+            var sourceRoot = Path.GetFullPath(Path.Combine(
+                AppContext.BaseDirectory, "..", "..", "..", ".."));
+            var sourceHtml = File.ReadAllText(Path.Combine(sourceRoot, "Configuration", "configPage.html"));
+            Assert(ContainsConfigurationHeading(sourceHtml, "DanmuPlus 配置") &&
+                   !ContainsConfigurationHeading(sourceHtml, "Danmu 配置"),
+                "the configuration-page source template should use only the DanmuPlus section heading");
+            Assert(ContainsConfigurationHeading(html, "DanmuPlus 配置") &&
+                   !ContainsConfigurationHeading(html, "Danmu 配置"),
+                "the generated embedded configuration page should use only the DanmuPlus section heading");
+
             var pluginSource = File.ReadAllText(Path.GetFullPath(Path.Combine(
-                AppContext.BaseDirectory, "..", "..", "..", "..", "Plugin.cs")));
+                sourceRoot, "Plugin.cs")));
             Assert(pluginSource.Contains("GeneratedConfigurationPageResources.PageName") &&
                    pluginSource.Contains("GeneratedConfigurationPageResources.ControllerName"),
                 "PluginPageInfo registration should use generated matched identifiers");
+            Assert(pluginSource.Contains("new Guid(\"cdbc5624-3ea9-4f9d-94cc-3be20585f926\")") &&
+                   pluginSource.Contains("public sealed override string Name => \"Danmu\";") &&
+                   pluginSource.Contains("DisplayName = \"弹幕配置\"") &&
+                   pluginSource.Contains(".Configuration.configPage.html") &&
+                   pluginSource.Contains(".Configuration.config.js"),
+                "the heading must not change the plugin ID, plugin-list name, navigation name, or resource routes");
+
+            var projectSource = File.ReadAllText(Path.Combine(sourceRoot, "Emby.Plugin.Danmu.csproj"));
+            Assert(projectSource.Contains("LogicalName=\"$(RootNamespace).Configuration.configPage.html\"") &&
+                   projectSource.Contains("<EmbeddedResource Include=\"Configuration/config.js\" />") &&
+                   projectSource.Contains("PageName = &quot;danmu-$(DanmuConfigCacheToken)&quot;") &&
+                   projectSource.Contains("ControllerName = &quot;danmuJs-$(DanmuConfigCacheToken)&quot;"),
+                "the project should retain the assembly-derived configuration resource keys and routes");
+
+            var configurationScript = File.ReadAllText(Path.Combine(sourceRoot, "Configuration", "config.js"));
+            Assert(configurationScript.Contains("pluginUniqueId: 'cdbc5624-3ea9-4f9d-94cc-3be20585f926'") &&
+                   configurationScript.Contains("ApiClient.getPluginConfiguration(TemplateConfig.pluginUniqueId)") &&
+                   configurationScript.Contains("ApiClient.updatePluginConfiguration(TemplateConfig.pluginUniqueId, config)"),
+                "the configuration controller should retain the existing plugin ID and configuration route");
+            Assert(configurationScript.Contains("config.ToAss =") &&
+                   configurationScript.Contains("config.Scrapers = scrapers") &&
+                   configurationScript.Contains("config.Dandan = dandan") &&
+                   configurationScript.Contains("config.Tmdb = tmdb"),
+                "the configuration controller should retain the established saved-setting groups");
+        }
+
+        private static bool ContainsConfigurationHeading(string html, string heading)
+        {
+            return Regex.IsMatch(
+                html,
+                "<h2\\b[^>]*\\bclass\\s*=\\s*[\"'][^\"']*\\bsectionTitle\\b[^\"']*[\"'][^>]*>\\s*" +
+                Regex.Escape(heading) +
+                "\\s*</h2>",
+                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
         }
 
         private static string NormalizeCacheToken(string informationalVersion)
