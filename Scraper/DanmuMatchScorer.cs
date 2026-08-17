@@ -212,6 +212,9 @@ namespace Emby.Plugin.Danmu.Scraper
             bool applyContradictionCap = true,
             int? expectedSeasonNumber = null)
         {
+            // Retained for source compatibility with existing callers; contradiction
+            // evidence no longer changes the ordinary composite score.
+            _ = applyContradictionCap;
             var sourceTitles = GetSourceTitles(source).Select(Normalize)
                 .Where(value => value.Length > 0).ToList();
             var parent = Normalize(seriesName);
@@ -274,12 +277,6 @@ namespace Emby.Plugin.Danmu.Scraper
             if (!string.IsNullOrWhiteSpace(source.Category) && source.Category.Contains("电影"))
             {
                 score *= 0.45;
-            }
-
-            if (applyContradictionCap && HasContradictorySeasonEvidence(
-                    source, targetSeasonNumber, expectedYear))
-            {
-                score = Math.Min(score, 0.79);
             }
 
             score = Clamp(score);
@@ -422,25 +419,6 @@ namespace Emby.Plugin.Danmu.Scraper
         public static bool CanAutoSelect(IList<DanmuMatchCandidate> candidates, bool allowProviderPriorityTie = true)
         {
             return SelectAutoCandidate(candidates, allowProviderPriorityTie) != null;
-        }
-
-        private static bool HasContradictorySeasonEvidence(
-            ScraperSearchInfo source,
-            int? targetSeasonNumber,
-            int? expectedYear)
-        {
-            if (!targetSeasonNumber.HasValue || targetSeasonNumber.Value <= 0)
-            {
-                return false;
-            }
-
-            var candidateSeasonNumber = ParseExplicitSeasonNumber(GetSourceTitles(source));
-            var seasonConflict = candidateSeasonNumber.HasValue &&
-                                 candidateSeasonNumber.Value != targetSeasonNumber.Value;
-            var yearConflict = expectedYear.HasValue && expectedYear.Value > 0 &&
-                               source?.Year.HasValue == true && source.Year.Value > 0 &&
-                               Math.Abs(expectedYear.Value - source.Year.Value) >= 2;
-            return seasonConflict || yearConflict;
         }
 
         private static bool HasTermSpecificExactSeasonEvidence(

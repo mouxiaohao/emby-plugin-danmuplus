@@ -37,7 +37,7 @@ namespace Emby.Plugin.Danmu.RegressionTests
             UsesTextEvidenceBeforeTmdbRegion();
             KeepsPrimaryTitleFallbacksOutOfAlternativeTitles();
             ExercisesTmdbClientFallbackCachingAndCancellation();
-            AppliesConservativeSeasonConflictCap();
+            PreservesOrdinaryScoresForContradictoryEvidence();
             ScoresLiveOnePunchManThirdSeasonAliasFallback();
             ReplacesCanonicalCandidatesForAutomaticSelection();
             PreservesLazyRoundOrderingAndShortCircuitContract();
@@ -267,20 +267,35 @@ namespace Emby.Plugin.Danmu.RegressionTests
             };
         }
 
-        private static void AppliesConservativeSeasonConflictCap()
+        private static void PreservesOrdinaryScoresForContradictoryEvidence()
         {
             Assert(DanmuMatchScorer.ParseExplicitSeasonNumber("OVA S00 / Season 1") == null,
                 "mixed Season 0 and positive markers must remain ambiguous instead of creating contradiction evidence");
-            var wrongSeason = ScoreSeason("One Punch Man Season 1", 2015, "Season 3", 2025, true);
-            var wrongYear = ScoreSeason("One Punch Man", 2015, "Season 3", 2025, true);
-            var manual = ScoreSeason("One Punch Man Season 1", 2015, "Season 3", 2025, false);
-            var special = ScoreSeason("One Punch Man Season 1", 2015, "Season 0", 2025, true);
-            var compatible = ScoreSeason("One Punch Man Season 3", 2024, "Season 3", 2025, true);
+            var aboveThreshold = ScoreSeason(
+                "One Punch Man Season 1", 2015, 12, "Season 3", 2025, true);
+            var belowThreshold = ScoreSeason(
+                "One Punch Man Season 1", 2015, 6, "Season 3", 2025, true);
+            var manualAbove = ScoreSeason(
+                "One Punch Man Season 1", 2015, 12, "Season 3", 2025, false);
+            var manualBelow = ScoreSeason(
+                "One Punch Man Season 1", 2015, 6, "Season 3", 2025, false);
 
-            Assert(wrongSeason.Score == 0.79 && wrongYear.Score == 0.79,
-                "explicit wrong Seasons and known years differing by at least two must remain below the alias threshold");
-            Assert(manual.Score > 0.80 && special.Score > 0.80 && compatible.Score > 0.80,
-                "manual searches, Season 0, and compatible or adjacent-year evidence must retain existing scores");
+            Assert(aboveThreshold.Score > 0.80 && belowThreshold.Score < 0.80 &&
+                   aboveThreshold.Score == OrdinaryNoKeywordScore(aboveThreshold) &&
+                   belowThreshold.Score == OrdinaryNoKeywordScore(belowThreshold),
+                "conflicting Season/year evidence must retain the ordinary calculated score on both sides of 0.80: above=" +
+                aboveThreshold.Score + ", below=" + belowThreshold.Score);
+            Assert(aboveThreshold.YearScore == 0 && belowThreshold.YearScore == 0 &&
+                   aboveThreshold.Name.Contains("Season 1") && aboveThreshold.Year == 2015 &&
+                   aboveThreshold.Reason.Contains("父剧名吻合") &&
+                   aboveThreshold.Reason.Contains("集数吻合"),
+                "the retained candidate fields and positive reason evidence must still explain a conflicting result");
+            Assert(manualAbove.Score == aboveThreshold.Score && manualBelow.Score == belowThreshold.Score &&
+                   manualAbove.Reason == aboveThreshold.Reason && manualBelow.Reason == belowThreshold.Reason,
+                "the legacy manual flag must remain score- and reason-neutral after removing the automatic cap");
+            Assert(DanmuMatchScorer.AutomaticConfidenceThreshold == 0.90 &&
+                   DanmuMatchScorer.SelectAutoCandidate(new[] { aboveThreshold }) == null,
+                "removing the contradiction cap must not lower the standard automatic threshold");
             Assert(DanmuMatchScorer.ParseExplicitSeasonNumber("Episode 3 Part 2 Cour 1") == null &&
                    DanmuMatchScorer.ParseExplicitSeasonNumber("Season 0") == null &&
                    DanmuMatchScorer.ParseExplicitSeasonNumber(new[] { "Season 2", "第3季" }) == null,
@@ -288,7 +303,12 @@ namespace Emby.Plugin.Danmu.RegressionTests
         }
 
         private static DanmuMatchCandidate ScoreSeason(
-            string title, int year, string targetSeason, int targetYear, bool applyCap)
+            string title,
+            int year,
+            int episodes,
+            string targetSeason,
+            int targetYear,
+            bool applyCap)
         {
             return DanmuMatchScorer.Score(new ScraperSearchInfo
             {
@@ -296,9 +316,17 @@ namespace Emby.Plugin.Danmu.RegressionTests
                 Name = title,
                 Category = "动漫",
                 Year = year,
-                EpisodeSize = 12,
+                EpisodeSize = episodes,
             }, "dandan", "DandanPlay", 0, "One Punch Man", targetSeason, targetYear, 12,
                 null, null, applyCap, DanmuMatchScorer.ParseExplicitSeasonNumber(targetSeason));
+        }
+
+        private static double OrdinaryNoKeywordScore(DanmuMatchCandidate candidate)
+        {
+            return Math.Round(
+                candidate.TitleScore * 0.55 + candidate.YearScore * 0.15 + candidate.EpisodeScore * 0.30,
+                4,
+                MidpointRounding.AwayFromZero);
         }
 
         private static void ScoresLiveOnePunchManThirdSeasonAliasFallback()
@@ -322,8 +350,9 @@ namespace Emby.Plugin.Danmu.RegressionTests
             Assert(thirdSeason.Score >= 0.80 && japaneseThirdSeason.Score >= 0.80 &&
                    thirdSeason.Reason.Contains("本次搜索词结果季号吻合"),
                 "the live-equivalent English/Japanese TMDB fallback must bridge a localized exact third-Season result without reverting to the library title");
-            Assert(firstSeason.Score < 0.80 && secondSeason.Score < 0.80,
-                "the live-equivalent first and second Season results must remain below the alias threshold when year or explicit Season evidence conflicts: first=" +
+            Assert(firstSeason.Score < 0.80 && secondSeason.Score > 0.80 &&
+                   !secondSeason.Reason.Contains("本次搜索词结果季号吻合"),
+                "a weak first-Season result must stay below the alias threshold while an explicit second-Season conflict retains its ordinary explainable score: first=" +
                 firstSeason.Score + ", second=" + secondSeason.Score);
 
             var aliasResult = new DanmuMatchSearchResult
