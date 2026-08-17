@@ -1976,6 +1976,25 @@ namespace Emby.Plugin.Danmu.RegressionTests
                    !ContainsConfigurationHeading(html, "Danmu 配置"),
                 "the generated embedded configuration page should use only the DanmuPlus section heading");
 
+            const string sourceUrl = "https://github.com/mouxiaohao/emby-plugin-danmuplus/tree/main";
+            const string legacySourceUrl = "https://github.com/cxfksword/jellyfin-plugin-danmu";
+            Assert(ContainsConfigurationSourceLink(sourceHtml, sourceUrl) &&
+                   !ContainsConfigurationSourceLink(sourceHtml, legacySourceUrl),
+                "the configuration-page source template should link only its source action to the DanmuPlus main branch");
+            Assert(ContainsConfigurationSourceLink(html, sourceUrl) &&
+                   !ContainsConfigurationSourceLink(html, legacySourceUrl),
+                "the generated embedded configuration page should retain the external DanmuPlus main-branch source action");
+            Assert(CountOccurrences(sourceHtml, "https://worker.example/cors/") == 2 &&
+                   CountOccurrences(html, "https://worker.example/cors/") == 2,
+                "the source-link change must retain the public custom-proxy example in source and generated resources");
+
+            var readmeSource = File.ReadAllText(Path.Combine(sourceRoot, "README.md"));
+            Assert(CountOccurrences(readmeSource,
+                       "https://github.com/mouxiaohao/emby-plugin-danmuplus/releases/latest") == 2 &&
+                   readmeSource.Contains("[完整更新日志（UPDATE.md）](UPDATE.md)") &&
+                   readmeSource.Contains("https://github.com/Shurelol/Emby.CustomCssJS"),
+                "the source-link change must retain the release, update-log, and CustomCssJS documentation destinations");
+
             var pluginSource = File.ReadAllText(Path.GetFullPath(Path.Combine(
                 sourceRoot, "Plugin.cs")));
             Assert(pluginSource.Contains("GeneratedConfigurationPageResources.PageName") &&
@@ -2014,6 +2033,16 @@ namespace Emby.Plugin.Danmu.RegressionTests
                 "<h2\\b[^>]*\\bclass\\s*=\\s*[\"'][^\"']*\\bsectionTitle\\b[^\"']*[\"'][^>]*>\\s*" +
                 Regex.Escape(heading) +
                 "\\s*</h2>",
+                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        }
+
+        private static bool ContainsConfigurationSourceLink(string html, string href)
+        {
+            return Regex.IsMatch(
+                html,
+                "<a\\s+id=\"test\"\\s+is=\"emby-linkbutton\"\\s+" +
+                "class=\"raised button-alt headerHelpButton emby-button\"\\s+target=\"_blank\"\\s+" +
+                "href=\"" + Regex.Escape(href) + "\">\\s*源码\\s*</a>",
                 RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
         }
 
