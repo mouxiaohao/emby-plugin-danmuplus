@@ -29,10 +29,11 @@ namespace Emby.Plugin.Danmu.BoundedSearchPolicyRegression
         {
             KeepsTwoInteractiveDialogOperationsIndependent();
             KeepsTwoDialogsAndAutomaticWorkGloballyProviderBoundedAndFair();
-            IncompletePlannedCallsDisableAutomaticSelection();
-            RetainsGateUntilLateProviderStops();
+            ExplicitCancellationDisablesAutomaticSelection();
+            RetainsGateUntilCancelledProviderStops();
             ProviderGateDoesNotStarveOtherProviders();
-            DistinguishesProviderAndOverallTimeouts();
+            IgnoresLegacyDeadlinesAndRequiresExplicitCancellation();
+            ConcurrentRegistryDisposalCannotPublishUndeadOperation();
             CancelsOperationRegisteredAfterCancelRequest();
             ProviderIdResolutionPropagatesCallerCancellation();
             VerifiesControllerCancelContract();
@@ -123,10 +124,7 @@ namespace Emby.Plugin.Danmu.BoundedSearchPolicyRegression
 
         private static void KeepsTwoInteractiveDialogOperationsIndependent()
         {
-            var options = new BoundedSearchPolicyOptions(
-                providerCallTimeout: TimeSpan.FromMilliseconds(50),
-                interactiveOperationTimeout: TimeSpan.FromSeconds(1),
-                automaticOperationTimeout: TimeSpan.FromSeconds(1));
+            var options = new BoundedSearchPolicyOptions();
             using (var registry = new SearchOperationRegistry(options))
             {
                 Assert(registry.TryBegin("dialog-search-001", SearchOperationScope.Interactive, out var first, out _),
@@ -144,11 +142,7 @@ namespace Emby.Plugin.Danmu.BoundedSearchPolicyRegression
 
         private static void KeepsTwoDialogsAndAutomaticWorkGloballyProviderBoundedAndFair()
         {
-            var options = new BoundedSearchPolicyOptions(
-                providerCallTimeout: TimeSpan.FromSeconds(2),
-                interactiveOperationTimeout: TimeSpan.FromSeconds(2),
-                automaticOperationTimeout: TimeSpan.FromSeconds(2),
-                maximumConcurrentProviders: 3);
+            var options = new BoundedSearchPolicyOptions(maximumConcurrentProviders: 3);
             var policy = new BoundedSearchPolicy(options);
             using (var registry = new SearchOperationRegistry(options))
             {
@@ -205,26 +199,19 @@ namespace Emby.Plugin.Danmu.BoundedSearchPolicyRegression
             }
         }
 
-        private static void IncompletePlannedCallsDisableAutomaticSelection()
+        private static void ExplicitCancellationDisablesAutomaticSelection()
         {
-            var policy = new BoundedSearchPolicy(new BoundedSearchPolicyOptions(
-                providerCallTimeout: TimeSpan.FromMilliseconds(20),
-                interactiveOperationTimeout: TimeSpan.FromMilliseconds(80),
-                automaticOperationTimeout: TimeSpan.FromMilliseconds(80)));
+            var policy = new BoundedSearchPolicy();
             var fast = new RecordingScraper("fast", Task.FromResult(new List<ScraperSearchInfo>
             {
                 new ScraperSearchInfo { Id = "fast-1", Name = "Series Alpha", EpisodeSize = 12, Year = 2024 },
             }));
-            var slow = new RecordingScraper("slow", new TaskCompletionSource<List<ScraperSearchInfo>>(
-                TaskCreationOptions.RunContinuationsAsynchronously).Task);
-            // Keep the enclosing cancellation comfortably beyond the 20 ms
-            // provider timeout. On a loaded build host, tightly coalesced timer
-            // callbacks can otherwise make cancellation win before the timeout
-            // continuation is observed, testing scheduler jitter instead of the
-            // intended timeout-then-unstarted sequence.
-            using (var operation = new CancellationTokenSource(TimeSpan.FromMilliseconds(500)))
+            var slowResult = new TaskCompletionSource<List<ScraperSearchInfo>>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            var slow = new RecordingScraper("slow", slowResult.Task);
+            using (var operation = new CancellationTokenSource())
             {
-                var result = DanmuMatchSearchEngine.SearchSeasonAsync(
+                var search = DanmuMatchSearchEngine.SearchSeasonAsync(
                     new AbstractScraper[] { fast, slow },
                     "Series Alpha",
                     "Series Alpha Part 2",
@@ -233,42 +220,70 @@ namespace Emby.Plugin.Danmu.BoundedSearchPolicyRegression
                     null,
                     null,
                     policy,
-                    operation.Token).GetAwaiter().GetResult();
-                Assert(!result.IsComplete && result.Candidates.Any(candidate => candidate.Site == "fast"),
-                    "a planned timeout must preserve successful candidates but mark the aggregate incomplete");
-                Assert(result.CompletionDiagnostics.Any(diagnostic => diagnostic.Status == "timed_out") &&
+                    operation.Token);
+                AwaitWithWatchdog(slow.Started, "the controllable provider must start");
+                Assert(!search.IsCompleted,
+                    "shared search must keep awaiting a provider until explicit cancellation");
+                operation.Cancel();
+                var result = AwaitWithWatchdog(search,
+                    "explicit search cancellation must return without waiting for a non-cooperative provider");
+                Assert(result.WasCancelled && !result.IsComplete &&
+                       result.Decision == "cancelled" && result.SelectedCandidate == null,
+                    "explicit cancellation may retain diagnostics candidates but must never auto-select one");
+                Assert(!result.CompletionDiagnostics.Any(diagnostic => diagnostic.Status == "timed_out") &&
                        result.CompletionDiagnostics.Any(diagnostic => diagnostic.Status == "unstarted"),
-                    "a late non-cooperative call must report both timeout and later unstarted planned work");
+                    "explicit cancellation must report unstarted work without manufacturing a timeout");
                 Assert(result.CompletionDiagnostics.Select(diagnostic => diagnostic.Provider)
                            .SequenceEqual(new[] { "fast", "fast", "slow", "slow" }) &&
                        result.CompletionDiagnostics.Select(diagnostic => diagnostic.Status)
-                           .SequenceEqual(new[] { "completed", "completed", "timed_out", "unstarted" }),
-                    "partial diagnostics must retain configured-provider and planned-term order regardless of completion timing");
+                           .SequenceEqual(new[] { "completed", "completed", "unstarted", "unstarted" }),
+                    "cancelled diagnostics must retain configured-provider and planned-term order");
+                slowResult.SetResult(new List<ScraperSearchInfo>());
             }
         }
 
-        private static void RetainsGateUntilLateProviderStops()
+        private static void RetainsGateUntilCancelledProviderStops()
         {
-            var policy = new BoundedSearchPolicy(new BoundedSearchPolicyOptions(
-                providerCallTimeout: TimeSpan.FromMilliseconds(20),
-                interactiveOperationTimeout: TimeSpan.FromMilliseconds(100),
-                automaticOperationTimeout: TimeSpan.FromMilliseconds(100),
-                maximumConcurrentProviders: 1));
+            var policy = new BoundedSearchPolicy(
+                new BoundedSearchPolicyOptions(maximumConcurrentProviders: 1));
             var late = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
-            var timedOut = policy.ExecuteAsync("late-site", ignored => late.Task, CancellationToken.None)
-                .GetAwaiter().GetResult();
-            Assert(timedOut.Status == BoundedSearchExecutionStatus.ProviderTimedOut && !timedOut.Settlement.IsCompleted,
-                "a timed-out provider must retain its lease until its actual task completes");
-            using (var waitingOperation = new CancellationTokenSource(TimeSpan.FromMilliseconds(30)))
+            var started = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            using (var ownerCancellation = new CancellationTokenSource())
             {
-                var blocked = policy.ExecuteAsync("other-site", ignored => Task.FromResult(1), waitingOperation.Token)
-                    .GetAwaiter().GetResult();
-                Assert(blocked.Status == BoundedSearchExecutionStatus.Cancelled,
-                    "the global gate wait must consume the dialog operation budget");
-            }
+                var ownerTask = policy.ExecuteAsync("late-site", ignored =>
+                {
+                    started.TrySetResult(true);
+                    return late.Task;
+                }, ownerCancellation.Token);
+                AwaitWithWatchdog(started.Task, "the non-cooperative provider must start");
+                Assert(!ownerTask.IsCompleted,
+                    "elapsed time must not end an active shared search");
+                ownerCancellation.Cancel();
+                var cancelled = AwaitWithWatchdog(ownerTask,
+                    "explicit cancellation must return the provider outcome promptly");
+                Assert(cancelled.Status == BoundedSearchExecutionStatus.Cancelled &&
+                       !cancelled.Settlement.IsCompleted,
+                    "a cancelled provider must retain its lease until its actual task completes");
 
-            late.SetResult(1);
-            timedOut.Settlement.GetAwaiter().GetResult();
+                using (var waitingCancellation = new CancellationTokenSource())
+                {
+                    var sameSite = policy.ExecuteAsync(
+                        "late-site", ignored => Task.FromResult(1), waitingCancellation.Token);
+                    var otherSite = policy.ExecuteAsync(
+                        "other-site", ignored => Task.FromResult(2), waitingCancellation.Token);
+                    Assert(!sameSite.IsCompleted && !otherSite.IsCompleted,
+                        "both the provider-local and global gate must remain held before settlement");
+                    waitingCancellation.Cancel();
+                    Assert(AwaitWithWatchdog(sameSite, "same-site gate waiter cancellation").Status ==
+                               BoundedSearchExecutionStatus.Cancelled &&
+                           AwaitWithWatchdog(otherSite, "global gate waiter cancellation").Status ==
+                               BoundedSearchExecutionStatus.Cancelled,
+                        "gate waiters must observe explicit cancellation while the owner settles");
+                }
+
+                late.SetResult(1);
+                AwaitWithWatchdog(cancelled.Settlement, "cancelled provider settlement");
+            }
             Assert(policy.ExecuteAsync("other-site", ignored => Task.FromResult(1), CancellationToken.None)
                        .GetAwaiter().GetResult().Status == BoundedSearchExecutionStatus.Completed,
                 "the gate must be released after the late provider finishes");
@@ -276,11 +291,8 @@ namespace Emby.Plugin.Danmu.BoundedSearchPolicyRegression
 
         private static void ProviderGateDoesNotStarveOtherProviders()
         {
-            var policy = new BoundedSearchPolicy(new BoundedSearchPolicyOptions(
-                providerCallTimeout: TimeSpan.FromSeconds(1),
-                interactiveOperationTimeout: TimeSpan.FromSeconds(2),
-                automaticOperationTimeout: TimeSpan.FromSeconds(2),
-                maximumConcurrentProviders: 3));
+            var policy = new BoundedSearchPolicy(
+                new BoundedSearchPolicyOptions(maximumConcurrentProviders: 3));
             var late = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
             var first = policy.ExecuteAsync("same-site", ignored => late.Task, CancellationToken.None);
             var queuedOne = policy.ExecuteAsync("same-site", ignored => Task.FromResult(2), CancellationToken.None);
@@ -298,44 +310,144 @@ namespace Emby.Plugin.Danmu.BoundedSearchPolicyRegression
                 "queued same-provider calls must run serially after the owner releases its gate");
         }
 
-        private static void DistinguishesProviderAndOverallTimeouts()
+        private static void IgnoresLegacyDeadlinesAndRequiresExplicitCancellation()
         {
-            var providerPolicy = new BoundedSearchPolicy(new BoundedSearchPolicyOptions(
-                providerCallTimeout: TimeSpan.FromMilliseconds(20),
-                interactiveOperationTimeout: TimeSpan.FromSeconds(1),
-                automaticOperationTimeout: TimeSpan.FromSeconds(1)));
-            var providerLate = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
-            var providerTimeout = providerPolicy.ExecuteAsync("provider-timeout", _ => providerLate.Task,
-                    CancellationToken.None)
-                .GetAwaiter().GetResult();
-            Assert(providerTimeout.Status == BoundedSearchExecutionStatus.ProviderTimedOut &&
-                   !providerTimeout.Settlement.IsCompleted,
-                "the per-provider deadline must report ProviderTimedOut and retain the late-task gate");
-            providerLate.SetResult(1);
-            providerTimeout.Settlement.GetAwaiter().GetResult();
-
-            var overallOptions = new BoundedSearchPolicyOptions(
-                providerCallTimeout: TimeSpan.FromSeconds(1),
-                interactiveOperationTimeout: TimeSpan.FromSeconds(1),
-                automaticOperationTimeout: TimeSpan.FromMilliseconds(35));
-            var overallPolicy = new BoundedSearchPolicy(overallOptions);
-            using (var registry = new SearchOperationRegistry(overallOptions))
+            var legacyOptions = new BoundedSearchPolicyOptions(
+                providerCallTimeout: TimeSpan.Zero,
+                interactiveOperationTimeout: TimeSpan.Zero,
+                automaticOperationTimeout: TimeSpan.Zero);
+            Assert(legacyOptions.ProviderCallTimeout == Timeout.InfiniteTimeSpan &&
+                   legacyOptions.InteractiveOperationTimeout == Timeout.InfiniteTimeSpan &&
+                   legacyOptions.AutomaticOperationTimeout == Timeout.InfiniteTimeSpan,
+                "legacy timeout settings must resolve to explicit no-deadline compatibility values");
+            var policy = new BoundedSearchPolicy(legacyOptions);
+            using (var registry = new SearchOperationRegistry(legacyOptions))
             {
-                Assert(registry.TryBegin("automatic-timeout-001", SearchOperationScope.Automatic,
-                    out var operation, out _), "the automatic overall-timeout operation must register");
+                Assert(registry.TryBegin("automatic-search-001", SearchOperationScope.Automatic,
+                    out var operation, out _), "the automatic operation must register");
                 using (operation)
                 {
-                    var overallLate = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
-                    var overallTimeout = overallPolicy.ExecuteAsync("overall-timeout", _ => overallLate.Task,
-                            operation.CancellationToken)
-                        .GetAwaiter().GetResult();
-                    Assert(overallTimeout.Status == BoundedSearchExecutionStatus.Cancelled &&
-                           operation.IsCancellationRequested && !overallTimeout.Settlement.IsCompleted,
-                        "the automatic overall deadline must cancel the operation distinctly from provider timeout");
-                    overallLate.SetResult(1);
-                    overallTimeout.Settlement.GetAwaiter().GetResult();
+                    var late = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+                    var started = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                    var execution = policy.ExecuteAsync("provider-without-deadline", _ =>
+                    {
+                        started.TrySetResult(true);
+                        return late.Task;
+                    }, operation.CancellationToken);
+                    AwaitWithWatchdog(started.Task, "the no-deadline provider must start");
+                    Assert(!operation.IsCancellationRequested && !execution.IsCompleted,
+                        "neither provider nor automatic operation may self-cancel from elapsed time");
+                    Assert(registry.TryCancel("automatic-search-001"),
+                        "the registered automatic operation must accept explicit cancellation");
+                    var cancelled = AwaitWithWatchdog(execution,
+                        "explicit automatic cancellation must return promptly");
+                    Assert(cancelled.Status == BoundedSearchExecutionStatus.Cancelled &&
+                           operation.IsCancellationRequested && !cancelled.Settlement.IsCompleted,
+                        "only explicit cancellation may end the operation before provider settlement");
+                    late.SetResult(1);
+                    AwaitWithWatchdog(cancelled.Settlement, "explicitly cancelled provider settlement");
                 }
             }
+        }
+
+        private static void ConcurrentRegistryDisposalCannotPublishUndeadOperation()
+        {
+            for (var iteration = 0; iteration < 128; iteration++)
+            {
+                var registry = new SearchOperationRegistry();
+                SearchOperationRegistry.SearchOperationLease lease = null;
+                using (var start = new ManualResetEventSlim(false))
+                {
+                    var begin = Task.Run(() =>
+                    {
+                        start.Wait();
+                        registry.TryBegin(
+                            "dispose-race-" + iteration.ToString("D3"),
+                            SearchOperationScope.Interactive,
+                            out lease,
+                            out _);
+                    });
+                    var dispose = Task.Run(() =>
+                    {
+                        start.Wait();
+                        registry.Dispose();
+                    });
+                    start.Set();
+                    AwaitWithWatchdog(Task.WhenAll(begin, dispose),
+                        "concurrent search-operation registration and disposal");
+                }
+
+                Assert(registry.ActiveOperationCount == 0,
+                    "concurrent Dispose must not leave a newly published operation active without a deadline");
+                if (lease != null)
+                {
+                    var observedToken = lease.CancellationToken;
+                    Assert(observedToken.IsCancellationRequested && lease.IsCancellationRequested,
+                        "a lease returned across registry disposal must expose a stable cancelled token without throwing");
+                }
+                lease?.Dispose();
+                registry.Dispose();
+            }
+
+            var disposedRegistry = new SearchOperationRegistry();
+            Assert(disposedRegistry.TryBegin(
+                    "stable-disposed-token",
+                    SearchOperationScope.Interactive,
+                    out var disposedLease,
+                    out _),
+                "the deterministic disposed-token fixture must publish a lease first");
+            disposedRegistry.Dispose();
+            Assert(disposedLease.CancellationToken.IsCancellationRequested &&
+                   disposedLease.IsCancellationRequested,
+                "a registry-disposed lease must retain an inspectable cancelled token after its source is disposed");
+            disposedLease.Dispose();
+
+            using (var registry = new SearchOperationRegistry())
+            {
+                Assert(registry.TryBegin(
+                        "stable-live-token",
+                        SearchOperationScope.Interactive,
+                        out var liveLease,
+                        out _),
+                    "an undisposed registry must still publish an ordinary active lease");
+                using (liveLease)
+                {
+                    var liveToken = liveLease.CancellationToken;
+                    Assert(!liveToken.IsCancellationRequested && !liveLease.IsCancellationRequested,
+                        "a normally published lease must remain active before explicit cancellation");
+                    Assert(registry.TryCancel(liveLease.OperationId) &&
+                           liveToken.IsCancellationRequested && liveLease.IsCancellationRequested,
+                        "the stable token snapshot must continue observing explicit cancellation");
+                }
+            }
+
+            var root = FindRepositoryRoot(AppContext.BaseDirectory);
+            var source = File.ReadAllText(Path.Combine(root, "Core", "SearchOperationRegistry.cs"));
+            var addIndex = source.IndexOf("if (!_operations.TryAdd(normalizedId, entry))", StringComparison.Ordinal);
+            var postAddCheckIndex = source.IndexOf(
+                "if (Volatile.Read(ref _disposed) != 0)",
+                addIndex + 1,
+                StringComparison.Ordinal);
+            var exactRemoveIndex = source.IndexOf(
+                "TryRemoveExact(normalizedId, entry)",
+                postAddCheckIndex + 1,
+                StringComparison.Ordinal);
+            var cancelIndex = source.IndexOf(
+                "entry.Source.Cancel();",
+                exactRemoveIndex + 1,
+                StringComparison.Ordinal);
+            var disposeIndex = source.IndexOf(
+                "entry.Source.Dispose();",
+                cancelIndex + 1,
+                StringComparison.Ordinal);
+            Assert(addIndex >= 0 && postAddCheckIndex > addIndex &&
+                   exactRemoveIndex > postAddCheckIndex && cancelIndex > exactRemoveIndex &&
+                   disposeIndex > cancelIndex &&
+                   source.Contains("new KeyValuePair<string, Entry>(operationId, expected)",
+                       StringComparison.Ordinal) &&
+                   source.Contains("Token = source.Token;", StringComparison.Ordinal) &&
+                   source.Contains(": entry.Token;", StringComparison.Ordinal),
+                "TryBegin must recheck disposal after TryAdd, remove only its exact entry, cancel and dispose it, and expose a stable token snapshot");
         }
 
         private static void CancelsOperationRegisteredAfterCancelRequest()
@@ -507,6 +619,22 @@ namespace Emby.Plugin.Danmu.BoundedSearchPolicyRegression
             return count;
         }
 
+        private static void AwaitWithWatchdog(Task task, string operation)
+        {
+            if (Task.WhenAny(task, Task.Delay(TimeSpan.FromSeconds(5))).GetAwaiter().GetResult() != task)
+            {
+                throw new InvalidOperationException("Regression watchdog expired: " + operation);
+            }
+
+            task.GetAwaiter().GetResult();
+        }
+
+        private static TResult AwaitWithWatchdog<TResult>(Task<TResult> task, string operation)
+        {
+            AwaitWithWatchdog((Task)task, operation);
+            return task.GetAwaiter().GetResult();
+        }
+
         private static void UpdateMaximum(ref int target, int value)
         {
             while (true)
@@ -547,6 +675,8 @@ namespace Emby.Plugin.Danmu.BoundedSearchPolicyRegression
         {
             private readonly string _id;
             private readonly Task<List<ScraperSearchInfo>> _result;
+            private readonly TaskCompletionSource<bool> _started =
+                new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
 
             public RecordingScraper(string id, Task<List<ScraperSearchInfo>> result) : base(null)
             {
@@ -557,9 +687,14 @@ namespace Emby.Plugin.Danmu.BoundedSearchPolicyRegression
             public override string Name => _id;
             public override string ProviderName => _id;
             public override string ProviderId => _id;
+            public Task Started => _started.Task;
             public override Task<List<ScraperSearchInfo>> Search(BaseItem item) => _result;
             public override Task<string> SearchMediaId(BaseItem item) => Task.FromResult(string.Empty);
-            public override Task<List<ScraperSearchInfo>> SearchForApi(string keyword) => _result;
+            public override Task<List<ScraperSearchInfo>> SearchForApi(string keyword)
+            {
+                _started.TrySetResult(true);
+                return _result;
+            }
             public override Task<ScraperMedia> GetMedia(BaseItem item, string id) => Task.FromResult<ScraperMedia>(null);
             public override Task<ScraperEpisode> GetMediaEpisode(BaseItem item, string id) => Task.FromResult<ScraperEpisode>(null);
             public override Task<ScraperDanmaku> GetDanmuContent(BaseItem item, string commentId) => Task.FromResult<ScraperDanmaku>(null);

@@ -5,6 +5,7 @@ using System.Linq;
 using System.Reflection;
 using System.Runtime.Serialization;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using Emby.Plugin.Danmu.Core;
 using Emby.Plugin.Danmu.Core.Controllers;
@@ -35,6 +36,7 @@ namespace Emby.Plugin.Danmu.RegressionTests
             DoesNotClassifySingleSourcePartialCoverageAsComposite();
             MapsTwentyFiveEpisodePartSourcesWithBindingSafety();
             CoordinatesSingletonAndSeriesTargetSetsIdentically();
+            CoordinatesWithoutChildDeadlineAndPropagatesExplicitCancellation();
             MapsMultipleSpecialRunsWithoutChangingLocalSeasonMembership();
             SeparatesCanonicalMediaIdentityFromLookupToken();
             RejectsOverlapsAndUnverifiedMappings();
@@ -389,6 +391,85 @@ namespace Emby.Plugin.Danmu.RegressionTests
             Assert(singleton.Count == 1 && singleton[0].SeasonId == series[0].SeasonId &&
                    series.Select(result => result.SeasonId).SequenceEqual(new[] { "season-1", "season-2" }),
                 "single-Season and whole-Series entry points must use the same stable target-set coordinator contract");
+        }
+
+        private static void CoordinatesWithoutChildDeadlineAndPropagatesExplicitCancellation()
+        {
+            var started = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var release = new TaskCompletionSource<DanmuSeasonMatchResult>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            var observedExecutionToken = default(CancellationToken);
+            var observedParentToken = default(CancellationToken);
+            using (var cancellation = new CancellationTokenSource())
+            {
+                var build = CompositeSeasonTargetSetCoordinator.BuildAsync(new[]
+                {
+                    new CompositeSeasonTargetRequest
+                    {
+                        SeasonId = "season-no-deadline",
+                        BuildPreviewAsync = (executionToken, parentToken) =>
+                        {
+                            observedExecutionToken = executionToken;
+                            observedParentToken = parentToken;
+                            started.TrySetResult(true);
+                            return release.Task;
+                        },
+                    },
+                }, cancellation.Token);
+                AwaitWithWatchdog(started.Task, "the composite target must start");
+                Assert(!build.IsCompleted && observedExecutionToken == cancellation.Token &&
+                       observedParentToken == cancellation.Token,
+                    "the coordinator must forward its caller token directly without creating a child deadline");
+                release.SetResult(new DanmuSeasonMatchResult
+                {
+                    SeasonId = "season-no-deadline",
+                    Status = "matched",
+                });
+                var result = AwaitWithWatchdog(build, "the released composite target must settle");
+                Assert(result.Count == 1 && result[0].SeasonId == "season-no-deadline",
+                    "a long-running target must complete normally when its provider settles");
+            }
+
+            var cancelledStarted = new TaskCompletionSource<bool>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            using (var cancellation = new CancellationTokenSource())
+            {
+                var build = CompositeSeasonTargetSetCoordinator.BuildAsync(new[]
+                {
+                    new CompositeSeasonTargetRequest
+                    {
+                        SeasonId = "season-explicit-cancel",
+                        BuildPreviewAsync = (executionToken, parentToken) =>
+                        {
+                            cancelledStarted.TrySetResult(true);
+                            return AwaitExplicitCancellationAsync(executionToken);
+                        },
+                    },
+                }, cancellation.Token);
+                AwaitWithWatchdog(cancelledStarted.Task, "the cancellable composite target must start");
+                cancellation.Cancel();
+                Assert(Task.WhenAny(build, Task.Delay(TimeSpan.FromSeconds(5))).GetAwaiter().GetResult() == build,
+                    "explicit parent cancellation must reach the active target promptly");
+                var cancelled = false;
+                try
+                {
+                    build.GetAwaiter().GetResult();
+                }
+                catch (OperationCanceledException)
+                {
+                    cancelled = true;
+                }
+
+                Assert(cancelled,
+                    "the coordinator must preserve explicit parent cancellation rather than converting it to a timeout");
+            }
+        }
+
+        private static async Task<DanmuSeasonMatchResult> AwaitExplicitCancellationAsync(
+            CancellationToken cancellationToken)
+        {
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken).ConfigureAwait(false);
+            throw new InvalidOperationException("An infinite cancellation wait completed without cancellation.");
         }
 
         private static void MapsMultipleSpecialRunsWithoutChangingLocalSeasonMembership()
@@ -1251,6 +1332,22 @@ namespace Emby.Plugin.Danmu.RegressionTests
 
         private static string RunIds(CompositeSeasonUnmatchedRun run) =>
             string.Join(",", run.Episodes.Select(episode => episode.ItemId));
+
+        private static void AwaitWithWatchdog(Task task, string operation)
+        {
+            if (Task.WhenAny(task, Task.Delay(TimeSpan.FromSeconds(5))).GetAwaiter().GetResult() != task)
+            {
+                throw new InvalidOperationException("Regression watchdog expired: " + operation);
+            }
+
+            task.GetAwaiter().GetResult();
+        }
+
+        private static TResult AwaitWithWatchdog<TResult>(Task<TResult> task, string operation)
+        {
+            AwaitWithWatchdog((Task)task, operation);
+            return task.GetAwaiter().GetResult();
+        }
 
         private static void Assert(bool condition, string message)
         {

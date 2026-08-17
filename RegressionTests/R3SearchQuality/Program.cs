@@ -8,6 +8,7 @@ using Emby.Plugin.Danmu.Model;
 using Emby.Plugin.Danmu.Scraper;
 using Emby.Plugin.Danmu.Scraper.Entity;
 using MediaBrowser.Controller.Entities;
+using MediaBrowser.Controller.Entities.Movies;
 
 namespace Emby.Plugin.Danmu.R3SearchQualityRegression
 {
@@ -20,6 +21,8 @@ namespace Emby.Plugin.Danmu.R3SearchQualityRegression
             RetainsManualCustomSearchCandidatesWithoutTitleEvidence();
             ProjectsProviderGroupsWithFairDeterministicQuotas();
             KeepsCanonicalSelectionIndependentFromProjection();
+            DefaultAutomaticEntrypointsUseNoDeadlineToken();
+            ParentCancellationReachesProviderWhenTokensDiffer();
             ClassifiesIncompleteAndCancelledRounds();
             KeepsThreeSeasonInvocationsEquivalent();
             Console.WriteLine("r3 search-quality regression checks passed.");
@@ -172,10 +175,70 @@ namespace Emby.Plugin.Danmu.R3SearchQualityRegression
                 "same-site highest-score ties must remain ambiguous regardless of display ordering");
         }
 
+        private static void DefaultAutomaticEntrypointsUseNoDeadlineToken()
+        {
+            var seasonProvider = new TokenObservingScraper("automatic-season");
+            var seasonSearch = DanmuMatchSearchEngine.SearchSeasonAsync(
+                new AbstractScraper[] { seasonProvider }, "SPY x FAMILY", "Season 1",
+                2022, 25, null, null);
+            AwaitWithWatchdog(seasonProvider.Started, "the default Season search must start");
+            Assert(!seasonProvider.ObservedToken.CanBeCanceled && !seasonSearch.IsCompleted,
+                "the default automatic Season entry point must not manufacture a 45-second token");
+            seasonProvider.Complete();
+            AwaitWithWatchdog(seasonSearch, "the default Season search must settle normally");
+
+            var movieProvider = new TokenObservingScraper("automatic-movie");
+            var movieSearch = DanmuMatchSearchEngine.SearchMovieAsync(
+                new AbstractScraper[] { movieProvider },
+                new Movie { Name = "SPY x FAMILY CODE White", ProductionYear = 2023 },
+                null,
+                null);
+            AwaitWithWatchdog(movieProvider.Started, "the default Movie search must start");
+            Assert(!movieProvider.ObservedToken.CanBeCanceled && !movieSearch.IsCompleted,
+                "the default automatic Movie entry point must not manufacture a 45-second token");
+            movieProvider.Complete();
+            AwaitWithWatchdog(movieSearch, "the default Movie search must settle normally");
+        }
+
+        private static void ParentCancellationReachesProviderWhenTokensDiffer()
+        {
+            var provider = new ParentCancellationScraper("distinct-parent-cancellation");
+            using (var executionCancellation = new CancellationTokenSource())
+            using (var parentCancellation = new CancellationTokenSource())
+            {
+                var search = DanmuMatchSearchEngine.SearchSeasonAsync(
+                    new AbstractScraper[] { provider },
+                    "SPY x FAMILY",
+                    "Season 1",
+                    2022,
+                    25,
+                    null,
+                    null,
+                    new BoundedSearchPolicy(),
+                    executionCancellation.Token,
+                    parentCancellation.Token);
+                AwaitWithWatchdog(provider.Started,
+                    "the provider must receive the combined Season cancellation token");
+                Assert(provider.ObservedToken.CanBeCanceled &&
+                       !provider.ObservedToken.Equals(executionCancellation.Token) &&
+                       !provider.ObservedToken.Equals(parentCancellation.Token),
+                    "two distinct cancellable tokens must be combined for the entire Season search");
+
+                parentCancellation.Cancel();
+                AwaitWithWatchdog(provider.CancellationObserved,
+                    "late parent cancellation must reach the active provider");
+                var result = AwaitWithWatchdog(search,
+                    "late parent cancellation must complete the Season search");
+                Assert(!executionCancellation.IsCancellationRequested &&
+                       result.WasCancelled && !result.IsComplete &&
+                       result.Decision == "cancelled" && result.SelectedCandidate == null,
+                    "parent-only cancellation must invalidate the full search without cancelling its sibling token");
+            }
+        }
+
         private static void ClassifiesIncompleteAndCancelledRounds()
         {
-            var options = new BoundedSearchPolicyOptions(
-                TimeSpan.FromMilliseconds(30), TimeSpan.FromMilliseconds(250), TimeSpan.FromMilliseconds(250));
+            var options = new BoundedSearchPolicyOptions();
             var policy = new BoundedSearchPolicy(options);
             var completed = new ResultScraper("completed", new[]
             {
@@ -240,21 +303,27 @@ namespace Emby.Plugin.Danmu.R3SearchQualityRegression
 
             var delayedProvider = new TaskCompletionSource<List<ScraperSearchInfo>>(
                 TaskCreationOptions.RunContinuationsAsynchronously);
-            var timeoutPolicy = new BoundedSearchPolicy(new BoundedSearchPolicyOptions(
-                TimeSpan.FromMilliseconds(20), TimeSpan.FromMilliseconds(200), TimeSpan.FromMilliseconds(200)));
-            var timedOutSibling = DanmuMatchSearchEngine.SearchSeasonAsync(
+            var deferred = new DeferredScraper("deferred", delayedProvider);
+            var noDeadlinePolicy = new BoundedSearchPolicy(new BoundedSearchPolicyOptions(
+                TimeSpan.Zero, TimeSpan.Zero, TimeSpan.Zero));
+            var pendingSibling = DanmuMatchSearchEngine.SearchSeasonAsync(
                     new AbstractScraper[]
                     {
                         new ResultScraper("timely", new[] { Info("timely-winner", "SPY x FAMILY", "动漫", 25, 2022) }),
-                        new DeferredScraper("timed-out", delayedProvider),
-                    }, "SPY x FAMILY", "Season 1", 2022, 25, null, null, timeoutPolicy, CancellationToken.None)
-                .GetAwaiter().GetResult();
-            delayedProvider.TrySetResult(new List<ScraperSearchInfo>());
-            Assert(timedOutSibling.HasCompletedProviders && !timedOutSibling.IsComplete &&
-                   timedOutSibling.HasProviderLocalFaults && timedOutSibling.SelectedCandidate?.Id == "timely-winner" &&
-                   timedOutSibling.Decision == "confident" &&
-                   timedOutSibling.CompletionDiagnostics.Any(diagnostic => diagnostic.Status == "timed_out"),
-                "a ProviderTimedOut sibling must not make a completed high-confidence candidate provisional");
+                        deferred,
+                    }, "SPY x FAMILY", "Season 1", 2022, 25, null, null, noDeadlinePolicy,
+                    CancellationToken.None);
+            AwaitWithWatchdog(deferred.Started, "the deferred provider must start");
+            Assert(!pendingSibling.IsCompleted,
+                "shared search must await a deferred provider without a provider or operation deadline");
+            delayedProvider.SetResult(new List<ScraperSearchInfo>());
+            var settledSibling = AwaitWithWatchdog(pendingSibling, "the deferred provider must settle normally");
+            Assert(settledSibling.HasCompletedProviders && settledSibling.IsComplete &&
+                   !settledSibling.HasProviderLocalFaults &&
+                   settledSibling.SelectedCandidate?.Id == "timely-winner" &&
+                   settledSibling.Decision == "confident" &&
+                   !settledSibling.CompletionDiagnostics.Any(diagnostic => diagnostic.Status == "timed_out"),
+                "a normally settled sibling must complete without synthesized timeout diagnostics");
 
             var completedEmpty = DanmuMatchSearchEngine.SearchSeasonAsync(
                     new AbstractScraper[] { new ResultScraper("empty", Array.Empty<ScraperSearchInfo>()) },
@@ -292,15 +361,16 @@ namespace Emby.Plugin.Danmu.R3SearchQualityRegression
                     "parent cancellation after a provider completes must still clear automatic selection");
             }
 
-            using (var childBudget = new CancellationTokenSource())
+            using (var explicitlyCancelledSearch = new CancellationTokenSource())
             {
-                childBudget.Cancel();
+                explicitlyCancelledSearch.Cancel();
                 var result = DanmuMatchSearchEngine.SearchSeasonAsync(
                         new AbstractScraper[] { completed }, "SPY x FAMILY", "Season 1", 2022, 25,
-                        null, null, policy, childBudget.Token, CancellationToken.None)
+                        null, null, policy, explicitlyCancelledSearch.Token, CancellationToken.None)
                     .GetAwaiter().GetResult();
-                Assert(!result.WasCancelled && result.Decision == "retryable-incomplete",
-                    "child budget exhaustion must remain retryable instead of impersonating parent cancellation");
+                Assert(result.WasCancelled && result.Decision == "cancelled" &&
+                       result.SelectedCandidate == null,
+                    "explicit operation cancellation must be fail-closed even when the parent token is separate");
             }
 
             var missingParent = DanmuMatchSearchEngine.SearchSeasonAsync(
@@ -344,6 +414,22 @@ namespace Emby.Plugin.Danmu.R3SearchQualityRegression
         {
             var materialized = values.ToList();
             return materialized.Zip(materialized.Skip(1), (left, right) => left >= right).All(value => value);
+        }
+
+        private static void AwaitWithWatchdog(Task task, string operation)
+        {
+            if (Task.WhenAny(task, Task.Delay(TimeSpan.FromSeconds(5))).GetAwaiter().GetResult() != task)
+            {
+                throw new InvalidOperationException("Regression watchdog expired: " + operation);
+            }
+
+            task.GetAwaiter().GetResult();
+        }
+
+        private static TResult AwaitWithWatchdog<TResult>(Task<TResult> task, string operation)
+        {
+            AwaitWithWatchdog((Task)task, operation);
+            return task.GetAwaiter().GetResult();
         }
 
         private static void Assert(bool condition, string message)
@@ -417,6 +503,8 @@ namespace Emby.Plugin.Danmu.R3SearchQualityRegression
         private sealed class DeferredScraper : ResultScraper
         {
             private readonly TaskCompletionSource<List<ScraperSearchInfo>> _result;
+            private readonly TaskCompletionSource<bool> _started =
+                new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
 
             public DeferredScraper(string id, TaskCompletionSource<List<ScraperSearchInfo>> result)
                 : base(id, Array.Empty<ScraperSearchInfo>())
@@ -424,7 +512,13 @@ namespace Emby.Plugin.Danmu.R3SearchQualityRegression
                 _result = result;
             }
 
-            public override Task<List<ScraperSearchInfo>> SearchForApi(string keyword) => _result.Task;
+            public Task Started => _started.Task;
+
+            public override Task<List<ScraperSearchInfo>> SearchForApi(string keyword)
+            {
+                _started.TrySetResult(true);
+                return _result.Task;
+            }
         }
 
         private sealed class CancellingSuccessfulScraper : ResultScraper
@@ -445,6 +539,115 @@ namespace Emby.Plugin.Danmu.R3SearchQualityRegression
                 _cancellation.Cancel();
                 return result;
             }
+        }
+
+        private sealed class TokenObservingScraper : AbstractScraper
+        {
+            private readonly string _id;
+            private readonly TaskCompletionSource<List<ScraperSearchInfo>> _result =
+                new TaskCompletionSource<List<ScraperSearchInfo>>(
+                    TaskCreationOptions.RunContinuationsAsynchronously);
+            private readonly TaskCompletionSource<bool> _started =
+                new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            public TokenObservingScraper(string id) : base(null)
+            {
+                _id = id;
+            }
+
+            public override string Name => _id;
+            public override string ProviderName => _id;
+            public override string ProviderId => _id;
+            public Task Started => _started.Task;
+            public CancellationToken ObservedToken { get; private set; }
+
+            public void Complete() => _result.TrySetResult(new List<ScraperSearchInfo>());
+
+            public override Task<List<ScraperSearchInfo>> Search(BaseItem item) => _result.Task;
+
+            public override Task<List<ScraperSearchInfo>> Search(
+                BaseItem item,
+                CancellationToken cancellationToken)
+            {
+                Observe(cancellationToken);
+                return _result.Task;
+            }
+
+            public override Task<string> SearchMediaId(BaseItem item) => Task.FromResult(string.Empty);
+            public override Task<List<ScraperSearchInfo>> SearchForApi(string keyword) => _result.Task;
+
+            public override Task<List<ScraperSearchInfo>> SearchForApi(
+                string keyword,
+                CancellationToken cancellationToken)
+            {
+                Observe(cancellationToken);
+                return _result.Task;
+            }
+
+            public override Task<ScraperMedia> GetMedia(BaseItem item, string id) =>
+                Task.FromResult<ScraperMedia>(null);
+            public override Task<ScraperEpisode> GetMediaEpisode(BaseItem item, string id) =>
+                Task.FromResult<ScraperEpisode>(null);
+            public override Task<ScraperDanmaku> GetDanmuContent(BaseItem item, string commentId) =>
+                Task.FromResult<ScraperDanmaku>(null);
+
+            private void Observe(CancellationToken cancellationToken)
+            {
+                ObservedToken = cancellationToken;
+                _started.TrySetResult(true);
+            }
+        }
+
+        private sealed class ParentCancellationScraper : AbstractScraper
+        {
+            private readonly string _id;
+            private readonly TaskCompletionSource<bool> _started =
+                new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            private readonly TaskCompletionSource<bool> _cancellationObserved =
+                new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            public ParentCancellationScraper(string id) : base(null)
+            {
+                _id = id;
+            }
+
+            public override string Name => _id;
+            public override string ProviderName => _id;
+            public override string ProviderId => _id;
+            public Task Started => _started.Task;
+            public Task CancellationObserved => _cancellationObserved.Task;
+            public CancellationToken ObservedToken { get; private set; }
+
+            public override Task<List<ScraperSearchInfo>> Search(BaseItem item) =>
+                Task.FromResult(new List<ScraperSearchInfo>());
+            public override Task<string> SearchMediaId(BaseItem item) => Task.FromResult(string.Empty);
+            public override Task<List<ScraperSearchInfo>> SearchForApi(string keyword) =>
+                SearchForApi(keyword, CancellationToken.None);
+
+            public override async Task<List<ScraperSearchInfo>> SearchForApi(
+                string keyword,
+                CancellationToken cancellationToken)
+            {
+                ObservedToken = cancellationToken;
+                _started.TrySetResult(true);
+                try
+                {
+                    await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken).ConfigureAwait(false);
+                    throw new InvalidOperationException("An infinite provider wait completed without cancellation.");
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    _cancellationObserved.TrySetResult(true);
+                    throw;
+                }
+            }
+
+            public override Task<ScraperMedia> GetMedia(BaseItem item, string id) =>
+                Task.FromResult<ScraperMedia>(null);
+            public override Task<ScraperEpisode> GetMediaEpisode(BaseItem item, string id) =>
+                Task.FromResult<ScraperEpisode>(null);
+            public override Task<ScraperDanmaku> GetDanmuContent(BaseItem item, string commentId) =>
+                Task.FromResult<ScraperDanmaku>(null);
         }
     }
 }

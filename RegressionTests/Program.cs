@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Net;
 using System.Text.Json;
 using System.Text;
 using System.Reflection;
@@ -19,6 +20,8 @@ using Emby.Plugin.Danmu.Scraper.Bilibili.Entity;
 using Emby.Plugin.Danmu.Scraper.Dandan;
 using Emby.Plugin.Danmu.Scraper.Entity;
 using Emby.Plugin.Danmu.Scraper.Iqiyi;
+using Emby.Plugin.Danmu.Scraper.Tmdb;
+using MediaBrowser.Common.Net;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.Movies;
 using MediaBrowser.Controller.Entities.TV;
@@ -58,6 +61,7 @@ namespace Emby.Plugin.Danmu.RegressionTests
             if (args != null && args.Contains("--tmdb-alias", StringComparer.Ordinal))
             {
                 TmdbAliasTests.Run();
+                CancelsEnglishAndJapaneseAliasRoundsFailClosed();
                 Console.WriteLine("TMDB alias regression checks passed.");
                 return 0;
             }
@@ -95,8 +99,10 @@ namespace Emby.Plugin.Danmu.RegressionTests
             MapsLiveActionSeasonAndCleansTitle();
             UsesIdentifierFallbackOrder();
             OmitsMalformedRecords();
+            BoundedSearchFoundationTests.Run();
             BilibiliSearchTests.Run();
             TmdbAliasTests.Run();
+            CancelsEnglishAndJapaneseAliasRoundsFailClosed();
             SevenDayReplayTests.Run();
             IqiyiSourceMetadataTests.Run();
             OrdersAndSelectsCrossProviderTies();
@@ -155,6 +161,129 @@ namespace Emby.Plugin.Danmu.RegressionTests
             SanitizesFinalXmlForEveryProviderAndAcceptsSmallValidOutput();
             Console.WriteLine("Danmu plugin regression checks passed.");
             return 0;
+        }
+
+        private static void CancelsEnglishAndJapaneseAliasRoundsFailClosed()
+        {
+            const string englishAlias = "English Cancellation Alias";
+            const string japaneseAlias = "日本語キャンセル別名";
+            var originalSender = TmdbAliasClient.HttpGetResponseAsync;
+            var instanceField = typeof(Emby.Plugin.Danmu.Plugin).GetField(
+                "<Instance>k__BackingField",
+                BindingFlags.Static | BindingFlags.NonPublic);
+            var configurationField = typeof(Emby.Plugin.Danmu.Plugin).BaseType?.GetField(
+                "_configuration",
+                BindingFlags.Instance | BindingFlags.NonPublic);
+            Assert(instanceField != null && configurationField != null,
+                "the TMDB cancellation regression requires the existing plugin configuration boundary");
+            var originalPlugin = (Emby.Plugin.Danmu.Plugin)instanceField.GetValue(null);
+            var testPlugin = (Emby.Plugin.Danmu.Plugin)System.Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject(
+                typeof(Emby.Plugin.Danmu.Plugin));
+            configurationField.SetValue(testPlugin, new PluginConfiguration
+            {
+                Tmdb = new TmdbOption
+                {
+                    UseAliasSearch = true,
+                    ApiKey = "alias-cancellation-test-key",
+                },
+            });
+
+            try
+            {
+                instanceField.SetValue(null, testPlugin);
+                TmdbAliasClient.HttpGetResponseAsync = request =>
+                {
+                    request.CancellationToken.ThrowIfCancellationRequested();
+                    var json = request.Url.Contains("alternative_titles", StringComparison.Ordinal)
+                        ? "{\"results\":[]}"
+                        : "{\"name\":\"" + englishAlias +
+                          "\",\"original_name\":\"" + japaneseAlias +
+                          "\",\"original_language\":\"ja\"}";
+                    return Task.FromResult(new HttpResponseInfo
+                    {
+                        StatusCode = HttpStatusCode.OK,
+                        Content = new MemoryStream(Encoding.UTF8.GetBytes(json)),
+                    });
+                };
+
+                VerifyAliasRoundCancellation(
+                    "991001",
+                    englishAlias,
+                    "English primary-title");
+                VerifyAliasRoundCancellation(
+                    "991002",
+                    japaneseAlias,
+                    "final Japanese primary-title");
+            }
+            finally
+            {
+                TmdbAliasClient.HttpGetResponseAsync = originalSender;
+                instanceField.SetValue(null, originalPlugin);
+            }
+        }
+
+        private static void VerifyAliasRoundCancellation(
+            string tmdbId,
+            string blockedAlias,
+            string roundName)
+        {
+            var context = new Series
+            {
+                Name = "Library Alias Cancellation Title",
+                Genres = new[] { "动画" },
+            };
+            context.ProviderIds["Tmdb"] = tmdbId;
+            var provider = new AliasCancellationScraper(blockedAlias);
+            using (var executionCancellation = new CancellationTokenSource())
+            using (var parentCancellation = new CancellationTokenSource())
+            {
+                var search = DanmuMatchSearchEngine.SearchSeasonAsync(
+                    new AbstractScraper[] { provider },
+                    context.Name,
+                    "Season 1",
+                    2024,
+                    12,
+                    null,
+                    null,
+                    new BoundedSearchPolicy(),
+                    executionCancellation.Token,
+                    parentCancellation.Token,
+                    contextItem: context);
+                AwaitL7WithWatchdog(provider.Started,
+                    roundName + " alias provider call must start");
+                parentCancellation.Cancel();
+                AwaitL7WithWatchdog(provider.CancellationObserved,
+                    roundName + " alias provider call must observe parent cancellation");
+                var result = AwaitL7WithWatchdog(search,
+                    roundName + " alias cancellation must finish the search");
+                Assert(!executionCancellation.IsCancellationRequested &&
+                       result.WasCancelled && !result.IsComplete &&
+                       result.Decision == "cancelled" && result.SelectedCandidate == null &&
+                       !result.UsedTmdbAlias &&
+                       result.CompletionDiagnostics.Count(diagnostic =>
+                           string.Equals(diagnostic.Provider,
+                               Emby.Plugin.Danmu.Scraper.Dandan.Dandan.ScraperProviderId,
+                               StringComparison.OrdinalIgnoreCase) &&
+                           string.Equals(diagnostic.Status, "cancelled", StringComparison.OrdinalIgnoreCase) &&
+                           diagnostic.Cancelled) == 1,
+                    roundName + " cancellation must be marked once and fail closed before alias application");
+            }
+        }
+
+        private static void AwaitL7WithWatchdog(Task task, string operation)
+        {
+            if (Task.WhenAny(task, Task.Delay(TimeSpan.FromSeconds(5))).GetAwaiter().GetResult() != task)
+            {
+                throw new InvalidOperationException("Regression watchdog expired: " + operation);
+            }
+
+            task.GetAwaiter().GetResult();
+        }
+
+        private static TResult AwaitL7WithWatchdog<TResult>(Task<TResult> task, string operation)
+        {
+            AwaitL7WithWatchdog((Task)task, operation);
+            return task.GetAwaiter().GetResult();
         }
 
         private static void PreservesProviderWriteGenerationOrdering()
@@ -2569,6 +2698,62 @@ namespace Emby.Plugin.Danmu.RegressionTests
                 return Task.FromResult(episode);
             }
             public override Task<ScraperDanmaku> GetDanmuContent(BaseItem item, string commentId) => Task.FromResult<ScraperDanmaku>(null);
+        }
+
+        private sealed class AliasCancellationScraper : AbstractScraper
+        {
+            private readonly string _blockedAlias;
+            private readonly TaskCompletionSource<bool> _started =
+                new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            private readonly TaskCompletionSource<bool> _cancellationObserved =
+                new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            public AliasCancellationScraper(string blockedAlias) : base(null)
+            {
+                _blockedAlias = blockedAlias;
+            }
+
+            public override string Name => "Dandan alias cancellation fixture";
+            public override string ProviderName => "Dandan alias cancellation fixture";
+            public override string ProviderId =>
+                Emby.Plugin.Danmu.Scraper.Dandan.Dandan.ScraperProviderId;
+            public Task Started => _started.Task;
+            public Task CancellationObserved => _cancellationObserved.Task;
+
+            public override Task<List<ScraperSearchInfo>> Search(BaseItem item) =>
+                Task.FromResult(new List<ScraperSearchInfo>());
+            public override Task<string> SearchMediaId(BaseItem item) => Task.FromResult(string.Empty);
+            public override Task<List<ScraperSearchInfo>> SearchForApi(string keyword) =>
+                SearchForApi(keyword, CancellationToken.None);
+
+            public override async Task<List<ScraperSearchInfo>> SearchForApi(
+                string keyword,
+                CancellationToken cancellationToken)
+            {
+                if (!string.Equals(keyword, _blockedAlias, StringComparison.Ordinal))
+                {
+                    return new List<ScraperSearchInfo>();
+                }
+
+                _started.TrySetResult(true);
+                try
+                {
+                    await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken).ConfigureAwait(false);
+                    throw new InvalidOperationException("An infinite alias wait completed without cancellation.");
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    _cancellationObserved.TrySetResult(true);
+                    throw;
+                }
+            }
+
+            public override Task<ScraperMedia> GetMedia(BaseItem item, string id) =>
+                Task.FromResult<ScraperMedia>(null);
+            public override Task<ScraperEpisode> GetMediaEpisode(BaseItem item, string id) =>
+                Task.FromResult<ScraperEpisode>(null);
+            public override Task<ScraperDanmaku> GetDanmuContent(BaseItem item, string commentId) =>
+                Task.FromResult<ScraperDanmaku>(null);
         }
 
         internal static void Assert(bool condition, string message)
