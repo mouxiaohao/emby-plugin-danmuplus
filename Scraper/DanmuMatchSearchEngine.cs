@@ -194,7 +194,8 @@ namespace Emby.Plugin.Danmu.Scraper
                 tmdbAliasPlanExhausted = await TryApplyTmdbAliasesAsync(
                     result, scrapers, contextItem, seriesName, seasonName,
                     expectedYear, expectedEpisodes, false, targetSeasonNumber, logger,
-                    cancellationToken).ConfigureAwait(false);
+                    cancellationToken, localSeriesTitleAliases,
+                    localSeasonTitleAliases).ConfigureAwait(false);
             }
             MarkCancellationIfRequested(result, cancellationToken);
             if (!manualKeywordDiscovery)
@@ -363,7 +364,9 @@ namespace Emby.Plugin.Danmu.Scraper
             bool isMovie,
             int? targetSeasonNumber,
             ILogger logger,
-            CancellationToken executionCancellationToken)
+            CancellationToken executionCancellationToken,
+            IEnumerable<string> localSeriesTitleAliases = null,
+            IEnumerable<string> localSeasonTitleAliases = null)
         {
             var dandan = scrapers.FirstOrDefault(x =>
                 string.Equals(x.ProviderId, Dandan.Dandan.ScraperProviderId, StringComparison.OrdinalIgnoreCase));
@@ -397,7 +400,8 @@ namespace Emby.Plugin.Danmu.Scraper
                 reachedThreshold = await SearchTmdbTermAsync(
                     result, dandan, alias?.Title, aliasCandidates, attemptedTerms, sourceOrder,
                     seriesOrMovieName, seasonName, targetSeasonNumber, expectedYear,
-                    expectedEpisodes, isMovie, logger, executionCancellationToken).ConfigureAwait(false);
+                    expectedEpisodes, isMovie, logger, executionCancellationToken,
+                    localSeriesTitleAliases, localSeasonTitleAliases).ConfigureAwait(false);
                 if (MarkAliasSearchCancellationIfRequested(result, executionCancellationToken))
                 {
                     return false;
@@ -427,7 +431,8 @@ namespace Emby.Plugin.Danmu.Scraper
                     TmdbAliasClient.GetLocalizedPrimaryTitle(englishDetails, isMovie),
                     aliasCandidates, attemptedTerms, sourceOrder, seriesOrMovieName, seasonName,
                     targetSeasonNumber, expectedYear, expectedEpisodes, isMovie, logger,
-                    executionCancellationToken).ConfigureAwait(false);
+                    executionCancellationToken, localSeriesTitleAliases,
+                    localSeasonTitleAliases).ConfigureAwait(false);
                 if (MarkAliasSearchCancellationIfRequested(result, executionCancellationToken))
                 {
                     return false;
@@ -455,7 +460,8 @@ namespace Emby.Plugin.Danmu.Scraper
                 reachedThreshold = await SearchTmdbTermAsync(
                     result, dandan, japaneseTitle, aliasCandidates, attemptedTerms, sourceOrder,
                     seriesOrMovieName, seasonName, targetSeasonNumber, expectedYear,
-                    expectedEpisodes, isMovie, logger, executionCancellationToken).ConfigureAwait(false);
+                    expectedEpisodes, isMovie, logger, executionCancellationToken,
+                    localSeriesTitleAliases, localSeasonTitleAliases).ConfigureAwait(false);
                 if (MarkAliasSearchCancellationIfRequested(result, executionCancellationToken))
                 {
                     return false;
@@ -505,7 +511,9 @@ namespace Emby.Plugin.Danmu.Scraper
             int expectedEpisodes,
             bool isMovie,
             ILogger logger,
-            CancellationToken cancellationToken)
+            CancellationToken cancellationToken,
+            IEnumerable<string> localSeriesTitleAliases,
+            IEnumerable<string> localSeasonTitleAliases)
         {
             var normalized = DanmuMatchScorer.Normalize(term);
             if (normalized.Length == 0 || !attemptedTerms.Add(normalized))
@@ -546,7 +554,12 @@ namespace Emby.Plugin.Danmu.Scraper
                     : sources.Select(source => DanmuMatchScorer.Score(
                         source, dandan.ProviderId, dandan.ProviderName, sourceOrder, term,
                         BuildAliasSeasonName(term, seriesOrMovieName, seasonName), expectedYear,
-                        expectedEpisodes, null, null, true, targetSeasonNumber)));
+                        expectedEpisodes,
+                        new[] { seriesOrMovieName }
+                            .Concat(localSeriesTitleAliases ?? Enumerable.Empty<string>()),
+                        new[] { seasonName }
+                            .Concat(localSeasonTitleAliases ?? Enumerable.Empty<string>()),
+                        true, targetSeasonNumber, true)));
             }
             catch (OperationCanceledException)
             {

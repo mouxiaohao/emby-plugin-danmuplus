@@ -40,7 +40,9 @@ namespace Emby.Plugin.Danmu.RegressionTests
             KeepsPrimaryTitleFallbacksOutOfAlternativeTitles();
             ExercisesTmdbClientFallbackCachingAndCancellation();
             PreservesOrdinaryScoresForContradictoryEvidence();
+            ScoresSeasonEvidenceWithExactIndependentChannels();
             ScoresLiveOnePunchManThirdSeasonAliasFallback();
+            OrdersJojoSplitSeasonTitlesWithoutNumericLeakage();
             ReplacesCanonicalCandidatesForAutomaticSelection();
             PreservesLazyRoundOrderingAndShortCircuitContract();
             TracksCompletedAliasProviderCalls();
@@ -285,14 +287,14 @@ namespace Emby.Plugin.Danmu.RegressionTests
             var manualBelow = ScoreSeason(
                 "One Punch Man Season 1", 2015, 6, "Season 3", 2025, false);
 
-            Assert(aboveThreshold.Score > 0.80 && belowThreshold.Score < 0.80 &&
+            Assert(aboveThreshold.Score == 0.70 && belowThreshold.Score == 0.60 &&
                    aboveThreshold.Score == OrdinaryNoKeywordScore(aboveThreshold) &&
                    belowThreshold.Score == OrdinaryNoKeywordScore(belowThreshold),
-                "conflicting Season/year evidence must retain the ordinary calculated score on both sides of 0.80: above=" +
+                "conflicting Season/year evidence must receive only parent and exact positive metadata evidence: above=" +
                 aboveThreshold.Score + ", below=" + belowThreshold.Score);
             Assert(aboveThreshold.YearScore == 0 && belowThreshold.YearScore == 0 &&
                    aboveThreshold.Name.Contains("Season 1") && aboveThreshold.Year == 2015 &&
-                   aboveThreshold.Reason.Contains("父剧名吻合") &&
+                   aboveThreshold.Reason.Contains("父剧名出现") &&
                    aboveThreshold.Reason.Contains("集数吻合"),
                 "the retained candidate fields and positive reason evidence must still explain a conflicting result");
             Assert(manualAbove.Score == aboveThreshold.Score && manualBelow.Score == belowThreshold.Score &&
@@ -329,9 +331,121 @@ namespace Emby.Plugin.Danmu.RegressionTests
         private static double OrdinaryNoKeywordScore(DanmuMatchCandidate candidate)
         {
             return Math.Round(
-                candidate.TitleScore * 0.55 + candidate.YearScore * 0.15 + candidate.EpisodeScore * 0.30,
+                candidate.ParentTitleScore * 0.60 + candidate.KeywordScore * 0.20 +
+                candidate.YearScore * 0.10 + candidate.EpisodeScore * 0.10,
                 4,
                 MidpointRounding.AwayFromZero);
+        }
+
+        private static void ScoresSeasonEvidenceWithExactIndependentChannels()
+        {
+            var correct = ScoreOnePunchMan("correct", "一拳超人 第三季", 2025, 12, null);
+            var bare = ScoreOnePunchMan("bare", "一拳超人", 2015, 12, null);
+            var second = ScoreOnePunchMan("second", "一拳超人 第二季", 2019, 12, null);
+            var youkuSecond = ScoreOnePunchMan("youku", "一拳超人 第二季", 2019, 13, null);
+            var extraThirdKeyword = ScoreOnePunchMan(
+                "extra-third", "一拳超人 胆小鬼 第三季", 2025, 12, null);
+            Assert(correct.Score == 1 && bare.Score == 0.70 && second.Score == 0.70 &&
+                   youkuSecond.Score == 0.60,
+                "Season weights must be parent 60, whole-remainder Season 20, exact year 10, and exact episode count 10");
+            Assert(extraThirdKeyword.KeywordScore > 0 && extraThirdKeyword.KeywordScore < 1 &&
+                   extraThirdKeyword.Score < 1,
+                "an equal numeric Season marker must not erase additional remainder keywords or receive the full 20-point Season score");
+
+            var splitChannels = ScoreOnePunchMan("split", "一拳超人", 2025, 12, "第三季");
+            Assert(splitChannels.Score == 0.80 && splitChannels.ParentTitleScore == 1 &&
+                   splitChannels.KeywordScore == 0,
+                "parent evidence from Name and Season evidence from SourceMetadata.Title must not be combined across source-title channels");
+
+            var yearOffByOne = ScoreOnePunchMan("year", "一拳超人 第三季", 2024, 12, null);
+            var episodesOffByOne = ScoreOnePunchMan("episodes", "一拳超人 第三季", 2025, 13, null);
+            var missingMetadata = ScoreOnePunchMan("missing", "一拳超人 第三季", 0, 0, null);
+            Assert(yearOffByOne.YearScore == 0 && episodesOffByOne.EpisodeScore == 0 &&
+                   missingMetadata.YearScore == 0 && missingMetadata.EpisodeScore == 0 &&
+                   yearOffByOne.Score == 0.90 && episodesOffByOne.Score == 0.90 &&
+                   missingMetadata.Score == 0.80,
+                "nearby or missing year/episode metadata must contribute zero instead of partial credit");
+
+            var firstSeasonBare = DanmuMatchScorer.Score(new ScraperSearchInfo
+            {
+                Id = "first",
+                Name = "一拳超人",
+                Category = "动漫",
+                Year = 2015,
+                EpisodeSize = 12,
+            }, "dandan", "DandanPlay", 0, "一拳超人", "第一季", 2015, 12,
+                null, null, true, 1);
+            Assert(firstSeasonBare.Score == 1 && firstSeasonBare.KeywordScore == 1,
+                "only Season 1 may match an empty source remainder to an empty Season variant");
+
+            var ordinaryLocalParentAlias = DanmuMatchScorer.Score(new ScraperSearchInfo
+            {
+                Id = "ordinary-local-parent",
+                Name = "One Punch Man Season 3",
+                Category = "动漫",
+                Year = 2025,
+                EpisodeSize = 12,
+            }, "dandan", "DandanPlay", 0, "一拳超人", "第三季", 2025, 12,
+                new[] { "One Punch Man" }, null, true, 3);
+            Assert(ordinaryLocalParentAlias.ParentTitleScore == 0,
+                "ordinary Season scoring must not award parent points from Series OriginalTitle or local parent aliases");
+
+            var wrongNumberWithSimilarArc = DanmuMatchScorer.Score(new ScraperSearchInfo
+            {
+                Id = "wrong-number-similar-arc",
+                Name = "一拳超人 第二季 胆小鬼篇",
+                Category = "动漫",
+                Year = 2025,
+                EpisodeSize = 12,
+            }, "dandan", "DandanPlay", 0, "一拳超人", "一拳超人 胆小鬼篇", 2025, 12,
+                null, null, true, 3);
+            Assert(wrongNumberWithSimilarArc.ParentTitleScore == 1 &&
+                   wrongNumberWithSimilarArc.KeywordScore == 0 &&
+                   wrongNumberWithSimilarArc.Score == 0.80,
+                "an explicit source Season number conflicting with expected S3 must force zero Season score even when a numberless arc title is similar");
+
+            var targetVariantBaseline = DanmuMatchScorer.Score(new ScraperSearchInfo
+            {
+                Id = "target-variant-baseline",
+                Name = "一拳超人 胆小鬼篇",
+                Category = "动漫",
+                Year = 2025,
+                EpisodeSize = 12,
+            }, "dandan", "DandanPlay", 0, "一拳超人", "一拳超人 完全不同篇", 2025, 12,
+                null, null, true, 3);
+            var wrongTargetVariant = DanmuMatchScorer.Score(new ScraperSearchInfo
+            {
+                Id = "wrong-target-variant",
+                Name = "一拳超人 胆小鬼篇",
+                Category = "动漫",
+                Year = 2025,
+                EpisodeSize = 12,
+            }, "dandan", "DandanPlay", 0, "一拳超人", "一拳超人 完全不同篇", 2025, 12,
+                null, new[] { "一拳超人 第二季 胆小鬼篇" }, true, 3);
+            Assert(wrongTargetVariant.KeywordScore == targetVariantBaseline.KeywordScore &&
+                   wrongTargetVariant.Score == targetVariantBaseline.Score,
+                "a target Season-title variant with an explicit number conflicting with expected S3 must be excluded from similarity scoring");
+        }
+
+        private static DanmuMatchCandidate ScoreOnePunchMan(
+            string id,
+            string name,
+            int year,
+            int episodes,
+            string metadataTitle)
+        {
+            return DanmuMatchScorer.Score(new ScraperSearchInfo
+            {
+                Id = id,
+                Name = name,
+                Category = "动漫",
+                Year = year,
+                EpisodeSize = episodes,
+                SourceMetadata = metadataTitle == null
+                    ? null
+                    : new SourceMetadata { Title = metadataTitle },
+            }, "dandan", "DandanPlay", 0, "一拳超人", "第三季", 2025, 12,
+                null, null, true, 3);
         }
 
         private static void ScoresLiveOnePunchManThirdSeasonAliasFallback()
@@ -351,13 +465,77 @@ namespace Emby.Plugin.Danmu.RegressionTests
                 "12430", "一拳超人 第二季", 2019, englishTerm, season);
             var japaneseThirdSeason = ScoreLiveOnePunchManCandidate(
                 "17576", "一拳超人 第三季", 2025, japaneseTerm, season);
+            var chineseOnlyThirdSeason = DanmuMatchScorer.Score(new ScraperSearchInfo
+            {
+                Id = "chinese-only",
+                Name = "一拳超人 第三季",
+                Category = "动漫",
+                Year = 2025,
+                EpisodeSize = 12,
+                SearchAlias = englishTerm,
+            }, "dandan", "DandanPlay", 0, englishTerm, season, 2025, 12,
+                new[] { "一拳超人" }, new[] { season }, true, 3, true);
+            var englishOnlyThirdSeason = DanmuMatchScorer.Score(new ScraperSearchInfo
+            {
+                Id = "english-only",
+                Name = "One-Punch Man Season 3",
+                Category = "动漫",
+                Year = 2025,
+                EpisodeSize = 12,
+                SearchAlias = englishTerm,
+            }, "dandan", "DandanPlay", 0, englishTerm, season, 2025, 12,
+                new[] { "一拳超人" }, new[] { season }, true, 3, true);
+            var bothParents = DanmuMatchScorer.Score(new ScraperSearchInfo
+            {
+                Id = "both",
+                Name = "One-Punch Man 一拳超人 第三季",
+                Category = "动漫",
+                Year = 2025,
+                EpisodeSize = 12,
+            }, "dandan", "DandanPlay", 0, englishTerm, season, 2025, 12,
+                new[] { "一拳超人" }, new[] { season }, true, 3, true);
 
-            Assert(thirdSeason.Score >= 0.80 && japaneseThirdSeason.Score >= 0.80 &&
-                   thirdSeason.Reason.Contains("本次搜索词结果季号吻合"),
-                "the live-equivalent English/Japanese TMDB fallback must bridge a localized exact third-Season result without reverting to the library title");
-            Assert(firstSeason.Score < 0.80 && secondSeason.Score > 0.80 &&
-                   !secondSeason.Reason.Contains("本次搜索词结果季号吻合"),
-                "a weak first-Season result must stay below the alias threshold while an explicit second-Season conflict retains its ordinary explainable score: first=" +
+            Assert(thirdSeason.Score == 1 && japaneseThirdSeason.Score == 1 &&
+                   chineseOnlyThirdSeason.Score == 1 && englishOnlyThirdSeason.Score == 1,
+                "TMDB Season rounds must score either the original localized parent or the current English/Japanese term as independent 60-point parent evidence");
+            Assert(bothParents.ParentTitleScore == 1 && bothParents.KeywordScore < 1 &&
+                   bothParents.Score < 1,
+                "matching both original and current alias parents must take the best single-parent combination without removing or stacking both parents");
+
+            var integratedCalls = new List<string>();
+            var integratedCandidates = new List<DanmuMatchCandidate>();
+            var integratedTerms = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var integratedReached = InvokeAliasTermWithContext(
+                new DanmuMatchSearchResult(),
+                new TermFixtureScraper(integratedCalls, term => new List<ScraperSearchInfo>
+                {
+                    new ScraperSearchInfo
+                    {
+                        Id = "integrated-local-alias",
+                        Name = "一拳旧名 第三季",
+                        Category = "动漫",
+                        Year = 2025,
+                        EpisodeSize = 12,
+                    },
+                }),
+                englishTerm,
+                integratedCandidates,
+                integratedTerms,
+                "一拳超人",
+                season,
+                3,
+                2025,
+                12,
+                new[] { "一拳旧名" },
+                new[] { "一拳旧名 第三季" },
+                CancellationToken.None);
+            Assert(integratedReached && integratedCalls.SequenceEqual(new[] { englishTerm }) &&
+                   integratedCandidates.Count == 1 &&
+                   integratedCandidates[0].ParentTitleScore == 1 &&
+                   integratedCandidates[0].Score == 1,
+                "the real SearchTmdbTermAsync Season path must explicitly carry original/local parent aliases into alias-only parent scoring");
+            Assert(firstSeason.Score == 0.70 && secondSeason.Score == 0.70,
+                "bare and conflicting localized Seasons must stay below the alias threshold with parent plus episode evidence only: first=" +
                 firstSeason.Score + ", second=" + secondSeason.Score);
 
             var aliasResult = new DanmuMatchSearchResult
@@ -390,8 +568,32 @@ namespace Emby.Plugin.Danmu.RegressionTests
                 Year = year,
                 EpisodeSize = 12,
                 SearchAlias = searchTerm,
+                Aliases = new List<string> { searchTerm },
             }, "dandan", "DandanPlay", 0, searchTerm, season, 2025, 12,
-                null, null, true, 3);
+                new[] { "一拳超人" }, new[] { season }, true, 3, true);
+        }
+
+        private static void OrdersJojoSplitSeasonTitlesWithoutNumericLeakage()
+        {
+            var stardust = ScoreJojoCandidate("star", "JOJO的奇妙冒险 星尘斗士", 24);
+            var egypt = ScoreJojoCandidate("egypt", "JOJO的奇妙冒险 星尘斗士 埃及篇", 24);
+            var wrongNumber = ScoreJojoCandidate("wrong", "JOJO的奇妙冒险 第三季", 24);
+            Assert(stardust.Score > egypt.Score && egypt.Score > wrongNumber.Score &&
+                   wrongNumber.KeywordScore == 0,
+                "JOJO Stardust and Egypt titles must remain ordered by whole-remainder similarity while an explicit wrong Season number contributes no Season evidence");
+        }
+
+        private static DanmuMatchCandidate ScoreJojoCandidate(string id, string title, int episodes)
+        {
+            return DanmuMatchScorer.Score(new ScraperSearchInfo
+            {
+                Id = id,
+                Name = title,
+                Category = "动漫",
+                Year = 2014,
+                EpisodeSize = episodes,
+            }, "dandan", "DandanPlay", 0, "JOJO的奇妙冒险",
+                "JOJO的奇妙冒险 星尘斗士篇", 2014, 48, null, null, true, 2);
         }
 
         private static void ReplacesCanonicalCandidatesForAutomaticSelection()
@@ -712,12 +914,34 @@ namespace Emby.Plugin.Danmu.RegressionTests
             ISet<string> attemptedTerms,
             CancellationToken cancellationToken = default(CancellationToken))
         {
+            return InvokeAliasTermWithContext(
+                result, scraper, term, candidates, attemptedTerms,
+                "Series", "Season 1", 1, 2012, 26, null, null, cancellationToken);
+        }
+
+        private static bool InvokeAliasTermWithContext(
+            DanmuMatchSearchResult result,
+            AbstractScraper scraper,
+            string term,
+            List<DanmuMatchCandidate> candidates,
+            ISet<string> attemptedTerms,
+            string originalSeriesName,
+            string originalSeasonName,
+            int targetSeasonNumber,
+            int expectedYear,
+            int expectedEpisodes,
+            IEnumerable<string> localSeriesTitleAliases,
+            IEnumerable<string> localSeasonTitleAliases,
+            CancellationToken cancellationToken)
+        {
             var method = typeof(DanmuMatchSearchEngine).GetMethod(
                 "SearchTmdbTermAsync", BindingFlags.Static | BindingFlags.NonPublic);
             var task = (Task<bool>)method.Invoke(null, new object[]
             {
-                result, scraper, term, candidates, attemptedTerms, 0, "Series", "Season 1", 1,
-                2012, 26, false, null, cancellationToken,
+                result, scraper, term, candidates, attemptedTerms, 0,
+                originalSeriesName, originalSeasonName, targetSeasonNumber,
+                expectedYear, expectedEpisodes, false, null, cancellationToken,
+                localSeriesTitleAliases, localSeasonTitleAliases,
             });
             return task.GetAwaiter().GetResult();
         }

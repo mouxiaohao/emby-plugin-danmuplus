@@ -303,8 +303,9 @@ namespace Emby.Plugin.Danmu.TitleFidelityTests
                 },
                 "DandanID", "DandanPlay", 0, "Localized Parent", "Season 2", 2024, 12,
                 new[] { "Target Parent＊" }, null);
-            Assert(localParentAlias.FidelityTitleEvidence == 1,
-                "Series.OriginalTitle must remain a rank-1 parent alias");
+            Assert(localParentAlias.FidelityTitleEvidence == 1 &&
+                   localParentAlias.ParentTitleScore == 0,
+                "Series.OriginalTitle may remain rank-1 fidelity evidence but must not earn ordinary Season parent-score credit");
 
             var genericSeason = ScoreSeasonWithRoles(
                 "generic-season", "Target Parent*", "Season 2", "Season 2");
@@ -355,7 +356,11 @@ namespace Emby.Plugin.Danmu.TitleFidelityTests
                 localTitle,
                 localTitle,
                 2014,
-                13);
+                13,
+                null,
+                null,
+                true,
+                1);
         }
 
         private static DanmuMatchCandidate ScoreSeasonWithRoles(

@@ -545,10 +545,11 @@ namespace Emby.Plugin.Danmu.RegressionTests
             var standard = DanmuMatchScorer.Score(
                 source, "AliasID", "Alias", 0, "abcdefghij", "abcdefghij", 2024, 12);
             Assert(Math.Abs(standard.Score - Math.Round(
-                       standard.TitleScore * 0.55 + standard.YearScore * 0.15 + standard.EpisodeScore * 0.30,
+                       standard.ParentTitleScore * 0.60 + standard.KeywordScore * 0.20 +
+                       standard.YearScore * 0.10 + standard.EpisodeScore * 0.10,
                        4,
                        MidpointRounding.AwayFromZero)) < 0.0001,
-                "fixed-term discovery must retain the standard no-keyword season weights");
+                "fixed-term Season discovery must use the 60/20/10/10 evidence weights");
 
             var unrelated = DanmuMatchScorer.Score(
                 new ScraperSearchInfo

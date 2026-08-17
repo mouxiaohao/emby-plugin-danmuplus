@@ -208,76 +208,29 @@ namespace Emby.Plugin.Danmu.Scraper
             IEnumerable<string> localSeriesTitleAliases = null,
             IEnumerable<string> localSeasonTitleAliases = null,
             bool applyContradictionCap = true,
-            int? expectedSeasonNumber = null)
+            int? expectedSeasonNumber = null,
+            bool includeLocalSeriesAliasesForParentScoring = false)
         {
             // Retained for source compatibility with existing callers; contradiction
             // evidence no longer changes the ordinary composite score.
             _ = applyContradictionCap;
-            var sourceTitles = GetSourceTitles(source).Select(Normalize)
-                .Where(value => value.Length > 0).ToList();
-            var parent = Normalize(seriesName);
-            var seasonKeyword = Normalize(ExtractSeasonKeyword(seriesName, seasonName));
-            var combined = Normalize((seriesName ?? string.Empty) + (seasonKeyword ?? string.Empty));
             var targetSeasonNumber = expectedSeasonNumber ?? ParseExplicitSeasonNumber(seasonName);
-            var hasTermSpecificExactSeasonEvidence = HasTermSpecificExactSeasonEvidence(
-                source, targetSeasonNumber);
-
-            var localParents = new[] { seriesName, seasonName }
-                .Concat(localSeriesTitleAliases ?? Enumerable.Empty<string>())
-                .Concat(localSeasonTitleAliases ?? Enumerable.Empty<string>());
-            var parentScore = BestSimilarity(localParents, sourceTitles);
-            var keywordScore = BestSimilarity(new[] { seasonKeyword }, sourceTitles);
-            var combinedScore = Math.Max(
-                BestSimilarity(new[] { combined }, sourceTitles),
-                BestSimilarity(
-                    (localSeriesTitleAliases ?? Enumerable.Empty<string>())
-                        .Concat(localSeasonTitleAliases ?? Enumerable.Empty<string>()),
-                    sourceTitles));
-            double titleScore;
-
-            if (!string.IsNullOrEmpty(seasonKeyword))
-            {
-                if (sourceTitles.Any(title => title.Contains(seasonKeyword)))
-                {
-                    titleScore = 0.78 + (sourceTitles.Any(title => title.Contains(parent)) &&
-                        !string.IsNullOrEmpty(parent) ? 0.22 : 0.22 * parentScore);
-                }
-                else
-                {
-                    titleScore = Math.Max(combinedScore, keywordScore * 0.62 + parentScore * 0.38);
-                }
-            }
-            else
-            {
-                titleScore = parentScore;
-            }
-
-            // TMDB fallback results are scored against the term that produced
-            // them. When Dandan returns only a localized title for an English or
-            // Japanese term, an exact explicit Season marker supplies a bounded
-            // cross-language bridge without consulting the library title.
-            if (hasTermSpecificExactSeasonEvidence)
-            {
-                titleScore = Math.Max(titleScore, 0.70);
-            }
-
-            var yearScore = GetYearScore(expectedYear, source.Year);
-            var episodeScore = GetEpisodeScore(expectedEpisodes, source.EpisodeSize);
-            var score = !string.IsNullOrEmpty(seasonKeyword)
-                ? titleScore * 0.45 + yearScore * 0.15 + episodeScore * 0.40
-                : titleScore * 0.55 + yearScore * 0.15 + episodeScore * 0.30;
-
-            if (!string.IsNullOrEmpty(seasonKeyword) && keywordScore < 0.72)
-            {
-                score *= 0.72;
-            }
-
-            if (!string.IsNullOrWhiteSpace(source.Category) && source.Category.Contains("电影"))
-            {
-                score *= 0.45;
-            }
-
-            score = Clamp(score);
+            var seasonParentTitles = BuildNormalizedTitleSet(
+                new[] { seriesName }.Concat(localSeriesTitleAliases ?? Enumerable.Empty<string>()));
+            var parentTitles = includeLocalSeriesAliasesForParentScoring
+                ? seasonParentTitles
+                : BuildNormalizedTitleSet(new[] { seriesName });
+            var seasonTitles = BuildSeasonTitleVariants(
+                seasonName, localSeasonTitleAliases, seasonParentTitles, targetSeasonNumber);
+            var titleEvidence = GetBestSeasonTitleEvidence(
+                GetSourceTitles(source), parentTitles, seasonTitles, targetSeasonNumber);
+            var parentScore = titleEvidence.ParentScore;
+            var seasonScore = titleEvidence.SeasonScore;
+            var titleScore = (parentScore * 0.60 + seasonScore * 0.20) / 0.80;
+            var yearScore = GetExactYearScore(expectedYear, source.Year);
+            var episodeScore = GetExactEpisodeScore(expectedEpisodes, source.EpisodeSize);
+            var score = Clamp(parentScore * 0.60 + seasonScore * 0.20 +
+                              yearScore * 0.10 + episodeScore * 0.10);
             var fidelityTitleEvidence = GetSeasonFidelityTitleEvidence(
                 seriesName,
                 seasonName,
@@ -299,11 +252,10 @@ namespace Emby.Plugin.Danmu.Scraper
                 ScoreOrigin = "search-confidence",
                 TitleScore = Round(titleScore),
                 ParentTitleScore = Round(parentScore),
-                KeywordScore = Round(keywordScore),
+                KeywordScore = Round(seasonScore),
                 YearScore = Round(yearScore),
                 EpisodeScore = Round(episodeScore),
-                Reason = BuildReason(parentScore, keywordScore, yearScore, episodeScore,
-                    hasTermSpecificExactSeasonEvidence),
+                Reason = BuildReason(parentScore, seasonScore, yearScore, episodeScore),
                 MatchOrigin = string.IsNullOrWhiteSpace(source.SearchAlias) ? string.Empty : "tmdb-alias",
                 DecisionReason = string.IsNullOrWhiteSpace(source.SearchAlias) ? string.Empty : "tmdb-alias:" + source.SearchAlias,
                 FidelityTitleEvidence = fidelityTitleEvidence,
@@ -417,21 +369,6 @@ namespace Emby.Plugin.Danmu.Scraper
         public static bool CanAutoSelect(IList<DanmuMatchCandidate> candidates, bool allowProviderPriorityTie = true)
         {
             return SelectAutoCandidate(candidates, allowProviderPriorityTie) != null;
-        }
-
-        private static bool HasTermSpecificExactSeasonEvidence(
-            ScraperSearchInfo source,
-            int? targetSeasonNumber)
-        {
-            if (!targetSeasonNumber.HasValue || targetSeasonNumber.Value <= 0 ||
-                !IsIdentityBearingTitle(source?.SearchAlias))
-            {
-                return false;
-            }
-
-            var candidateSeasonNumber = ParseExplicitSeasonNumber(GetSourceTitles(source));
-            return candidateSeasonNumber.HasValue &&
-                   candidateSeasonNumber.Value == targetSeasonNumber.Value;
         }
 
         private static DanmuMatchCandidate SelectUniqueHighest(IList<DanmuMatchCandidate> candidates)
@@ -557,6 +494,183 @@ namespace Emby.Plugin.Danmu.Scraper
                 .Concat(source.Aliases ?? new List<string>());
         }
 
+        private static List<string> BuildNormalizedTitleSet(IEnumerable<string> titles)
+        {
+            return (titles ?? Enumerable.Empty<string>())
+                .Select(Normalize)
+                .Where(title => title.Length > 0)
+                .Distinct(StringComparer.Ordinal)
+                .ToList();
+        }
+
+        private static List<string> BuildSeasonTitleVariants(
+            string seasonName,
+            IEnumerable<string> localSeasonTitleAliases,
+            IList<string> parentTitles,
+            int? expectedSeasonNumber)
+        {
+            var variants = new List<string>();
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var title in new[] { seasonName }
+                         .Concat(localSeasonTitleAliases ?? Enumerable.Empty<string>()))
+            {
+                var normalized = Normalize(title);
+                if (normalized.Length == 0)
+                {
+                    continue;
+                }
+
+                var matchedParents = (parentTitles ?? new List<string>())
+                    .Where(parent => normalized.Contains(parent))
+                    .OrderByDescending(parent => parent.Length)
+                    .ToList();
+                if (matchedParents.Count == 0)
+                {
+                    AddSeasonVariant(variants, seen, normalized, expectedSeasonNumber);
+                    continue;
+                }
+
+                foreach (var parent in matchedParents)
+                {
+                    AddSeasonVariant(
+                        variants, seen, normalized.Replace(parent, string.Empty), expectedSeasonNumber);
+                }
+            }
+
+            if (expectedSeasonNumber.GetValueOrDefault() > 0)
+            {
+                AddSeasonVariant(variants, seen,
+                    Normalize("第" + expectedSeasonNumber.Value.ToString(CultureInfo.InvariantCulture) + "季"),
+                    expectedSeasonNumber);
+            }
+            if (expectedSeasonNumber == 1)
+            {
+                AddSeasonVariant(variants, seen, string.Empty, expectedSeasonNumber);
+            }
+            return variants;
+        }
+
+        private static void AddSeasonVariant(
+            ICollection<string> variants,
+            ISet<string> seen,
+            string value,
+            int? expectedSeasonNumber)
+        {
+            var normalized = value ?? string.Empty;
+            var variantSeasonNumber = ParseExplicitSeasonNumber(normalized);
+            if (expectedSeasonNumber.GetValueOrDefault() > 0 &&
+                variantSeasonNumber.HasValue &&
+                variantSeasonNumber.Value != expectedSeasonNumber.Value)
+            {
+                return;
+            }
+            if ((normalized.Length > 0 || expectedSeasonNumber == 1) && seen.Add(normalized))
+            {
+                variants.Add(normalized);
+            }
+        }
+
+        private static SeasonTitleEvidence GetBestSeasonTitleEvidence(
+            IEnumerable<string> sourceTitles,
+            IList<string> parentTitles,
+            IList<string> seasonTitles,
+            int? expectedSeasonNumber)
+        {
+            var best = new SeasonTitleEvidence();
+            foreach (var sourceTitle in sourceTitles ?? Enumerable.Empty<string>())
+            {
+                var normalizedSource = Normalize(sourceTitle);
+                if (normalizedSource.Length == 0)
+                {
+                    continue;
+                }
+
+                var matchedParents = (parentTitles ?? new List<string>())
+                    .Where(parent => normalizedSource.Contains(parent))
+                    .OrderByDescending(parent => parent.Length)
+                    .ToList();
+                if (matchedParents.Count == 0)
+                {
+                    SelectBetterSeasonTitleEvidence(best, new SeasonTitleEvidence
+                    {
+                        ParentScore = 0,
+                        SeasonScore = BestSeasonSimilarity(
+                            normalizedSource, seasonTitles, expectedSeasonNumber),
+                    });
+                    continue;
+                }
+
+                foreach (var parent in matchedParents)
+                {
+                    SelectBetterSeasonTitleEvidence(best, new SeasonTitleEvidence
+                    {
+                        ParentScore = 1,
+                        SeasonScore = BestSeasonSimilarity(
+                            normalizedSource.Replace(parent, string.Empty),
+                            seasonTitles,
+                            expectedSeasonNumber),
+                        MatchedParentLength = parent.Length,
+                    });
+                }
+            }
+            return best;
+        }
+
+        private static void SelectBetterSeasonTitleEvidence(
+            SeasonTitleEvidence current,
+            SeasonTitleEvidence candidate)
+        {
+            var currentScore = current.ParentScore * 0.60 + current.SeasonScore * 0.20;
+            var candidateScore = candidate.ParentScore * 0.60 + candidate.SeasonScore * 0.20;
+            if (candidateScore > currentScore ||
+                Math.Abs(candidateScore - currentScore) < 0.0000001 &&
+                candidate.MatchedParentLength > current.MatchedParentLength)
+            {
+                current.ParentScore = candidate.ParentScore;
+                current.SeasonScore = candidate.SeasonScore;
+                current.MatchedParentLength = candidate.MatchedParentLength;
+            }
+        }
+
+        private static double BestSeasonSimilarity(
+            string sourceTitle,
+            IEnumerable<string> seasonTitles,
+            int? expectedSeasonNumber)
+        {
+            return (seasonTitles ?? Enumerable.Empty<string>())
+                .Select(target => GetSeasonSimilarity(sourceTitle, target, expectedSeasonNumber))
+                .DefaultIfEmpty(0)
+                .Max();
+        }
+
+        private static double GetSeasonSimilarity(
+            string sourceTitle,
+            string targetTitle,
+            int? expectedSeasonNumber)
+        {
+            var source = sourceTitle ?? string.Empty;
+            var target = targetTitle ?? string.Empty;
+            var sourceSeason = ParseExplicitSeasonNumber(source);
+            var targetSeason = ParseExplicitSeasonNumber(target);
+            if (expectedSeasonNumber.GetValueOrDefault() > 0 &&
+                (sourceSeason.HasValue && sourceSeason.Value != expectedSeasonNumber.Value ||
+                 targetSeason.HasValue && targetSeason.Value != expectedSeasonNumber.Value))
+            {
+                return 0;
+            }
+            if (source.Length == 0 || target.Length == 0)
+            {
+                return source.Length == 0 && target.Length == 0 && expectedSeasonNumber == 1 ? 1 : 0;
+            }
+
+            if (sourceSeason.HasValue && targetSeason.HasValue &&
+                sourceSeason.Value != targetSeason.Value)
+            {
+                return 0;
+            }
+            return Clamp(source.Distance(target));
+        }
+
         private static double BestSimilarity(
             IEnumerable<string> localTitles,
             IEnumerable<string> normalizedSourceTitles)
@@ -589,6 +703,13 @@ namespace Emby.Plugin.Danmu.Scraper
         {
             public string Loose { get; set; } = string.Empty;
             public string Fidelity { get; set; } = string.Empty;
+        }
+
+        private sealed class SeasonTitleEvidence
+        {
+            public double ParentScore { get; set; }
+            public double SeasonScore { get; set; }
+            public int MatchedParentLength { get; set; }
         }
 
         private static string SanitizeSearchTerm(string value)
@@ -746,6 +867,19 @@ namespace Emby.Plugin.Danmu.Scraper
             return difference == 1 ? 0.30 : 0;
         }
 
+        private static double GetExactYearScore(int? expected, int? actual)
+        {
+            return expected.GetValueOrDefault() > 0 && actual.GetValueOrDefault() > 0 &&
+                   expected.Value == actual.Value
+                ? 1
+                : 0;
+        }
+
+        private static double GetExactEpisodeScore(int expected, int actual)
+        {
+            return expected > 0 && actual > 0 && expected == actual ? 1 : 0;
+        }
+
         private static double GetEpisodeScore(int expected, int actual)
         {
             if (expected <= 0 || actual <= 0)
@@ -769,15 +903,13 @@ namespace Emby.Plugin.Danmu.Scraper
 
         private static string BuildReason(
             double parent,
-            double keyword,
+            double season,
             double year,
-            double episodes,
-            bool termSpecificExactSeasonEvidence)
+            double episodes)
         {
             var parts = new List<string>();
-            if (keyword >= 0.95) parts.Add("季名关键词吻合");
-            if (parent >= 0.95) parts.Add("父剧名吻合");
-            if (termSpecificExactSeasonEvidence) parts.Add("本次搜索词结果季号吻合");
+            if (parent >= 0.95) parts.Add("父剧名出现");
+            if (season >= 0.95) parts.Add("季名吻合");
             if (year >= 0.95) parts.Add("年份吻合");
             if (episodes >= 0.95) parts.Add("集数吻合");
             return parts.Count > 0 ? string.Join("、", parts) : "需要人工确认";
