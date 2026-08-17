@@ -237,6 +237,12 @@ async function main() {
         "the r7 frontend installation flag should be V23 exactly once");
     assert(!source.includes("MAPPING_PROTOCOL_GENERATION") && source.includes("var MAPPING_PROTOCOL_VERSION = 21"),
         "the r7 UI must retain the backend numeric V21 mapping protocol and server-authored plan generation");
+    const compositeMappingHint = "下列卡片仅用于本次下载映射，不会改变Emby 的季归属。";
+    assert(!source.includes("该季包含多个来源或存在未识别区间；") &&
+        (source.match(new RegExp(compositeMappingHint, "g")) || []).length === 1 &&
+        !source.includes("不会改变 Emby") &&
+        source.includes('hint.textContent = "' + compositeMappingHint + '";'),
+        "the composite mapping hint must retain only the exact l1 copy, without the removed clause, extra Emby spacing, or altered punctuation");
     const decodedResponse = fakeResponse(200, "OK", '{"Seasons":[{"SeasonId":"s1"}]}');
     const decodedJson = await hooks.decodeApiResult(decodedResponse);
     assert(decodedJson.Seasons[0].SeasonId === "s1" && decodedResponse.readCount() === 1,

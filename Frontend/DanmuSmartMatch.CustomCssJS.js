@@ -2316,7 +2316,7 @@
         header.textContent = seasonLibraryContextLine(season);
         var hint = document.createElement("div");
         hint.className = "danmuCompositeHint";
-        hint.textContent = "该季包含多个来源或存在未识别区间；下列卡片仅用于本次下载映射，不会改变 Emby 的季归属。";
+        hint.textContent = "下列卡片仅用于本次下载映射，不会改变Emby 的季归属。";
         container.append(header, hint);
         var scopeLine = scopeSummaryLine(season);
         if (scopeLine) {
