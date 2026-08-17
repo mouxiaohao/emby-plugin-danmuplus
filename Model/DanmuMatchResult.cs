@@ -621,5 +621,6 @@ namespace Emby.Plugin.Danmu.Model
     {
         public const string Default = "default";
         public const string Rematch = "rematch";
+        public const string ManualKeyword = "manual-keyword";
     }
 }

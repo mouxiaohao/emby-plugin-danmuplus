@@ -651,6 +651,16 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 return response;
             }
 
+            // Validate target-bound evidence before any provider detail call.
+            // Manual keyword cards reuse this ordinary evidence boundary.
+            if (!CandidateEvidence.TryResolve(request.SelectionEvidenceToken,
+                    episode.Id.ToString(), scraper.ProviderId, request.CandidateId, out _))
+            {
+                response.Status = "invalid_or_stale_evidence";
+                response.Message = "Episode candidate evidence is invalid or expired.";
+                return response;
+            }
+
             response.ItemId = episode.Id.ToString();
             response.Site = scraper.ProviderId;
             response.SiteName = scraper.ProviderName;
@@ -830,8 +840,24 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                     item is Episode ? "Episode" : item is Movie ? "Movie" : item.GetType().Name,
             };
             var rematch = IsRematch(request);
-            result.MatchIntent = rematch ? DanmuMatchIntent.Rematch : DanmuMatchIntent.Default;
+            var manualKeyword = IsManualKeyword(request);
+            result.MatchIntent = manualKeyword
+                ? DanmuMatchIntent.ManualKeyword
+                : rematch ? DanmuMatchIntent.Rematch : DanmuMatchIntent.Default;
             result.EnabledProviderIdKeys = DanmuProviderIdResolver.GetEnabledProviderIdKeys(_scraperManager.All());
+
+            if (manualKeyword && string.IsNullOrWhiteSpace(request.Keyword))
+            {
+                result.Status = "invalid_request";
+                result.Message = "A manual search keyword is required.";
+                result.CanStart = false;
+                result.SearchCompletionDiagnostics.Add(new DanmuSearchCompletionDiagnostic
+                {
+                    Status = "invalid_request",
+                    Message = result.Message,
+                });
+                return result;
+            }
 
             if (item is Movie movie)
             {
@@ -839,8 +865,12 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                     movie,
                     request.Keyword,
                     rematch,
-                    cancellationToken).ConfigureAwait(false);
-                StampCandidateEvidence(movie, result.Target.Candidates);
+                    cancellationToken,
+                    manualKeyword).ConfigureAwait(false);
+                if (!manualKeyword)
+                {
+                    StampCandidateEvidence(movie, result.Target.Candidates);
+                }
                 result.CanStart = result.Target.AutoSelected;
                 result.Status = result.Target.Status;
                 result.Message = result.Target.Message;
@@ -854,11 +884,15 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                     episode,
                     request.Keyword,
                     rematch,
-                    cancellationToken).ConfigureAwait(false);
+                    cancellationToken,
+                    manualKeyword).ConfigureAwait(false);
                 // Season discovery evidence is intentionally target-bound. An
                 // Episode card therefore gets its own proof without re-searching
                 // or resolving source media.
-                StampCandidateEvidence(episode, result.Target.Candidates);
+                if (!manualKeyword)
+                {
+                    StampCandidateEvidence(episode, result.Target.Candidates);
+                }
                 result.CanStart = result.Target.AutoSelected;
                 result.Status = result.Target.Status;
                 result.Message = result.Target.Message;
@@ -912,6 +946,14 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 return result;
             }
 
+            if (manualKeyword && item is Series && seasons.Count != 1)
+            {
+                result.Status = "invalid_request";
+                result.Message = "Manual keyword Series search requires exactly one target Season.";
+                result.CanStart = false;
+                return result;
+            }
+
             var targetRequests = seasons.Select(currentSeason =>
             {
                 var targetId = currentSeason.Id.ToString();
@@ -919,11 +961,23 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 {
                     SeasonId = targetId,
                     BuildPreviewAsync = (targetCancellation, parentCancellation) =>
-                        !string.IsNullOrWhiteSpace(request.Site) &&
+                        manualKeyword
+                            ? ShouldUseCompositeSeasonPlanPreview(request)
+                                ? GetCompositeSeasonPlanPreview(currentSeason, request, targetCancellation,
+                                    parentCancellation, null)
+                                : GetSeasonMatchPreview(
+                                    currentSeason,
+                                    request.Keyword,
+                                    true,
+                                    cancellationToken: targetCancellation,
+                                    parentCancellationToken: parentCancellation,
+                                    manualKeywordDiscovery: true,
+                                    evidenceTarget: currentSeason)
+                            : !string.IsNullOrWhiteSpace(request.Site) &&
                         !string.IsNullOrWhiteSpace(request.CandidateId)
                             ? GetSelectedSeasonCandidatePlanPreview(currentSeason, request, targetCancellation,
                                 null)
-                            : request.CompositePlan || IsTemporaryRangeSearch(request)
+                            : ShouldUseCompositeSeasonPlanPreview(request)
                             ? GetCompositeSeasonPlanPreview(currentSeason, request, targetCancellation,
                                 parentCancellation, null)
                             : GetSeasonMatchPreview(
@@ -941,6 +995,11 @@ namespace Emby.Plugin.Danmu.Core.Controllers
             }).ToList();
             result.Seasons.AddRange(await CompositeSeasonTargetSetCoordinator.BuildAsync(
                 targetRequests, cancellationToken).ConfigureAwait(false));
+
+            if (TryApplySingleManualKeywordSeasonSummary(result, manualKeyword))
+            {
+                return result;
+            }
 
             if (item is Season && result.Seasons.Count == 1)
             {
@@ -1219,7 +1278,8 @@ namespace Emby.Plugin.Danmu.Core.Controllers
             Movie movie,
             string keywordOverride,
             bool forceSearch,
-            CancellationToken cancellationToken)
+            CancellationToken cancellationToken,
+            bool manualKeywordDiscovery = false)
         {
             var latest = _libraryManager.GetItemById(movie.Id) as Movie ?? movie;
             var result = new DanmuItemMatchResult
@@ -1232,6 +1292,18 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 Keyword = string.IsNullOrWhiteSpace(keywordOverride) ? latest.Name ?? string.Empty : keywordOverride,
             };
             var scrapers = _scraperManager.All();
+            if (manualKeywordDiscovery)
+            {
+                result.MatchIntent = DanmuMatchIntent.ManualKeyword;
+                result.EnabledProviderIdKeys = DanmuProviderIdResolver.GetEnabledProviderIdKeys(scrapers);
+                var manualSearch = await DanmuMatchSearchEngine.SearchMovieAsync(
+                    scrapers, latest, keywordOverride, _logger, BoundedSearchPolicy.Shared,
+                    cancellationToken, latest, retainZeroScoreCandidates: true,
+                    manualKeywordDiscovery: true).ConfigureAwait(false);
+                ApplyManualKeywordSearchResult(result, latest, manualSearch);
+                return result;
+            }
+
             InitializeDecision(result, scrapers, forceSearch);
             if (!forceSearch)
             {
@@ -1343,7 +1415,8 @@ namespace Emby.Plugin.Danmu.Core.Controllers
             Episode episode,
             string keywordOverride,
             bool forceSearch,
-            CancellationToken cancellationToken)
+            CancellationToken cancellationToken,
+            bool manualKeywordDiscovery = false)
         {
             var latest = _libraryManager.GetItemById(episode.Id) as Episode ?? episode;
             var season = latest.GetParent() as Season;
@@ -1364,6 +1437,12 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 Year = latest.ProductionYear ?? season?.ProductionYear,
                 Keyword = string.IsNullOrWhiteSpace(keywordOverride) ? series?.Name ?? string.Empty : keywordOverride,
             };
+            var episodeScrapers = _scraperManager.All();
+            if (manualKeywordDiscovery)
+            {
+                result.MatchIntent = DanmuMatchIntent.ManualKeyword;
+                result.EnabledProviderIdKeys = DanmuProviderIdResolver.GetEnabledProviderIdKeys(episodeScrapers);
+            }
             if (season == null)
             {
                 result.Status = "unsupported";
@@ -1371,7 +1450,27 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 return result;
             }
 
-            var episodeScrapers = _scraperManager.All();
+            if (manualKeywordDiscovery)
+            {
+                var manualSeasonMatch = await GetSeasonMatchPreview(
+                    season,
+                    keywordOverride,
+                    true,
+                    explicitParentSeries: authoritativeSeries,
+                    cancellationToken: cancellationToken,
+                    metadataOnly: true,
+                    parentCancellationToken: cancellationToken,
+                    manualKeywordDiscovery: true,
+                    evidenceTarget: latest).ConfigureAwait(false);
+                result.Candidates = manualSeasonMatch.Candidates;
+                result.SearchErrors.AddRange(manualSeasonMatch.SearchErrors);
+                result.SearchCompletionDiagnostics.AddRange(manualSeasonMatch.SearchCompletionDiagnostics);
+                result.Status = manualSeasonMatch.Status;
+                result.Message = manualSeasonMatch.Message;
+                result.DecisionReason = manualSeasonMatch.DecisionReason;
+                return result;
+            }
+
             InitializeDecision(result, episodeScrapers, forceSearch);
             if (!forceSearch)
             {
@@ -1451,7 +1550,9 @@ namespace Emby.Plugin.Danmu.Core.Controllers
             CancellationToken cancellationToken = default(CancellationToken),
             bool metadataOnly = false,
             CancellationToken parentCancellationToken = default(CancellationToken),
-            IReadOnlyCollection<string> targetOwnershipExclusions = null)
+            IReadOnlyCollection<string> targetOwnershipExclusions = null,
+            bool manualKeywordDiscovery = false,
+            BaseItem evidenceTarget = null)
         {
             // Series preview supplies an authoritative non-projected Season
             // object. Do not replace it with the Guid lookup projection, which
@@ -1490,8 +1591,17 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 SeasonNumber = latest.IndexNumber,
                 Year = expectedYear,
                 EpisodeCount = expectedEpisodes,
-                Keyword = DanmuMatchScorer.ExtractSeasonKeyword(seriesName, seasonName),
+                Keyword = manualKeywordDiscovery
+                    ? keywordOverride ?? string.Empty
+                    : DanmuMatchScorer.ExtractSeasonKeyword(seriesName, seasonName),
             };
+            if (manualKeywordDiscovery)
+            {
+                result.MatchIntent = DanmuMatchIntent.ManualKeyword;
+                result.AutoSelected = false;
+                result.EnabledProviderIdKeys = DanmuProviderIdResolver.GetEnabledProviderIdKeys(
+                    _scraperManager.All());
+            }
             ApplySeasonScopeSummary(result, planningContext);
             if (!scopeAvailable)
             {
@@ -1522,8 +1632,14 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 parentCancellationToken == default(CancellationToken) ? cancellationToken : parentCancellationToken,
                 new[] { parent?.OriginalTitle },
                 new[] { latest.OriginalTitle },
-                latest)
+                latest,
+                manualKeywordDiscovery: manualKeywordDiscovery)
                 .ConfigureAwait(false);
+            if (manualKeywordDiscovery)
+            {
+                ApplyManualKeywordSearchResult(result, evidenceTarget ?? latest, search);
+                return result;
+            }
             result.Candidates = search.Candidates;
             StampSeasonCandidateEvidence(latest, result.Candidates);
             result.SearchErrors.AddRange(search.SearchErrors);
@@ -1622,6 +1738,10 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 AutoSelected = false,
                 DecisionReason = "composite-season",
             };
+            if (IsManualKeyword(request))
+            {
+                response.MatchIntent = DanmuMatchIntent.ManualKeyword;
+            }
             ApplySeasonScopeSummary(response, build.Context);
             if (!DanmuMappingProtocol.IsCurrent(request.MappingProtocolVersion) ||
                 !SeasonPlanGenerations.IsCurrent(latest.Id.ToString(), request.PlanGeneration))
@@ -1676,11 +1796,17 @@ namespace Emby.Plugin.Danmu.Core.Controllers
             // Respect an edited keyword. For an initial request, use Series
             // title first, then Season title. Two empty titles are retryable
             // input, never an empty provider API call.
-            if (!DanmuTemporaryRangeSearchPolicy.TryResolveSearchKeyword(
-                    request.Keyword,
-                    parent?.Name,
-                    latest.Name,
-                    out var searchKeyword))
+            var manualKeyword = IsManualKeyword(request);
+            string searchKeyword;
+            if (manualKeyword)
+            {
+                searchKeyword = request.Keyword;
+            }
+            else if (!DanmuTemporaryRangeSearchPolicy.TryResolveSearchKeyword(
+                         request.Keyword,
+                         parent?.Name,
+                         latest.Name,
+                         out searchKeyword))
             {
                 response.Status = "retryable";
                 response.Message = "Temporary range search needs a Series or Season title.";
@@ -1691,14 +1817,32 @@ namespace Emby.Plugin.Danmu.Core.Controllers
 
             // Temporary ranges are never allowed to reuse a Season ProviderId
             // or plugin binding. They search only the verified current run.
+            if (manualKeyword)
+            {
+                var manualSearch = await DanmuMatchSearchEngine.SearchSeasonAsync(
+                    _scraperManager.All(), parent?.Name ?? string.Empty, latest.Name ?? string.Empty,
+                    latest.ProductionYear, range.Episodes.Count, searchKeyword, _logger,
+                    BoundedSearchPolicy.Shared, cancellationToken,
+                    parentCancellationToken == default(CancellationToken)
+                        ? cancellationToken
+                        : parentCancellationToken,
+                    new[] { parent?.OriginalTitle },
+                    new[] { latest.OriginalTitle },
+                    latest,
+                    manualKeywordDiscovery: true).ConfigureAwait(false);
+                response.Keyword = searchKeyword;
+                ApplyManualKeywordSearchResult(response, latest, manualSearch);
+                return response;
+            }
+
             var search = await DanmuMatchSearchEngine.SearchSeasonAsync(
-                _scraperManager.All(), parent?.Name ?? string.Empty, latest.Name ?? string.Empty,
-                latest.ProductionYear, range.Episodes.Count, searchKeyword, _logger,
-                BoundedSearchPolicy.Shared, cancellationToken,
-                parentCancellationToken == default(CancellationToken) ? cancellationToken : parentCancellationToken,
-                new[] { parent?.OriginalTitle },
-                new[] { latest.OriginalTitle },
-                latest)
+                    _scraperManager.All(), parent?.Name ?? string.Empty, latest.Name ?? string.Empty,
+                    latest.ProductionYear, range.Episodes.Count, searchKeyword, _logger,
+                    BoundedSearchPolicy.Shared, cancellationToken,
+                    parentCancellationToken == default(CancellationToken) ? cancellationToken : parentCancellationToken,
+                    new[] { parent?.OriginalTitle },
+                    new[] { latest.OriginalTitle },
+                    latest)
                 .ConfigureAwait(false);
             response.Keyword = searchKeyword;
             response.Candidates = search.Candidates;
@@ -1870,6 +2014,35 @@ namespace Emby.Plugin.Danmu.Core.Controllers
             return request != null &&
                    (request.Rematch || request.Force ||
                     string.Equals(request.Mode, DanmuMatchIntent.Rematch, StringComparison.OrdinalIgnoreCase));
+        }
+
+        private static bool IsManualKeyword(DanmuParams request)
+        {
+            return string.Equals(request?.Mode, DanmuMatchIntent.ManualKeyword, StringComparison.Ordinal);
+        }
+
+        private static bool ShouldUseCompositeSeasonPlanPreview(DanmuParams request)
+        {
+            return IsManualKeyword(request)
+                ? IsTemporaryRangeSearch(request)
+                : request?.CompositePlan == true || IsTemporaryRangeSearch(request);
+        }
+
+        private static bool TryApplySingleManualKeywordSeasonSummary(
+            DanmuMatchPreviewResult result,
+            bool manualKeyword)
+        {
+            if (!manualKeyword || result?.Seasons == null || result.Seasons.Count != 1)
+            {
+                return false;
+            }
+
+            var season = result.Seasons[0];
+            CopyDecision(result, season);
+            result.CanStart = false;
+            result.Status = season.Status;
+            result.Message = season.Message;
+            return true;
         }
 
         private static bool IsTemporaryRangeSearch(DanmuParams request)
@@ -2066,6 +2239,114 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                     target.Id.ToString(), candidate.Site, candidate.Id, score, origin,
                     candidate.SourceMetadata);
             }
+        }
+
+        private static void ApplyManualKeywordSearchResult(
+            DanmuItemMatchResult result,
+            BaseItem evidenceTarget,
+            DanmuMatchSearchResult search)
+        {
+            result.MatchIntent = DanmuMatchIntent.ManualKeyword;
+            result.AutoSelected = false;
+            result.SelectedCandidate = null;
+            result.SelectedId = string.Empty;
+            result.SelectedSite = string.Empty;
+            result.SelectedSiteName = string.Empty;
+            result.Candidates = search.Candidates;
+            result.SearchErrors.AddRange(search.SearchErrors);
+            result.SearchCompletionDiagnostics.AddRange(search.CompletionDiagnostics);
+            var presentation = DescribeManualKeywordSearch(search, result.Candidates.Count);
+            if (presentation.ClearCandidates)
+            {
+                result.Candidates.Clear();
+            }
+            else
+            {
+                StampCandidateEvidence(evidenceTarget, result.Candidates);
+            }
+            result.Status = presentation.Status;
+            result.DecisionReason = presentation.DecisionReason;
+            result.Message = presentation.Message;
+        }
+
+        private static void ApplyManualKeywordSearchResult(
+            DanmuSeasonMatchResult result,
+            BaseItem evidenceTarget,
+            DanmuMatchSearchResult search)
+        {
+            result.MatchIntent = DanmuMatchIntent.ManualKeyword;
+            result.AutoSelected = false;
+            result.SelectedCandidate = null;
+            result.SelectedId = string.Empty;
+            result.SelectedSite = string.Empty;
+            result.SelectedSiteName = string.Empty;
+            result.Candidates = search.Candidates;
+            result.SearchErrors.AddRange(search.SearchErrors);
+            result.SearchCompletionDiagnostics.AddRange(search.CompletionDiagnostics);
+            var presentation = DescribeManualKeywordSearch(search, result.Candidates.Count);
+            if (presentation.ClearCandidates)
+            {
+                result.Candidates.Clear();
+            }
+            else
+            {
+                StampCandidateEvidence(evidenceTarget, result.Candidates);
+            }
+            result.Status = presentation.Status;
+            result.DecisionReason = presentation.DecisionReason;
+            result.Message = presentation.Message;
+        }
+
+        private static ManualKeywordSearchPresentation DescribeManualKeywordSearch(
+            DanmuMatchSearchResult search,
+            int candidateCount)
+        {
+            if (search?.CompletionDiagnostics?.Any(diagnostic =>
+                    string.Equals(diagnostic?.Status, "invalid_request",
+                        StringComparison.OrdinalIgnoreCase)) == true)
+            {
+                return new ManualKeywordSearchPresentation(
+                    "invalid_request", "manual-keyword-required",
+                    "A manual search keyword is required.", true);
+            }
+            if (search?.WasCancelled == true)
+            {
+                return new ManualKeywordSearchPresentation(
+                    "cancelled", "cancelled", "Manual search was cancelled.", true);
+            }
+            if (search != null && !search.HasCompletedProviders && !search.IsComplete)
+            {
+                return new ManualKeywordSearchPresentation(
+                    "incomplete", "retryable-incomplete",
+                    "No provider search completed; retry the manual search.", false);
+            }
+            return candidateCount == 0
+                ? new ManualKeywordSearchPresentation(
+                    "no_match", "no-candidates",
+                    "Manual search returned no candidates.", false)
+                : new ManualKeywordSearchPresentation(
+                    "ambiguous", "manual-selection-required",
+                    "Choose a candidate to continue with authoritative validation.", false);
+        }
+
+        private sealed class ManualKeywordSearchPresentation
+        {
+            public ManualKeywordSearchPresentation(
+                string status,
+                string decisionReason,
+                string message,
+                bool clearCandidates)
+            {
+                Status = status;
+                DecisionReason = decisionReason;
+                Message = message;
+                ClearCandidates = clearCandidates;
+            }
+
+            public string Status { get; }
+            public string DecisionReason { get; }
+            public string Message { get; }
+            public bool ClearCandidates { get; }
         }
 
         private static void ApplyProviderDecision(DanmuItemMatchResult result, DanmuMatchDecision decision)

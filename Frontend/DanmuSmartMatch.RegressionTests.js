@@ -343,8 +343,54 @@ async function main() {
     await automaticInput.dispatch("input");
     const explicitRematch = hooks.keywordRematchParameters({}, automaticInput);
     assert(automaticButton.textContent === "按关键词搜索" &&
-        explicitRematch.keyword === "小书痴的下克上",
-        "editing the input must switch to an explicit isolated custom-keyword search");
+        explicitRematch.mode === "manual-keyword" && explicitRematch.keyword === "小书痴的下克上",
+        "editing the input must switch to the isolated manual-keyword contract");
+    const manualKeywordInput = " \t进击！ A+B  テスト\u3000 ";
+    const trimmedManualKeyword = "进击！ A+B  テスト";
+    ["Movie", "Episode-via-Season", "Season", "Series-per-Season"].forEach(entry => {
+        const input = new FakeElement("input");
+        const button = new FakeElement("button");
+        input.value = "prefill";
+        hooks.initializeKeywordIntent(input, button, false);
+        input.value = manualKeywordInput;
+        input.listeners.input[0]();
+        const parameters = hooks.keywordRematchParameters({ entry: entry }, input);
+        assert(parameters.mode === "manual-keyword" && parameters.keyword === trimmedManualKeyword &&
+            parameters.entry === entry && parameters.rematch === "true" && parameters.force === "true",
+            entry + " must trim outer whitespace while preserving internal spaces, punctuation, literal plus, and non-ASCII text");
+    });
+    const whitespaceInput = new FakeElement("input");
+    whitespaceInput.value = " \t\u3000 ";
+    whitespaceInput.dataset.danmuExplicitKeyword = "true";
+    assert(hooks.manualKeywordParameters({}, whitespaceInput) === null &&
+        hooks.keywordRematchParameters({}, whitespaceInput) === null,
+        "manual-keyword parameters must reject whitespace-only explicit input instead of falling back to rematch");
+    const retiredIntent = "manual-" + ["r", "a", "w"].join("");
+    assert(hooks.isManualKeyword({ MatchIntent: "manual-keyword" }) &&
+        !hooks.isManualKeyword({ MatchIntent: retiredIntent }) &&
+        !hooks.isManualKeyword({ MatchIntent: "future-keyword" }) &&
+        !hooks.isManualKeyword({ mode: "manual-keyword" }),
+        "only the server-authored exact manual-keyword MatchIntent may activate isolated presentation");
+    const defaultCancelledDiagnostic = hooks.searchDiagnosticsLine({
+        SearchCompletionDiagnostics: [{ Provider: "DefaultCancelled", Status: "cancelled" }]
+    });
+    const manualKeywordCancelledDiagnostic = hooks.searchDiagnosticsLine({
+        MatchIntent: "manual-keyword",
+        SearchCompletionDiagnostics: [{ Provider: "ManualKeywordCancelled", Status: "cancelled" }]
+    });
+    assert(defaultCancelledDiagnostic === "搜索诊断：DefaultCancelled 已取消" && manualKeywordCancelledDiagnostic === "",
+        "cancelled diagnostics must retain normal-mode presentation and be hidden only for manual-keyword results");
+    const rangeInput = new FakeElement("input");
+    rangeInput.value = manualKeywordInput;
+    rangeInput.dataset.danmuExplicitKeyword = "true";
+    const manualKeywordRangeParameters = hooks.temporaryRangeSearchParameters(
+        {}, { Id: "series-manual-keyword", Type: "Series" },
+        { SeriesId: "series-manual-keyword", SeasonId: "season-manual-keyword", SeasonNumber: 1 },
+        { episodes: [{ ItemId: "episode-manual-keyword" }] }, {}, manualKeywordInput, rangeInput);
+    assert(manualKeywordRangeParameters.mode === "manual-keyword" &&
+        manualKeywordRangeParameters.keyword === trimmedManualKeyword &&
+        manualKeywordRangeParameters.searchScope === "temporary-range",
+        "an edited temporary-range keyword must trim outer whitespace, preserve its content, and retain its authoritative range scope");
     const origins = {
         " provider-id ": "本地外部标识符",
         "EXTERNAL_ID": "本地外部标识符",
@@ -388,6 +434,219 @@ async function main() {
         "normalization should trim, case-normalize, and normalize separators");
     assert(!hooks.hasBackendMatch({ MatchOrigin: "provider-id", Status: "ambiguous" }),
         "an unresolved source-episode choice must not be displayed as a successful match");
+
+    const manualKeywordCandidates = Array.from({ length: 65 }, (_unused, index) => ({
+        Site: index < 2 ? "Dandan" : (index < 40 ? "Bilibili" : "Youku"),
+        SiteName: index < 2 ? "弹弹Play" : (index < 40 ? "哔哩哔哩" : "优酷"),
+        Id: index < 2 ? "duplicate-id" : "manual-keyword-" + index,
+        Name: index < 2 ? "Exact Looking Duplicate" : "Provider Row " + index,
+        Year: 2026, EpisodeSize: 12, Category: "Anime",
+        Score: index === 0 ? 0.42 : (index === 1 ? 0.97 : (index === 2 ? 0.63 : 0.8)),
+        MatchScore: index === 2 ? null :
+            (index === 0 ? 0.42 : (index === 1 ? 0.97 : 0.8)),
+        ScoreOrigin: "search-confidence", Reason: "Server score reason " + index,
+        MatchOrigin: "manual-keyword-backend-origin-" + index,
+        DecisionReason: "manual-keyword-backend-decision-" + index,
+        SelectionEvidenceToken: "evidence-" + index
+    }));
+    const manualKeywordTarget = {
+        MatchIntent: "manual-keyword", SelectedSite: "Dandan", SelectedId: "duplicate-id",
+        MatchOrigin: "scored", DecisionReason: "confident-site-priority",
+        Candidates: manualKeywordCandidates,
+        SearchCompletionDiagnostics: [
+            { Provider: "Bilibili", Status: "completed" },
+            { Provider: "BrokenSite", Status: "failed" },
+            { Provider: "CancelledSibling", Status: "cancelled" }
+        ]
+    };
+    const manualKeywordDialog = hooks.openDialog("manual keyword rows");
+    hooks.renderItemCandidatePicker(manualKeywordDialog,
+        { Id: "manual-keyword-episode", Type: "Episode", Name: "Exact Looking Duplicate", SeriesName: "Manual Keyword" },
+        manualKeywordTarget, manualKeywordInput);
+    const manualKeywordRows = manualKeywordDialog.body.querySelectorAll(".danmuCandidate");
+    assert(manualKeywordRows.length === 65 &&
+        allVisibleText(manualKeywordRows[0]).includes("Exact Looking Duplicate") &&
+        allVisibleText(manualKeywordRows[1]).includes("Exact Looking Duplicate") &&
+        allVisibleText(manualKeywordRows[2]).includes("Provider Row 2") &&
+        allVisibleText(manualKeywordRows[0]).includes("匹配分：42（标题匹配）") &&
+        allVisibleText(manualKeywordRows[1]).includes("匹配分：97（标题匹配）") &&
+        allVisibleText(manualKeywordRows[2]).includes("匹配分：63（标题匹配）") &&
+        manualKeywordRows.every(row => !row.children[0].checked),
+        "manual-keyword rendering must trust backend order despite score values, preserve duplicates and more than sixty rows, and avoid preselection");
+    const manualKeywordVisibleText = allVisibleText(manualKeywordDialog.body);
+    assert(manualKeywordRows.every((row, index) => allVisibleText(row).includes("评分理由：Server score reason " + index) &&
+            !allVisibleText(row).includes("来源：") && !allVisibleText(row).includes("决策：")) &&
+        manualKeywordVisibleText.includes("BrokenSite 失败") &&
+        !manualKeywordVisibleText.includes("CancelledSibling") &&
+        !manualKeywordVisibleText.includes("manual-keyword-backend-origin-") &&
+        !manualKeywordVisibleText.includes("manual-keyword-backend-decision-"),
+        "manual-keyword rows must show server score/reason fields while retaining provider faults and isolating automatic origin/decision fields");
+    const manualKeywordMovieDialog = hooks.openDialog("manual keyword Movie heading");
+    hooks.renderItemCandidatePicker(manualKeywordMovieDialog,
+        { Id: "manual-keyword-movie", Type: "Movie", Name: "Local Movie" },
+        { MatchIntent: "manual-keyword", Candidates: [{
+            Site: "Bilibili", SiteName: "哔哩哔哩", Id: "manual-keyword-movie-candidate",
+            Name: "Provider Movie Title", Score: 0.64, ScoreOrigin: "search-confidence",
+            Reason: "Movie server score reason", MatchOrigin: "movie-automatic-origin",
+            DecisionReason: "movie-automatic-decision", SelectionEvidenceToken: "manual-keyword-movie-evidence"
+        }] }, manualKeywordInput);
+    const manualKeywordMovieTitle = manualKeywordMovieDialog.body.querySelector(".danmuCandidateTitle");
+    const manualKeywordMovieText = allVisibleText(manualKeywordMovieDialog.body);
+    assert(manualKeywordMovieTitle && manualKeywordMovieTitle.textContent === "哔哩哔哩 · Provider Movie Title" &&
+        manualKeywordMovieText.includes("匹配分：64（标题匹配）") &&
+        manualKeywordMovieText.includes("评分理由：Movie server score reason") &&
+        !manualKeywordMovieDialog.body.querySelector(".danmuCandidate").children[0].checked &&
+        !manualKeywordMovieText.includes("来源：") && !manualKeywordMovieText.includes("决策：") &&
+        !manualKeywordMovieText.includes("movie-automatic-origin") &&
+        !manualKeywordMovieText.includes("movie-automatic-decision"),
+        "a manual-keyword Movie row without SourceMetadata must show its public name, server score/reason, no automatic decision, and no preselection");
+    manualKeywordMovieDialog.forceClose();
+    apiResponses.MatchCandidateDetails = {
+        Success: true, SourceEpisodes: [{ Id: "trusted-source", Number: 1, Title: "Trusted detail" }]
+    };
+    const manualKeywordDetailStart = apiCalls.length;
+    await manualKeywordRows[0].querySelector(".danmuCandidateDetailAction").dispatch("click");
+    await manualKeywordRows[1].querySelector(".danmuCandidateDetailAction").dispatch("click");
+    const manualKeywordDetailCalls = apiCalls.slice(manualKeywordDetailStart)
+        .filter(call => call.option === "MatchCandidateDetails");
+    assert(manualKeywordDetailCalls.length === 2 &&
+        manualKeywordDetailCalls.every(call => call.parameters.candidateId === "duplicate-id") &&
+        manualKeywordDetailCalls.map(call => call.parameters.candidateEvidence).join(",") === "evidence-0,evidence-1" &&
+        allVisibleText(manualKeywordRows[0]).includes("Trusted detail") &&
+        allVisibleText(manualKeywordRows[1]).includes("Trusted detail"),
+        "duplicate provider/id rows must keep evidence-token-scoped detail state and issue separate trusted requests");
+    apiResponses.GetSelectedCandidatePreview = {
+        Status: "ready", Episodes: [{ Id: "trusted-source", Number: 1, Title: "Trusted detail" }]
+    };
+    manualKeywordRows[1].children[0].checked = true;
+    const trustedSelectionStart = apiCalls.length;
+    const manualKeywordStart = manualKeywordDialog.footer.children.find(button => button.textContent === "解析所选候选的来源剧集");
+    await manualKeywordStart.dispatch("click");
+    await waitUntil(() => apiCalls.slice(trustedSelectionStart).some(call => call.option === "GetSelectedCandidatePreview"),
+        "explicit manual-keyword selection should enter trusted detail resolution");
+    const trustedSelectionCall = apiCalls.slice(trustedSelectionStart)
+        .find(call => call.option === "GetSelectedCandidatePreview");
+    assert(trustedSelectionCall.parameters.candidateId === "duplicate-id" &&
+        trustedSelectionCall.parameters.selectionEvidenceToken === "evidence-1",
+        "explicit manual-keyword selection must reuse the existing evidence-validated selection hook");
+    await waitUntil(() => manualKeywordDialog.body.querySelectorAll(".danmuSourceEpisodeChoice").length === 1,
+        "trusted manual-keyword Episode detail should enter the existing source Episode picker");
+    const manualKeywordSourcePickerText = allVisibleText(manualKeywordDialog.body);
+    assert(manualKeywordSourcePickerText.includes("匹配分：97（标题匹配）") &&
+        manualKeywordSourcePickerText.includes("评分理由：Server score reason 1") &&
+        !manualKeywordSourcePickerText.includes("来源：") && !manualKeywordSourcePickerText.includes("决策：") &&
+        !manualKeywordSourcePickerText.includes("manual-keyword-backend-origin-1") &&
+        !manualKeywordSourcePickerText.includes("manual-keyword-backend-decision-1"),
+        "the manual-keyword Episode source picker must retain server score/reason presentation without reading automatic decisions");
+    delete apiResponses.MatchCandidateDetails;
+    delete apiResponses.GetSelectedCandidatePreview;
+
+    apiResponses.StartTrackedDownload = {
+        TaskId: "manual-keyword-progress", Status: "completed", Message: "done", Succeeded: 1,
+        Episodes: [{ ItemId: "manual-keyword-progress-item", EpisodeNumber: 1, Status: "success" }]
+    };
+    for (const itemType of ["Episode", "Movie"]) {
+        const progressDialog = {
+            body: new FakeElement("div"), footer: new FakeElement("div"),
+            overlay: { isConnected: false }, closable: false, forceRefresh: false,
+            close: function () {}, forceClose: function () {}, setBackHandler: function () {}
+        };
+        await hooks.renderSingleTargetProgress(progressDialog,
+            { Id: "manual-keyword-progress-" + itemType, Type: itemType, Name: "Manual keyword progress " + itemType },
+            Object.assign({ MatchIntent: "manual-keyword" }, manualKeywordTarget), manualKeywordCandidates[0],
+            itemType === "Episode" ? 1 : null, itemType === "Episode" ? "trusted-source" : null, true);
+        const progressText = allVisibleText(progressDialog.body);
+        assert(progressText.includes("匹配分：42（标题匹配）") &&
+            progressText.includes("评分理由：Server score reason 0") &&
+            !progressText.includes("来源：") && !progressText.includes("决策：") &&
+            !progressText.includes("manual-keyword-backend-origin-0") &&
+            !progressText.includes("manual-keyword-backend-decision-0"),
+            "manual-keyword " + itemType + " progress must retain server score/reason without reading automatic decisions");
+    }
+    delete apiResponses.StartTrackedDownload;
+
+    const manualKeywordSeriesSeason = {
+        SeriesId: "manual-keyword-series", SeasonId: "manual-keyword-series-season", SeasonNumber: 1,
+        SeasonName: "Manual Keyword Series Season", MatchIntent: "manual-keyword",
+        Candidates: manualKeywordCandidates.slice(0, 2),
+        MatchOrigin: "scored", DecisionReason: "confident-site-priority",
+        Message: "Choose a candidate to continue.",
+        SearchCompletionDiagnostics: [
+            { Provider: "SeriesBroken", Status: "failed" },
+            { Provider: "SeriesCancelled", Status: "cancelled" }
+        ]
+    };
+    const manualKeywordSeriesDialog = hooks.openDialog("manual keyword Series per Season");
+    hooks.renderSeriesSeasonPicker(manualKeywordSeriesDialog,
+        { Id: "manual-keyword-series", Type: "Series", Name: "Manual Keyword Series" },
+        [manualKeywordSeriesSeason], 0, {}, {});
+    const manualKeywordSeriesRows = manualKeywordSeriesDialog.body.querySelectorAll(".danmuCandidate");
+    const manualKeywordSeriesText = allVisibleText(manualKeywordSeriesDialog.body);
+    assert(manualKeywordSeriesRows.length === 2 && manualKeywordSeriesRows.every(row => !row.children[0].checked) &&
+        allVisibleText(manualKeywordSeriesRows[0]).includes("匹配分：42（标题匹配）") &&
+        allVisibleText(manualKeywordSeriesRows[1]).includes("匹配分：97（标题匹配）") &&
+        allVisibleText(manualKeywordSeriesRows[0]).includes("评分理由：Server score reason 0") &&
+        allVisibleText(manualKeywordSeriesRows[1]).includes("评分理由：Server score reason 1") &&
+        manualKeywordSeriesText.includes("SeriesBroken 失败") && !manualKeywordSeriesText.includes("SeriesCancelled") &&
+        !manualKeywordSeriesText.includes("来源：") && !manualKeywordSeriesText.includes("决策：") &&
+        !manualKeywordSeriesText.includes("manual-keyword-backend-origin-") &&
+        !manualKeywordSeriesText.includes("manual-keyword-backend-decision-"),
+        "Series-per-season manual-keyword rendering must preserve backend row order and score/reason fields without automatic decisions or preselection");
+    manualKeywordSeriesDialog.forceClose();
+
+    const manualKeywordSeasonDialog = hooks.openDialog("manual keyword standalone Season");
+    hooks.renderCandidatePicker(manualKeywordSeasonDialog,
+        { Id: "manual-keyword-season", Type: "Season", Name: "Manual Keyword Season" },
+        manualKeywordSeriesSeason, manualKeywordInput);
+    const manualKeywordSeasonRows = manualKeywordSeasonDialog.body.querySelectorAll(".danmuCandidate");
+    const manualKeywordSeasonText = allVisibleText(manualKeywordSeasonDialog.body);
+    assert(manualKeywordSeasonRows.length === 2 && manualKeywordSeasonRows.every(row => !row.children[0].checked) &&
+        allVisibleText(manualKeywordSeasonRows[0]).includes("匹配分：42（标题匹配）") &&
+        allVisibleText(manualKeywordSeasonRows[1]).includes("匹配分：97（标题匹配）") &&
+        allVisibleText(manualKeywordSeasonRows[0]).includes("评分理由：Server score reason 0") &&
+        allVisibleText(manualKeywordSeasonRows[1]).includes("评分理由：Server score reason 1") &&
+        !manualKeywordSeasonText.includes("来源：") && !manualKeywordSeasonText.includes("决策：") &&
+        !manualKeywordSeasonText.includes("manual-keyword-backend-origin-") &&
+        !manualKeywordSeasonText.includes("manual-keyword-backend-decision-"),
+        "standalone Season manual-keyword rows must retain backend order and score/reason fields without automatic decisions or preselection");
+    manualKeywordSeasonDialog.forceClose();
+
+    const manualKeywordSeriesOverviewDialog = hooks.openDialog("manual keyword Series overview");
+    hooks.renderSeriesPicker(manualKeywordSeriesOverviewDialog,
+        { Id: "manual-keyword-series", Type: "Series", Name: "Manual Keyword Series" },
+        [manualKeywordSeriesSeason], {}, {});
+    const manualKeywordSeriesOverviewText = allVisibleText(manualKeywordSeriesOverviewDialog.body);
+    const manualKeywordSeriesOverviewState = manualKeywordSeriesOverviewDialog.body.querySelector(".danmuSeasonSummaryState");
+    assert(manualKeywordSeriesOverviewText.includes("SeriesBroken 失败") &&
+        manualKeywordSeriesOverviewText.includes("Choose a candidate to continue.") &&
+        manualKeywordSeriesOverviewState && manualKeywordSeriesOverviewState.textContent === "等待人工选择" &&
+        !manualKeywordSeriesOverviewText.includes("✕ 匹配失败") &&
+        !manualKeywordSeriesOverviewText.includes("SeriesCancelled") &&
+        !manualKeywordSeriesOverviewText.includes("来源：") &&
+        !manualKeywordSeriesOverviewText.includes("决策："),
+        "Series overview manual-keyword cards must show a neutral manual-selection state while retaining diagnostics and hiding automatic decisions");
+    manualKeywordSeriesOverviewDialog.forceClose();
+
+    hooks.renderItemCandidatePicker(manualKeywordDialog,
+        { Id: "default-episode", Type: "Episode", Name: "Default" },
+        { SelectedSite: "Dandan", SelectedId: "default-id", Candidates: [{
+            Site: "Dandan", Id: "default-id", Name: "Default candidate",
+            MatchScore: 0.9, ScoreOrigin: "search-confidence"
+        }] }, "");
+    const defaultRows = manualKeywordDialog.body.querySelectorAll(".danmuCandidate");
+    assert(defaultRows.length === 1 && defaultRows[0].children[0].checked &&
+        allVisibleText(defaultRows[0]).includes("匹配分：90"),
+        "rerendering a default result must replace, not inherit, manual-keyword presentation state");
+    const whitespaceSearch = manualKeywordDialog.body.querySelector(".danmuSmartSearch");
+    const whitespaceSearchInput = whitespaceSearch.children[0];
+    const whitespaceSearchButton = whitespaceSearch.children[1];
+    whitespaceSearchInput.value = "  \t\u3000  ";
+    await whitespaceSearchInput.dispatch("input");
+    const whitespaceCallCount = apiCalls.length;
+    await whitespaceSearchButton.dispatch("click");
+    assert(apiCalls.length === whitespaceCallCount,
+        "whitespace-only explicit input must be rejected in the UI with zero provider requests");
+    manualKeywordDialog.forceClose();
 
     const compositeSeason = {
         SeriesId: "series", SeasonId: "season-composite", SeasonNumber: 1,
@@ -828,6 +1087,61 @@ async function main() {
         allVisibleText(rangeCandidateRow).includes("范围来源标题") &&
         !allVisibleText(rangeCandidateRow).includes("range-private"),
         "temporary-range candidates must reuse lazy details with private evidence and row-local expansion");
+    const rangeSearch = rangeDialog.body.querySelector(".danmuSmartSearch");
+    const rangeManualKeywordInput = rangeSearch.children[0];
+    const rangeManualKeywordButton = rangeSearch.children[1];
+    rangeManualKeywordInput.value = manualKeywordInput;
+    await rangeManualKeywordInput.dispatch("input");
+    apiResponses.MatchPreview = {
+        Seasons: [Object.assign({}, rangeSeason, {
+            MatchIntent: "manual-keyword", CandidateGeneration: "range-manual-keyword-generation",
+            SearchCompletionDiagnostics: [
+                { Provider: "RangeBroken", Status: "failed" },
+                { Provider: "RangeCancelled", Status: "cancelled" }
+            ],
+            Candidates: [0, 1].map(index => ({
+                Id: "range-duplicate", Site: "Dandan", Name: "Manual keyword range duplicate",
+                MatchScore: index === 0 ? 0.36 : 0.91, ScoreOrigin: "search-confidence",
+                Reason: "Range score reason " + index,
+                MatchOrigin: "range-automatic-origin-" + index,
+                DecisionReason: "range-automatic-decision-" + index,
+                SelectionEvidenceToken: "range-manual-keyword-" + index
+            }))
+        })]
+    };
+    const manualKeywordRangeCallStart = apiCalls.length;
+    await rangeManualKeywordButton.dispatch("click");
+    await waitUntil(() => rangeDialog.body.querySelectorAll(".danmuCandidate").length === 2,
+        "explicit temporary-range manual-keyword search should rerender both duplicate rows");
+    const submittedManualKeywordRange = apiCalls.slice(manualKeywordRangeCallStart)
+        .find(call => call.option === "MatchPreview");
+    const savedRangeState = Object.values(rangeDialog.temporaryRangeCandidates)[0];
+    const manualKeywordRangeRows = rangeDialog.body.querySelectorAll(".danmuCandidate");
+    const manualKeywordRangeText = allVisibleText(rangeDialog.body);
+    assert(submittedManualKeywordRange.parameters.mode === "manual-keyword" &&
+        submittedManualKeywordRange.parameters.keyword === trimmedManualKeyword &&
+        savedRangeState.matchIntent === "manual-keyword" &&
+        savedRangeState.searchCompletionDiagnostics.length === 2 &&
+        manualKeywordRangeText.includes("RangeBroken 失败") && !manualKeywordRangeText.includes("RangeCancelled") &&
+        manualKeywordRangeRows.every(row => !row.children[0].checked) &&
+        allVisibleText(manualKeywordRangeRows[0]).includes("匹配分：36（标题匹配）") &&
+        allVisibleText(manualKeywordRangeRows[1]).includes("匹配分：91（标题匹配）") &&
+        allVisibleText(manualKeywordRangeRows[0]).includes("评分理由：Range score reason 0") &&
+        allVisibleText(manualKeywordRangeRows[1]).includes("评分理由：Range score reason 1") &&
+        !manualKeywordRangeText.includes("来源：") && !manualKeywordRangeText.includes("决策：") &&
+        !manualKeywordRangeText.includes("range-automatic-origin-") &&
+        !manualKeywordRangeText.includes("range-automatic-decision-"),
+        "temporary-range must trim the keyword, refresh MatchIntent, trust backend score order, retain duplicates, and hide automatic decisions");
+    manualKeywordRangeRows[1].children[0].checked = true;
+    apiResponses.MatchPreview = { Seasons: [rangeSeason] };
+    const manualKeywordRangePlanStart = apiCalls.length;
+    const applyManualKeywordRange = rangeDialog.footer.children.find(button => button.textContent === "应用到此临时季");
+    await applyManualKeywordRange.dispatch("click");
+    const manualKeywordRangePlanCall = apiCalls.slice(manualKeywordRangePlanStart).find(call =>
+        call.option === "MatchPreview" && call.parameters.compositePlan === "true");
+    assert(manualKeywordRangePlanCall &&
+        manualKeywordRangePlanCall.parameters.compositeSelections.includes("range-manual-keyword-1"),
+        "an explicitly selected duplicate manual-keyword range row must enter the existing authoritative temporary-mapping plan hook");
     rangeDialog.forceClose();
     delete apiResponses.MatchPreview;
     delete apiResponses.MatchCandidateDetails;

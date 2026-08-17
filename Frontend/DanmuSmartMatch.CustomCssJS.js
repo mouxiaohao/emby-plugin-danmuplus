@@ -838,13 +838,25 @@
         updateLabel();
     }
 
+    function manualKeywordParameters(parameters, input) {
+        if (!input || input.dataset.danmuExplicitKeyword !== "true") return null;
+        var keyword = String(input.value || "").trim();
+        if (!keyword) return null;
+        return Object.assign(rematchParameters(parameters), {
+            mode: "manual-keyword",
+            keyword: keyword
+        });
+    }
+
     function keywordRematchParameters(parameters, input) {
-        var keyword = String(input && input.value || "").trim();
-        var request = Object.assign({}, parameters || {});
         if (input && input.dataset.danmuExplicitKeyword === "true") {
-            request.keyword = keyword;
+            return manualKeywordParameters(parameters, input);
         }
-        return rematchParameters(request);
+        return rematchParameters(parameters);
+    }
+
+    function isManualKeyword(target) {
+        return String(value(target, "MatchIntent", "matchIntent", "") || "") === "manual-keyword";
     }
 
     function matchOrigin(target) {
@@ -986,8 +998,10 @@
 
     function searchDiagnosticsLine(target) {
         var diagnostics = value(target, "SearchCompletionDiagnostics", "searchCompletionDiagnostics", []) || [];
+        var manualKeyword = isManualKeyword(target);
         var incomplete = diagnostics.filter(function (entry) {
-            return normalizeDecisionCode(value(entry, "Status", "status", "")) !== "completed";
+            var status = normalizeDecisionCode(value(entry, "Status", "status", ""));
+            return status !== "completed" && (!manualKeyword || status !== "cancelled");
         });
         if (!incomplete.length) return "";
         return "搜索诊断：" + incomplete.map(function (entry) {
@@ -999,6 +1013,7 @@
     }
 
     function hasBackendMatch(target) {
+        if (isManualKeyword(target)) return false;
         var origin = matchOrigin(target).toLowerCase();
         var status = String(value(target, "Status", "status", "") || "").trim().toLowerCase();
         if (["ambiguous", "no_match", "not_found", "notfound", "failed", "unsupported", "unmatched"].indexOf(status) >= 0) {
@@ -1016,6 +1031,17 @@
         var score = matchScoreLine(candidate);
         return site + "｜" + name + "｜" + (year || "年份未知") + "｜" +
             (episodes > 0 ? episodes + " 集" : "集数未知") + (score ? "｜" + score : "");
+    }
+
+    function candidateReasonLine(candidate) {
+        var reason = boundedText(value(candidate, "Reason", "reason", ""));
+        return reason ? "评分理由：" + reason : "";
+    }
+
+    function manualKeywordCandidateLine(candidate) {
+        var line = candidateLine(candidate);
+        var reason = candidateReasonLine(candidate);
+        return line + (reason ? "｜" + reason : "");
     }
 
     function normalizedDisplayIdentity(text) {
@@ -1047,6 +1073,16 @@
         return components.join(" · ");
     }
 
+    function manualKeywordMovieCandidateHeading(candidate) {
+        var source = value(candidate, "SourceMetadata", "sourceMetadata", null);
+        var sourceTitle = String(value(source, "Title", "title", "") || "").trim();
+        if (sourceTitle) return movieCandidateHeading(candidate, null, "");
+        var site = String(value(candidate, "SiteName", "siteName",
+            value(candidate, "Site", "site", "未知网站")) || "未知网站");
+        var name = String(value(candidate, "Name", "name", "") || "").trim() || "未命名项目";
+        return site + " · " + name;
+    }
+
     function beginCandidateDetailGeneration(dialog, targetId, candidates, serverGeneration) {
         var fingerprint = String(targetId || "") + "|" + String(serverGeneration || "") + "|" +
             (candidates || []).map(function (candidate) {
@@ -1064,7 +1100,8 @@
 
     function candidateDetailState(dialog, targetId, candidate, generation) {
         var key = [targetId || "", value(candidate, "Site", "site", ""),
-            value(candidate, "Id", "id", ""), generation].join("::");
+            value(candidate, "Id", "id", ""),
+            value(candidate, "SelectionEvidenceToken", "selectionEvidenceToken", ""), generation].join("::");
         if (!dialog.candidateDetails[key]) {
             dialog.candidateDetails[key] = { status: "idle", expanded: false, rows: [], message: "" };
         }
@@ -1291,15 +1328,17 @@
             value(season, "SeasonName", "seasonName", item && item.Name || "") || "").trim();
     }
 
-    function temporaryRangeSearchParameters(dialog, item, season, group, selections, keyword) {
+    function temporaryRangeSearchParameters(dialog, item, season, group, selections, keyword, input) {
         var parameters = compositeDraftParameters(dialog, season, seasonRequestParameters(season));
         parameters.searchScope = "temporary-range";
         parameters.compositeStartEpisodeItemId = value(group.episodes[0], "ItemId", "itemId", "");
         parameters.compositeEpisodeCount = String(group.episodes.length);
         parameters.compositeSelections = JSON.stringify(compositeRequestSelections(selections, season));
         parameters.compositePlan = "true";
-        parameters.keyword = String(keyword || "").trim();
-        return rematchParameters(parameters);
+        parameters.keyword = String(keyword || "");
+        return input && input.dataset.danmuExplicitKeyword === "true"
+            ? manualKeywordParameters(parameters, input)
+            : rematchParameters(parameters);
     }
 
     function cloneDialogState(value) {
@@ -1349,7 +1388,10 @@
     function temporaryRangeState(dialog, season, group) {
         var store = dialog.temporaryRangeCandidates || (dialog.temporaryRangeCandidates = {});
         var key = temporaryRangeStateKey(season, group);
-        if (!store[key]) store[key] = { candidates: [], message: "", candidateGeneration: "" };
+        if (!store[key]) store[key] = {
+            candidates: [], message: "", candidateGeneration: "", matchIntent: "",
+            searchCompletionDiagnostics: []
+        };
         return store[key];
     }
 
@@ -1847,6 +1889,7 @@
     }
 
     function selectedCandidate(season) {
+        if (isManualKeyword(season)) return null;
         var selectedId = value(season, "SelectedId", "selectedId", "");
         var selectedSite = value(season, "SelectedSite", "selectedSite", "");
         if (!selectedId || !selectedSite) return null;
@@ -2574,12 +2617,25 @@
             rangeState.candidates = [];
             rangeState.message = "";
             rangeState.candidateGeneration = "";
+            rangeState.matchIntent = "";
+            rangeState.searchCompletionDiagnostics = [];
         }
         var candidates = rangeState.candidates || [];
+        var manualKeyword = rangeState.matchIntent === "manual-keyword";
         var detailGeneration = beginCandidateDetailGeneration(dialog,
             value(season, "SeasonId", "seasonId", item.Id) + "::" + temporaryRangeStateKey(season, group),
             candidates, rangeState.candidateGeneration);
         var list = document.createElement("div");
+        var diagnosticsText = searchDiagnosticsLine({
+            MatchIntent: rangeState.matchIntent,
+            SearchCompletionDiagnostics: rangeState.searchCompletionDiagnostics || []
+        });
+        if (diagnosticsText) {
+            var diagnostics = document.createElement("div");
+            diagnostics.className = "danmuCandidateReason";
+            diagnostics.textContent = diagnosticsText;
+            dialog.body.appendChild(diagnostics);
+        }
         if (!candidates.length) {
             var empty = document.createElement("p");
             empty.className = "danmuMuted";
@@ -2600,7 +2656,7 @@
             title.textContent = candidateLine(candidate);
             var reason = document.createElement("div");
             reason.className = "danmuCandidateReason";
-            reason.textContent = backendDecisionLine(candidate);
+            reason.textContent = manualKeyword ? candidateReasonLine(candidate) : backendDecisionLine(candidate);
             main.append(title, reason);
             appendCandidateDetailControl(dialog, main,
                 value(season, "SeasonId", "seasonId", item.Id), candidate, detailGeneration);
@@ -2610,14 +2666,16 @@
         dialog.body.appendChild(list);
 
         async function searchCurrentGroup(isAutomatic) {
-            var keyword = input.value.trim();
-            if (!keyword) {
+            var keyword = String(input.value || "");
+            if (!keyword.trim()) {
                 notify("请输入临时季的搜索关键词。", true);
                 return;
             }
+            rangeState.matchIntent = "";
+            rangeState.searchCompletionDiagnostics = [];
             try {
                 var parameters = temporaryRangeSearchParameters(
-                    dialog, item, season, group, selections, keyword);
+                    dialog, item, season, group, selections, keyword, input);
                 var refreshed = await runDialogSearch(
                     dialog, parameters.seriesId || item.Id, "provider-search", parameters,
                     "正在搜索临时季候选…", function (status, error) {
@@ -2639,7 +2697,11 @@
                 rangeState.message = value(refreshedSeason, "Message", "message", "");
                 rangeState.candidateGeneration = value(refreshedSeason,
                     "CandidateGeneration", "candidateGeneration", "");
-                keywords[key] = keyword;
+                rangeState.matchIntent = value(refreshedSeason, "MatchIntent", "matchIntent", "");
+                rangeState.searchCompletionDiagnostics = value(refreshedSeason,
+                    "SearchCompletionDiagnostics", "searchCompletionDiagnostics", []) || [];
+                if (input.dataset.danmuExplicitKeyword === "true") keywords[key] = keyword;
+                else delete keywords[key];
                 renderCompositeGroupPicker(dialog, item, season, seasonIndex, seasons, selections, keywords, group,
                     { skipAutomaticRangeSearch: true, rematchDraft: rematchDraft });
             } catch (error) {
@@ -2728,7 +2790,7 @@
 
         seasons.forEach(function (season) {
             var key = seasonSelectionKey(season);
-            if (!selections[key] && hasBackendMatch(season)) {
+            if (!isManualKeyword(season) && !selections[key] && hasBackendMatch(season)) {
                 var current = selectedCandidate(season);
                 if (current) selections[key] = current;
             }
@@ -2753,22 +2815,27 @@
                 return;
             }
             var selectionKey = seasonSelectionKey(season);
-            var selection = selections[selectionKey];
+            var manualKeyword = isManualKeyword(season);
+            var selection = manualKeyword ? null : selections[selectionKey];
             var block = document.createElement("div");
             block.className = "danmuSeasonSummary " + (selection ? "matched" : "unmatched");
             var main = document.createElement("div");
             var title = document.createElement("div");
             title.className = "danmuSeasonSummaryTitle";
             title.textContent = seasonLibraryContextLine(season);
-            var matched = hasBackendMatch(season);
+            var matched = !manualKeyword && hasBackendMatch(season);
             var state = document.createElement("div");
             state.className = "danmuSeasonSummaryState";
-            state.textContent = matched ? "✓ 匹配成功" : "✕ 匹配失败";
+            state.textContent = manualKeyword ? "等待人工选择" : (matched ? "✓ 匹配成功" : "✕ 匹配失败");
             var detail = document.createElement("div");
             detail.className = "danmuSeasonSummaryDetail";
-            detail.textContent = backendDecisionLine(season) ||
-                value(season, "Message", "message", "服务器未返回决策说明");
-            if (selection) detail.textContent += (detail.textContent ? "　" : "") + candidateLine(selection);
+            detail.textContent = manualKeyword
+                ? value(season, "Message", "message", "请选择一个候选结果。")
+                : backendDecisionLine(season) ||
+                    value(season, "Message", "message", "服务器未返回决策说明");
+            if (!manualKeyword && selection) {
+                detail.textContent += (detail.textContent ? "　" : "") + candidateLine(selection);
+            }
             var scopeLine = scopeSummaryLine(season);
             if (scopeLine) detail.textContent += (detail.textContent ? "　" : "") + scopeLine;
             main.append(title, state, detail);
@@ -2838,10 +2905,11 @@
         var season = seasons[seasonIndex];
         var selectionKey = seasonSelectionKey(season);
         var candidates = seasonCandidates(season);
+        var manualKeyword = isManualKeyword(season);
         var detailGeneration = beginCandidateDetailGeneration(dialog,
             value(season, "SeasonId", "seasonId", item.Id), candidates,
             value(season, "CandidateGeneration", "candidateGeneration", ""));
-        var current = selections[selectionKey] || selectedCandidate(season);
+        var current = manualKeyword ? null : (selections[selectionKey] || selectedCandidate(season));
         if (dialog.title) {
             dialog.title.textContent = "手动匹配：" + value(season, "SeasonName", "seasonName", "本季");
         }
@@ -2850,9 +2918,16 @@
 
         var summary = document.createElement("p");
         summary.textContent = seasonLibraryContextLine(season) + "。" +
-            (isProviderIdMatch(season) && hasBackendMatch(season) ? "　✓ 匹配成功" : "") +
-            (backendDecisionLine(season) ? "　" + backendDecisionLine(season) : "");
+            (!manualKeyword && isProviderIdMatch(season) && hasBackendMatch(season) ? "　✓ 匹配成功" : "") +
+            (!manualKeyword && backendDecisionLine(season) ? "　" + backendDecisionLine(season) : "");
         dialog.body.appendChild(summary);
+        var diagnosticsText = searchDiagnosticsLine(season);
+        if (diagnosticsText) {
+            var diagnostics = document.createElement("div");
+            diagnostics.className = "danmuCandidateReason";
+            diagnostics.textContent = diagnosticsText;
+            dialog.body.appendChild(diagnostics);
+        }
 
         var search = document.createElement("div");
         search.className = "danmuSmartSearch";
@@ -2900,7 +2975,7 @@
             if (score) meta.textContent += "　" + score;
             var reason = document.createElement("div");
             reason.className = "danmuCandidateReason";
-            reason.textContent = backendDecisionLine(candidate);
+            reason.textContent = manualKeyword ? candidateReasonLine(candidate) : backendDecisionLine(candidate);
             main.append(candidateTitle, meta, reason);
             appendCandidateDetailControl(dialog, main, value(season, "SeasonId", "seasonId", item.Id), candidate, detailGeneration);
             row.append(radio, main);
@@ -2909,8 +2984,8 @@
         dialog.body.appendChild(list);
 
         async function searchCurrentSeason() {
-            var keyword = input.value.trim();
-            if (!keyword) {
+            var keyword = String(input.value || "");
+            if (!keyword.trim()) {
                 notify("请输入本季搜索关键词。", true);
                 return;
             }
@@ -2936,6 +3011,7 @@
                     selections[newKey] = selections[oldKey];
                     delete selections[oldKey];
                 }
+                if (isManualKeyword(refreshedSeason)) delete selections[newKey];
                 if (explicitKeyword) keywords[newKey] = keyword;
                 else delete keywords[newKey];
                 renderSeriesSeasonPicker(dialog, item, seasons, seasonIndex, selections, keywords);
@@ -2998,11 +3074,12 @@
         dialog.androidBackLocked = false;
         dialog.body.replaceChildren();
         dialog.footer.replaceChildren();
+        var manualKeyword = isManualKeyword(season);
 
         var summary = document.createElement("p");
         summary.textContent = seasonLibraryContextLine(season) + "。请选择正确项目；服务器会先解析逐集映射并显示未匹配区间。" +
-            (isProviderIdMatch(season) && hasBackendMatch(season) ? "　✓ 匹配成功" : "") +
-            (backendDecisionLine(season) ? "　" + backendDecisionLine(season) : "") +
+            (!manualKeyword && isProviderIdMatch(season) && hasBackendMatch(season) ? "　✓ 匹配成功" : "") +
+            (!manualKeyword && backendDecisionLine(season) ? "　" + backendDecisionLine(season) : "") +
             (scopeSummaryLine(season) ? "　" + scopeSummaryLine(season) : "");
         dialog.body.appendChild(summary);
         var diagnosticsText = searchDiagnosticsLine(season);
@@ -3030,7 +3107,7 @@
         var detailGeneration = beginCandidateDetailGeneration(dialog,
             value(season, "SeasonId", "seasonId", item.Id), candidates,
             value(season, "CandidateGeneration", "candidateGeneration", ""));
-        var currentCandidate = selectedCandidate(season);
+        var currentCandidate = manualKeyword ? null : selectedCandidate(season);
         if (!candidates.length) {
             var empty = document.createElement("p");
             empty.className = "danmuMuted";
@@ -3061,7 +3138,7 @@
             if (score) meta.textContent += "　" + score;
             var reason = document.createElement("div");
             reason.className = "danmuCandidateReason";
-            reason.textContent = backendDecisionLine(candidate);
+            reason.textContent = manualKeyword ? candidateReasonLine(candidate) : backendDecisionLine(candidate);
             main.append(title, meta, reason);
             appendCandidateDetailControl(dialog, main, value(season, "SeasonId", "seasonId", item.Id), candidate, detailGeneration);
             row.append(radio, main);
@@ -3078,8 +3155,8 @@
         dialog.footer.appendChild(bind);
 
         searchButton.addEventListener("click", async function () {
-            var newKeyword = input.value.trim();
-            if (!newKeyword) {
+            var newKeyword = String(input.value || "");
+            if (!newKeyword.trim()) {
                 notify("请输入搜索关键词。", true);
                 return;
             }
@@ -3150,6 +3227,7 @@
     }
 
     function itemSelectedCandidate(target) {
+        if (isManualKeyword(target)) return null;
         var selectedId = value(target, "SelectedId", "selectedId", "");
         var selectedSite = value(target, "SelectedSite", "selectedSite", "");
         var authoritative = value(target, "SelectedCandidate", "selectedCandidate", null);
@@ -3182,7 +3260,8 @@
         dialog.setBackHandler(function () { renderItemCandidatePicker(dialog, item, target, keyword); });
 
         var summary = document.createElement("p");
-        summary.textContent = itemEpisodeSummary(item, target) + "。" + candidateLine(candidate) +
+        summary.textContent = itemEpisodeSummary(item, target) + "。" +
+            (isManualKeyword(target) ? manualKeywordCandidateLine(candidate) : candidateLine(candidate)) +
             "。请选择要绑定到本地第 " + (value(target, "EpisodeNumber", "episodeNumber", "?") || "?") + " 集的来源剧集。";
         dialog.body.appendChild(summary);
 
@@ -3349,12 +3428,13 @@
         dialog.body.replaceChildren();
         dialog.footer.replaceChildren();
         var isEpisode = item.Type === "Episode";
+        var manualKeyword = isManualKeyword(target);
         var candidates = itemCandidates(target);
         var detailGeneration = beginCandidateDetailGeneration(dialog, item.Id, candidates,
             value(target, "CandidateGeneration", "candidateGeneration", ""));
         var showEpisodeCandidateDetails = isEpisode &&
-            Boolean(target.__danmuManualCandidates || value(target, "ManualRematch", "manualRematch", false));
-        var selected = itemSelectedCandidate(target);
+            Boolean(manualKeyword || target.__danmuManualCandidates || value(target, "ManualRematch", "manualRematch", false));
+        var selected = manualKeyword ? null : itemSelectedCandidate(target);
         var summary = document.createElement("p");
         if (isEpisode) {
             summary.textContent = itemEpisodeSummary(item, target) + "。请选择季度候选，再解析该候选的来源剧集。";
@@ -3363,8 +3443,15 @@
                 "，" + (value(target, "Year", "year", null) || "年份未知") + "。请选择正确电影。";
         }
         if (isEpisode && isProviderIdMatch(target) && hasBackendMatch(target)) summary.textContent += "　✓ 已通过本地标识符精确匹配";
-        else if (backendDecisionLine(target)) summary.textContent += "　" + backendDecisionLine(target);
+        else if (!manualKeyword && backendDecisionLine(target)) summary.textContent += "　" + backendDecisionLine(target);
         dialog.body.appendChild(summary);
+        var diagnosticsText = searchDiagnosticsLine(target);
+        if (diagnosticsText) {
+            var diagnostics = document.createElement("div");
+            diagnostics.className = "danmuCandidateReason";
+            diagnostics.textContent = diagnosticsText;
+            dialog.body.appendChild(diagnostics);
+        }
 
         var search = document.createElement("div");
         search.className = "danmuSmartSearch";
@@ -3402,7 +3489,7 @@
             title.textContent = isEpisode
                 ? value(candidate, "SiteName", "siteName", value(candidate, "Site", "site", "未知网站")) +
                     " · " + value(candidate, "Name", "name", "未命名项目")
-                : movieCandidateHeading(candidate, null, "");
+                : (manualKeyword ? manualKeywordMovieCandidateHeading(candidate) : movieCandidateHeading(candidate, null, ""));
             var meta = document.createElement("div");
             meta.className = "danmuCandidateMeta";
             meta.textContent = "年份：" + (value(candidate, "Year", "year", null) || "未知") +
@@ -3412,7 +3499,8 @@
             if (score) meta.textContent += "　" + score;
             var reason = document.createElement("div");
             reason.className = "danmuCandidateReason";
-            reason.textContent = isEpisode ? "" : backendDecisionLine(candidate);
+            reason.textContent = manualKeyword ? candidateReasonLine(candidate) :
+                (isEpisode ? "" : backendDecisionLine(candidate));
             main.append(title, meta, reason);
             if (showEpisodeCandidateDetails) {
                 appendCandidateDetailControl(dialog, main, item.Id, candidate, detailGeneration);
@@ -3424,8 +3512,8 @@
         appendPreDownloadFooter(dialog);
 
         searchButton.addEventListener("click", async function () {
-            var newKeyword = input.value.trim();
-            if (!newKeyword) {
+            var newKeyword = String(input.value || "");
+            if (!newKeyword.trim()) {
                 notify("请输入搜索关键词。", true);
                 return;
             }
@@ -3568,7 +3656,7 @@
                             (status === "cancelled" ? "已停止" :
                                 (status === "completed_with_warnings" ? "完成（部分缺失）" : "完成（有失败）")))));
             summary.textContent = value(current, "Message", "message", "");
-            meta.textContent = candidateLine(candidate) +
+            meta.textContent = (isManualKeyword(target) ? manualKeywordCandidateLine(candidate) : candidateLine(candidate)) +
                 (value(current, "PartTitle", "partTitle", "") ?
                     "　正片版本：" + value(current, "PartTitle", "partTitle", "") : "") +
                 (sourceEpisodeNumber ? "　来源第 " + sourceEpisodeNumber + " 集" : "") +
@@ -3873,7 +3961,9 @@
         resolveMenuContextId: resolveMenuContextId,
         rematchParameters: rematchParameters,
         initializeKeywordIntent: initializeKeywordIntent,
+        manualKeywordParameters: manualKeywordParameters,
         keywordRematchParameters: keywordRematchParameters,
+        isManualKeyword: isManualKeyword,
         seasonRequestParameters: seasonRequestParameters,
         seasonPlanGeneration: seasonPlanGeneration,
         hasCurrentMappingContract: hasCurrentMappingContract,
@@ -3896,6 +3986,7 @@
         decisionReasonLabel: decisionReasonLabel,
         backendDecisionLine: backendDecisionLine,
         matchScoreLine: matchScoreLine,
+        manualKeywordCandidateLine: manualKeywordCandidateLine,
         movieCandidateHeading: movieCandidateHeading,
         moviePartChoices: moviePartChoices,
         searchDiagnosticsLine: searchDiagnosticsLine,

@@ -96,8 +96,14 @@ namespace Emby.Plugin.Danmu.Scraper
             CancellationToken parentCancellationToken,
             IEnumerable<string> localSeriesTitleAliases = null,
             IEnumerable<string> localSeasonTitleAliases = null,
-            BaseItem contextItem = null)
+            BaseItem contextItem = null,
+            bool manualKeywordDiscovery = false)
         {
+            if (manualKeywordDiscovery && string.IsNullOrWhiteSpace(keywordOverride))
+            {
+                return InvalidManualKeywordResult();
+            }
+
             var scrapers = (scraperSource ?? Enumerable.Empty<AbstractScraper>()).ToList();
             // Prefer the authoritative Emby Season ordinal. Display names are
             // only a compatibility fallback for callers without an item.
@@ -144,13 +150,21 @@ namespace Emby.Plugin.Danmu.Scraper
                 string.IsNullOrWhiteSpace(keywordOverride),
                 targetSeasonNumber);
             result.Candidates = OrderCandidates(result.CanonicalCandidates);
-            if (string.IsNullOrWhiteSpace(keywordOverride))
+            if (!manualKeywordDiscovery && string.IsNullOrWhiteSpace(keywordOverride))
             {
                 await TryApplyTmdbAliasesAsync(result, scrapers, contextItem, seriesName, seasonName,
                     expectedYear, expectedEpisodes, false, targetSeasonNumber, logger,
                     executionCancellationToken, parentCancellationToken).ConfigureAwait(false);
             }
-            ClassifyResult(result);
+            if (!manualKeywordDiscovery)
+            {
+                ClassifyResult(result);
+            }
+            else if (result.WasCancelled)
+            {
+                result.CanonicalCandidates.Clear();
+                result.Candidates.Clear();
+            }
             return result;
         }
 
@@ -180,8 +194,15 @@ namespace Emby.Plugin.Danmu.Scraper
             ILogger logger,
             BoundedSearchPolicy policy,
             CancellationToken cancellationToken,
-            BaseItem contextItem = null)
+            BaseItem contextItem = null,
+            bool retainZeroScoreCandidates = false,
+            bool manualKeywordDiscovery = false)
         {
+            if (manualKeywordDiscovery && string.IsNullOrWhiteSpace(keywordOverride))
+            {
+                return InvalidManualKeywordResult();
+            }
+
             var scrapers = (scraperSource ?? Enumerable.Empty<AbstractScraper>()).ToList();
             var movieName = string.IsNullOrWhiteSpace(keywordOverride) ? movie?.Name : keywordOverride.Trim();
             var expectedYear = movie?.ProductionYear;
@@ -211,15 +232,39 @@ namespace Emby.Plugin.Danmu.Scraper
                 ? new[] { movie?.OriginalTitle }
                 : Enumerable.Empty<string>();
             result.CanonicalCandidates = ScoreMovieCandidates(
-                MergeSources(outcomes), scrapers, movieName, expectedYear, localAliases);
+                MergeSources(outcomes), scrapers, movieName, expectedYear, localAliases,
+                retainZeroScoreCandidates);
             result.Candidates = OrderCandidates(result.CanonicalCandidates);
-            if (string.IsNullOrWhiteSpace(keywordOverride))
+            if (!manualKeywordDiscovery && string.IsNullOrWhiteSpace(keywordOverride))
             {
                 await TryApplyTmdbAliasesAsync(result, scrapers, contextItem ?? movie, movieName, string.Empty,
                     expectedYear, 0, true, null, logger,
                     cancellationToken, cancellationToken).ConfigureAwait(false);
             }
-            ClassifyResult(result);
+            if (!manualKeywordDiscovery)
+            {
+                ClassifyResult(result);
+            }
+            else if (result.WasCancelled)
+            {
+                result.CanonicalCandidates.Clear();
+                result.Candidates.Clear();
+            }
+            return result;
+        }
+
+        private static DanmuMatchSearchResult InvalidManualKeywordResult()
+        {
+            var result = new DanmuMatchSearchResult
+            {
+                IsComplete = false,
+            };
+            result.SearchErrors.Add("A manual search keyword is required.");
+            result.CompletionDiagnostics.Add(new DanmuSearchCompletionDiagnostic
+            {
+                Status = "invalid_request",
+                Message = "A manual search keyword is required.",
+            });
             return result;
         }
 
@@ -668,7 +713,8 @@ namespace Emby.Plugin.Danmu.Scraper
             IList<AbstractScraper> scrapers,
             string movieName,
             int? expectedYear,
-            IEnumerable<string> localTitleAliases)
+            IEnumerable<string> localTitleAliases,
+            bool retainZeroScore = false)
         {
             var candidates = new List<DanmuMatchCandidate>();
             for (var sourceOrder = 0; sourceOrder < scrapers.Count; sourceOrder++)
@@ -692,7 +738,8 @@ namespace Emby.Plugin.Danmu.Scraper
                         localTitleAliases)));
             }
 
-            return OrderCanonicalCandidates(candidates.Where(candidate => candidate.Score > 0));
+            return OrderCanonicalCandidates(candidates.Where(candidate =>
+                retainZeroScore || candidate.Score > 0));
         }
 
         private static List<DanmuMatchCandidate> ScoreCandidates(
@@ -888,6 +935,7 @@ namespace Emby.Plugin.Danmu.Scraper
         {
             public ScraperSearchInfo Info { get; set; }
         }
+
     }
 
     public sealed class DanmuMatchSearchResult

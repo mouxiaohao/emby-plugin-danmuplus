@@ -33,6 +33,13 @@ namespace Emby.Plugin.Danmu.RegressionTests
     {
         private static int Main(string[] args)
         {
+            if (args != null && args.Contains("--manual-keyword-core", StringComparer.Ordinal))
+            {
+                PreservesManualKeywordEvidenceAndRouting();
+                Console.WriteLine("Manual-keyword core regression checks passed.");
+                return 0;
+            }
+
             if (args != null && args.Contains("--movie-part-core", StringComparer.Ordinal))
             {
                 MergesServerOwnedCandidateMetadataFieldByField();
@@ -100,6 +107,7 @@ namespace Emby.Plugin.Danmu.RegressionTests
             UsesOneMovieSearchTermAndPreservesStandardProvenance();
             IsolatesMovieProviderFailures();
             VerifiesLazyCandidateDetailContract();
+            PreservesManualKeywordEvidenceAndRouting();
             MergesServerOwnedCandidateMetadataFieldByField();
             FiltersAndSecuresMoviePartEvidence();
             ResolvesProviderIdsBySiteThenHierarchy();
@@ -2024,6 +2032,179 @@ namespace Emby.Plugin.Danmu.RegressionTests
                    configurationScript.Contains("config.Dandan = dandan") &&
                    configurationScript.Contains("config.Tmdb = tmdb"),
                 "the configuration controller should retain the established saved-setting groups");
+        }
+
+        private static void PreservesManualKeywordEvidenceAndRouting()
+        {
+            var registry = new DanmuCandidateEvidenceRegistry();
+            var ordinaryToken = registry.Register(
+                "target", "ProviderID", "candidate", .91, "search-confidence",
+                new SourceMetadata { Title = "Snapshot" });
+            Assert(ordinaryToken.Length > 0 &&
+                   registry.TryResolve(ordinaryToken, "target", "providerid", "CANDIDATE",
+                       out var evidence) &&
+                   evidence.MatchScore == .91 && evidence.ScoreOrigin == "search-confidence" &&
+                   evidence.SourceMetadata?.Title == "Snapshot" &&
+                   !registry.TryResolve(ordinaryToken, "other-target", "ProviderID", "candidate", out _) &&
+                   !registry.TryResolve(ordinaryToken, "target", "OtherProvider", "candidate", out _) &&
+                   !registry.TryResolve(ordinaryToken, "target", "ProviderID", "other-candidate", out _),
+                "manual keyword results must reuse ordinary target/site/candidate-bound evidence");
+
+            var root = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", ".."));
+            var controller = File.ReadAllText(Path.Combine(root, "Core", "Controllers", "DanmuController.cs"));
+            var selectedPreviewStart = controller.IndexOf(
+                "private async Task<DanmuSelectedCandidateDetailPreview> GetSelectedCandidatePreview",
+                StringComparison.Ordinal);
+            var selectedPreviewEnd = controller.IndexOf(
+                "private async Task<DanmuSelectedCandidateDetailPreview> GetSelectedMoviePartPreview",
+                selectedPreviewStart, StringComparison.Ordinal);
+            var selectedPreview = controller.Substring(selectedPreviewStart,
+                selectedPreviewEnd - selectedPreviewStart);
+            Assert(selectedPreview.IndexOf("CandidateEvidence.TryResolve(", StringComparison.Ordinal) >= 0 &&
+                   selectedPreview.IndexOf("CandidateEvidence.TryResolve(", StringComparison.Ordinal) <
+                   selectedPreview.IndexOf("ResolveSelectedCandidateDetailAsync(", StringComparison.Ordinal),
+                "Episode candidate detail must validate evidence before its first provider call");
+
+            Assert(controller.Contains(
+                       "string.Equals(request?.Mode, DanmuMatchIntent.ManualKeyword, StringComparison.Ordinal)",
+                       StringComparison.Ordinal) &&
+                   controller.Contains("GetMovieMatchPreview", StringComparison.Ordinal) &&
+                   controller.Contains("GetEpisodeMatchPreview", StringComparison.Ordinal) &&
+                   controller.Contains("GetSeasonMatchPreview", StringComparison.Ordinal) &&
+                   controller.Contains("manualKeywordDiscovery: true", StringComparison.Ordinal) &&
+                   controller.Contains("IsTemporaryRangeSearch(request)", StringComparison.Ordinal),
+                "manual-keyword must use exact Mode routing across Movie, Episode-via-Season, Season/Series, and temporary ranges");
+            var isManualKeyword = typeof(DanmuController).GetMethod(
+                "IsManualKeyword", BindingFlags.Static | BindingFlags.NonPublic);
+            Assert(isManualKeyword != null &&
+                   (bool)isManualKeyword.Invoke(null, new object[]
+                   {
+                       new DanmuParams { Mode = DanmuMatchIntent.ManualKeyword },
+                   }) &&
+                   !(bool)isManualKeyword.Invoke(null, new object[]
+                   {
+                       new DanmuParams { Mode = "MANUAL-KEYWORD" },
+                   }) &&
+                   !(bool)isManualKeyword.Invoke(null, new object[]
+                   {
+                       new DanmuParams { Mode = string.Concat("manual", "-raw") },
+                   }),
+                "only the exact case-sensitive manual-keyword Mode discriminator may activate l10 behavior, and the unpublished old value must not remain an alias");
+
+            var shouldUseComposite = typeof(DanmuController).GetMethod(
+                "ShouldUseCompositeSeasonPlanPreview", BindingFlags.Static | BindingFlags.NonPublic);
+            var mixedManualRequest = new DanmuParams
+            {
+                Mode = DanmuMatchIntent.ManualKeyword,
+                Keyword = "keyword search",
+                CompositePlan = true,
+                Site = "Dandan",
+                CandidateId = "browser-authored-candidate",
+            };
+            var temporaryManualRequest = new DanmuParams
+            {
+                Mode = DanmuMatchIntent.ManualKeyword,
+                Keyword = "range keyword",
+                CompositePlan = true,
+                SearchScope = "temporary-range",
+            };
+            Assert(shouldUseComposite != null &&
+                   !(bool)shouldUseComposite.Invoke(null, new object[] { mixedManualRequest }) &&
+                   (bool)shouldUseComposite.Invoke(null, new object[] { temporaryManualRequest }) &&
+                   (bool)shouldUseComposite.Invoke(null, new object[]
+                   {
+                       new DanmuParams { CompositePlan = true },
+                   }),
+                "manual-keyword must ignore a mixed CompositePlan/detail intent while retaining authoritative temporary-range validation and ordinary composite behavior");
+
+            var dispatchStart = controller.IndexOf("var targetRequests = seasons.Select", StringComparison.Ordinal);
+            var dispatchEnd = controller.IndexOf("result.Seasons.AddRange", dispatchStart, StringComparison.Ordinal);
+            var dispatch = controller.Substring(dispatchStart, dispatchEnd - dispatchStart);
+            var manualBranchStart = dispatch.IndexOf("manualKeyword", StringComparison.Ordinal);
+            var manualBranchEnd = dispatch.IndexOf(": !string.IsNullOrWhiteSpace(request.Site)",
+                manualBranchStart, StringComparison.Ordinal);
+            var manualBranch = dispatch.Substring(manualBranchStart, manualBranchEnd - manualBranchStart);
+            Assert(manualBranch.Contains("ShouldUseCompositeSeasonPlanPreview(request)", StringComparison.Ordinal) &&
+                   manualBranch.Contains("GetCompositeSeasonPlanPreview", StringComparison.Ordinal) &&
+                   manualBranch.Contains("GetSeasonMatchPreview", StringComparison.Ordinal) &&
+                   manualBranch.Contains("manualKeywordDiscovery: true", StringComparison.Ordinal) &&
+                   !manualBranch.Contains("request.CompositePlan", StringComparison.Ordinal) &&
+                   !manualBranch.Contains("GetSelectedSeasonCandidatePlanPreview", StringComparison.Ordinal),
+                "a mixed manual-keyword request must continue through provider keyword discovery and must not enter browser-authored composite or selected-candidate detail");
+
+            var applySingleSummary = typeof(DanmuController).GetMethod(
+                "TryApplySingleManualKeywordSeasonSummary", BindingFlags.Static | BindingFlags.NonPublic);
+            foreach (var itemType in new[] { "Season", "Series" })
+            {
+                foreach (var status in new[] { "incomplete", "cancelled", "invalid_request", "ambiguous" })
+                {
+                    var child = new DanmuSeasonMatchResult
+                    {
+                        MatchIntent = DanmuMatchIntent.ManualKeyword,
+                        Status = status,
+                        Message = itemType + "-" + status,
+                        DecisionReason = "child-" + status,
+                    };
+                    var preview = new DanmuMatchPreviewResult
+                    {
+                        ItemType = itemType,
+                        MatchIntent = DanmuMatchIntent.ManualKeyword,
+                        Status = "top-level-placeholder",
+                        Message = "top-level-placeholder",
+                        CanStart = true,
+                    };
+                    preview.Seasons.Add(child);
+                    Assert(applySingleSummary != null &&
+                           (bool)applySingleSummary.Invoke(null, new object[] { preview, true }) &&
+                           preview.Status == child.Status && preview.Message == child.Message &&
+                           preview.DecisionReason == child.DecisionReason && !preview.CanStart,
+                        "single-target manual-keyword " + itemType +
+                        " must preserve the child " + status + " status at the top level");
+                }
+            }
+            var ordinarySeries = new DanmuMatchPreviewResult
+            {
+                ItemType = "Series",
+                Status = "ordinary-series-placeholder",
+                Message = "ordinary-series-placeholder",
+                CanStart = true,
+            };
+            ordinarySeries.Seasons.Add(new DanmuSeasonMatchResult
+            {
+                Status = "incomplete",
+                Message = "ordinary-child",
+            });
+            Assert(!(bool)applySingleSummary.Invoke(null, new object[] { ordinarySeries, false }) &&
+                   ordinarySeries.Status == "ordinary-series-placeholder" && ordinarySeries.CanStart,
+                "ordinary whole-Series aggregation must not use the single-target manual-keyword status shortcut");
+
+            Assert(controller.Contains("StampCandidateEvidence(evidenceTarget, result.Candidates)") &&
+                   controller.Contains("TryResolveMoviePart(", StringComparison.Ordinal) &&
+                   controller.Contains("BuildCompositePlanAsync(", StringComparison.Ordinal) &&
+                   !controller.Contains("TryRegisterManualKeywordBatch", StringComparison.Ordinal) &&
+                   !controller.Contains("StartsWith(\"mk_\"", StringComparison.Ordinal),
+                "manual keyword candidates must reuse ordinary evidence before existing detail, Movie-part, and authoritative Season mapping gates");
+
+            var candidateDetailStart = controller.IndexOf(
+                "private async Task<DanmuMatchCandidateDetailResult> GetMatchCandidateDetails",
+                StringComparison.Ordinal);
+            var candidateDetailEnd = controller.IndexOf(
+                "private static Task<ScraperMedia> ResolveMatchCandidateDetailsMediaAsync",
+                candidateDetailStart, StringComparison.Ordinal);
+            var candidateDetail = controller.Substring(candidateDetailStart,
+                candidateDetailEnd - candidateDetailStart);
+            Assert(candidateDetail.Contains("IsSafeMatchCandidateId(request?.CandidateId)") &&
+                   candidateDetail.IndexOf("CandidateEvidence.TryResolve(", StringComparison.Ordinal) >= 0 &&
+                   candidateDetail.IndexOf("CandidateEvidence.TryResolve(", StringComparison.Ordinal) <
+                   candidateDetail.IndexOf("var media = await ResolveMatchCandidateDetailsMediaAsync(", StringComparison.Ordinal),
+                "manual candidate detail must retain the ordinary ID filter and validate evidence before provider access");
+
+            var registrySource = File.ReadAllText(Path.Combine(root, "Core", "DanmuCandidateEvidenceRegistry.cs"));
+            var modelSource = File.ReadAllText(Path.Combine(root, "Model", "DanmuMatchResult.cs"));
+            Assert(!registrySource.Contains("ManualKeyword", StringComparison.Ordinal) &&
+                   !registrySource.Contains("\"mk_\"", StringComparison.Ordinal) &&
+                   !modelSource.Contains("public List<string> Aliases", StringComparison.Ordinal),
+                "manual keyword discovery must not create a separate evidence namespace or alias projection");
         }
 
         private static bool ContainsConfigurationHeading(string html, string heading)
