@@ -108,6 +108,7 @@ and rollback boundaries without claiming that an inverse tree was exercised.
 - Commit: `b8b5ab26aeaf2eae26025eba5ebe4e8c61aa4f85`
 - Behavior: When one concrete library Season title and one source-title item both lose their complete Season residual after the same matched parent is removed by loose normalization, strict complete-title NFKC fidelity equality may supply the existing 20-point Season-name component. Parent-only titles, different symbols, conflicting Season markers, one-sided residuals, cross-channel evidence, l9 confidence, Season 1, and Movie scoring remain unchanged.
 - Checks: TitleFidelity; TMDB alias; SearchTermPolicy; R3 search quality; complete main backend regression; clean sequential Release build; strict OpenSpec validation; final Sol-high review with no P0, P1, or P2 finding; staged scope, secret-pattern, and diff checks.
-- Release DLL: 1633792 bytes; SHA-256 `c6bc151af19f95e69740f4516a61c61c492bea9064c0fa2e9f8df1c550c1778c`.
+- Artifact source commit: `68279e8847d6de4d91a286ca51cf25c2f1fe1e1a`, the documentation-only child of the reviewed implementation commit.
+- Release DLL: 1633792 bytes; SHA-256 `009f03c73b956057a1807e0c2122f6b0d111c9c68626ed613e52afc09f62c7a6`.
 - Independent rollback: `git revert b8b5ab26aeaf2eae26025eba5ebe4e8c61aa4f85`
 - This local candidate has not been pushed, published, or deployed. The previously deployed V27 pair remains unchanged until fresh authorization is granted.

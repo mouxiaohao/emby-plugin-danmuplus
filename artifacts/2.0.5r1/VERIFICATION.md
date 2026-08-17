@@ -83,13 +83,13 @@ All .NET commands must run sequentially to avoid shared output-file contention.
 
 ## Current local undeployed candidate
 
-The following DLL was rebuilt from the committed `b8b5ab2` source after the
-final review. It is a local candidate only and is not part of the live state
-recorded below.
+The following DLL was rebuilt from artifact source commit `68279e8`, the
+documentation-only child of the reviewed `b8b5ab2` implementation commit. It
+is a local candidate only and is not part of the live state recorded below.
 
 | Artifact | Repository-relative location | Size | SHA-256 |
 | --- | --- | --- | --- |
-| Release DLL | `bin/Release/netstandard2.0/Emby.Plugin.Danmu.dll` | 1633792 | `c6bc151af19f95e69740f4516a61c61c492bea9064c0fa2e9f8df1c550c1778c` |
+| Release DLL | `bin/Release/netstandard2.0/Emby.Plugin.Danmu.dll` | 1633792 | `009f03c73b956057a1807e0c2122f6b0d111c9c68626ed613e52afc09f62c7a6` |
 
 ## Previously deployed V27 artifact and hashes
 
@@ -140,9 +140,10 @@ current local `b8b5ab2` candidate.
 
 - Release-preparation commit: `6e4c3c09df81150a3fa0d49fe9d5f11dc405d490`
 - Reviewed local candidate commit: `b8b5ab26aeaf2eae26025eba5ebe4e8c61aa4f85`
+- Artifact source commit: `68279e8847d6de4d91a286ca51cf25c2f1fe1e1a` (documentation-only child; production source unchanged)
 - Independent reviewer findings: final Sol-high review reported no P0, P1, or P2 finding and approved local submission; it did not authorize deployment
 - Full local verification result: PASS; TitleFidelity, TMDB alias, SearchTermPolicy, R3 search quality, complete backend regression, clean sequential Release build, strict OpenSpec validation, and scope/credential/diff checks passed
-- Current local DLL: 1633792 bytes; SHA-256 `c6bc151af19f95e69740f4516a61c61c492bea9064c0fa2e9f8df1c550c1778c`
+- Current local DLL: 1633792 bytes; SHA-256 `009f03c73b956057a1807e0c2122f6b0d111c9c68626ed613e52afc09f62c7a6`
 - Current `b8b5ab2` package result: NOT CREATED; the committed DLL and hash are recorded locally without repackaging or publication
 - Historical V27 local package result: PASS; six allowlisted files, checksum readback, source/package equality, and credential audit verified
 - External publication approval: not granted
