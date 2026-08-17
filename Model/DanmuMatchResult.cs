@@ -143,6 +143,7 @@ namespace Emby.Plugin.Danmu.Model
         public string Status { get; set; } = string.Empty;
         public string Message { get; set; } = string.Empty;
         public bool AutoSelected { get; set; }
+        public bool ParentTitleRematchAvailable { get; set; }
         public string MatchIntent { get; set; } = DanmuMatchIntent.Default;
         public string MatchOrigin { get; set; } = string.Empty;
         public string DecisionReason { get; set; } = string.Empty;

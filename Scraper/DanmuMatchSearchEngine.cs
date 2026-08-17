@@ -188,9 +188,11 @@ namespace Emby.Plugin.Danmu.Scraper
                 string.IsNullOrWhiteSpace(keywordOverride),
                 targetSeasonNumber);
             result.Candidates = OrderCandidates(result.CanonicalCandidates);
+            var tmdbAliasPlanExhausted = false;
             if (!manualKeywordDiscovery && string.IsNullOrWhiteSpace(keywordOverride))
             {
-                await TryApplyTmdbAliasesAsync(result, scrapers, contextItem, seriesName, seasonName,
+                tmdbAliasPlanExhausted = await TryApplyTmdbAliasesAsync(
+                    result, scrapers, contextItem, seriesName, seasonName,
                     expectedYear, expectedEpisodes, false, targetSeasonNumber, logger,
                     cancellationToken).ConfigureAwait(false);
             }
@@ -198,6 +200,10 @@ namespace Emby.Plugin.Danmu.Scraper
             if (!manualKeywordDiscovery)
             {
                 ClassifyResult(result);
+                result.ParentTitleRematchAvailable = tmdbAliasPlanExhausted &&
+                    result.SelectedCandidate == null &&
+                    !result.WasCancelled &&
+                    !string.Equals(result.Decision, "retryable-incomplete", StringComparison.OrdinalIgnoreCase);
             }
             else if (result.WasCancelled)
             {
@@ -346,7 +352,7 @@ namespace Emby.Plugin.Danmu.Scraper
             return TmdbAliasClient.IsAnimated(item);
         }
 
-        private static async Task TryApplyTmdbAliasesAsync(
+        private static async Task<bool> TryApplyTmdbAliasesAsync(
             DanmuMatchSearchResult result,
             IList<AbstractScraper> scrapers,
             BaseItem contextItem,
@@ -363,7 +369,7 @@ namespace Emby.Plugin.Danmu.Scraper
                 string.Equals(x.ProviderId, Dandan.Dandan.ScraperProviderId, StringComparison.OrdinalIgnoreCase));
             if (dandan == null || contextItem == null)
             {
-                return;
+                return false;
             }
 
             var baseline = result.Candidates
@@ -371,7 +377,7 @@ namespace Emby.Plugin.Danmu.Scraper
                 .ToList();
             if (baseline.Any(x => x.Score >= 0.80))
             {
-                return;
+                return false;
             }
 
             var option = Plugin.Instance?.Configuration?.Tmdb;
@@ -379,7 +385,7 @@ namespace Emby.Plugin.Danmu.Scraper
                 contextItem, option, logger, executionCancellationToken).ConfigureAwait(false);
             if (MarkAliasSearchCancellationIfRequested(result, executionCancellationToken))
             {
-                return;
+                return false;
             }
 
             var aliasCandidates = new List<DanmuMatchCandidate>();
@@ -394,7 +400,7 @@ namespace Emby.Plugin.Danmu.Scraper
                     expectedEpisodes, isMovie, logger, executionCancellationToken).ConfigureAwait(false);
                 if (MarkAliasSearchCancellationIfRequested(result, executionCancellationToken))
                 {
-                    return;
+                    return false;
                 }
 
                 if (reachedThreshold)
@@ -413,7 +419,7 @@ namespace Emby.Plugin.Danmu.Scraper
                     contextItem, option, "en-US", logger, executionCancellationToken).ConfigureAwait(false);
                 if (MarkAliasSearchCancellationIfRequested(result, executionCancellationToken))
                 {
-                    return;
+                    return false;
                 }
 
                 reachedThreshold = await SearchTmdbTermAsync(
@@ -424,7 +430,7 @@ namespace Emby.Plugin.Danmu.Scraper
                     executionCancellationToken).ConfigureAwait(false);
                 if (MarkAliasSearchCancellationIfRequested(result, executionCancellationToken))
                 {
-                    return;
+                    return false;
                 }
             }
 
@@ -440,27 +446,49 @@ namespace Emby.Plugin.Danmu.Scraper
                         contextItem, option, "ja-JP", logger, executionCancellationToken).ConfigureAwait(false);
                     if (MarkAliasSearchCancellationIfRequested(result, executionCancellationToken))
                     {
-                        return;
+                        return false;
                     }
 
                     japaneseTitle = TmdbAliasClient.GetLocalizedPrimaryTitle(japaneseDetails, isMovie);
                 }
 
-                await SearchTmdbTermAsync(
+                reachedThreshold = await SearchTmdbTermAsync(
                     result, dandan, japaneseTitle, aliasCandidates, attemptedTerms, sourceOrder,
                     seriesOrMovieName, seasonName, targetSeasonNumber, expectedYear,
                     expectedEpisodes, isMovie, logger, executionCancellationToken).ConfigureAwait(false);
                 if (MarkAliasSearchCancellationIfRequested(result, executionCancellationToken))
                 {
-                    return;
+                    return false;
                 }
             }
 
             if (MarkAliasSearchCancellationIfRequested(result, executionCancellationToken))
             {
-                return;
+                return false;
             }
-            ApplyTmdbAliasCandidates(result, aliasCandidates);
+
+            return CompleteTmdbAliasPlan(
+                result, aliasCandidates, attemptedTerms.Count, reachedThreshold, isMovie);
+        }
+
+        internal static bool CompleteTmdbAliasPlan(
+            DanmuMatchSearchResult result,
+            IEnumerable<DanmuMatchCandidate> aliasCandidates,
+            int attemptedTermCount,
+            bool reachedThreshold,
+            bool isMovie)
+        {
+            // Movie alias behavior predates l6 and remains unchanged. For Seasons,
+            // provisional low-confidence alias rows stay server-local; only a term
+            // that reaches the established 0.80 alias threshold may replace the
+            // ordinary canonical set.
+            if (isMovie || reachedThreshold)
+            {
+                ApplyTmdbAliasCandidates(result, aliasCandidates);
+                return false;
+            }
+
+            return attemptedTermCount > 0;
         }
 
         private static async Task<bool> SearchTmdbTermAsync(
@@ -1036,5 +1064,6 @@ namespace Emby.Plugin.Danmu.Scraper
         public bool IsComplete { get; set; } = true;
         public bool WasCancelled { get; set; }
         public bool UsedTmdbAlias { get; set; }
+        public bool ParentTitleRematchAvailable { get; set; }
     }
 }

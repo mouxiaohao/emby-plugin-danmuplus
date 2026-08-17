@@ -87,6 +87,9 @@ namespace Emby.Plugin.Danmu.Core.Controllers
         [DataMember(Name="forceRefresh")]
         public bool ForceRefresh { get; set; }
 
+        [DataMember(Name="parentTitleRematch")]
+        public bool ParentTitleRematch { get; set; }
+
         [DataMember(Name="taskId")]
         public string TaskId { get; set; } = string.Empty;
 
@@ -841,6 +844,59 @@ namespace Emby.Plugin.Danmu.Core.Controllers
             };
             var rematch = IsRematch(request);
             var manualKeyword = IsManualKeyword(request);
+            if (request.ParentTitleRematch)
+            {
+                if (HasMixedParentTitleRematchIntent(request))
+                {
+                    result.Status = "invalid_request";
+                    result.Message = "Parent-title rematch cannot be combined with another search or selection intent.";
+                    result.CanStart = false;
+                    result.SearchCompletionDiagnostics.Add(new DanmuSearchCompletionDiagnostic
+                    {
+                        Status = "invalid_request",
+                        Message = result.Message,
+                    });
+                    return result;
+                }
+
+                if (!TryResolveParentTitleRematchTarget(item, request,
+                        out var rematchSeason, out var authoritativeParentSeries,
+                        out var rematchResolutionError))
+                {
+                    var parentTitleUnavailable = string.Equals(
+                        rematchResolutionError, "parent-title-unavailable", StringComparison.Ordinal);
+                    result.Status = parentTitleUnavailable ? "incomplete" : "invalid_request";
+                    result.DecisionReason = parentTitleUnavailable
+                        ? "parent-title-unavailable" : string.Empty;
+                    result.Message = parentTitleUnavailable
+                        ? "The authoritative parent Series title is unavailable; retry after refreshing library metadata."
+                        : "Parent-title rematch requires exactly one authoritative target Season.";
+                    result.CanStart = false;
+                    result.SearchCompletionDiagnostics.Add(new DanmuSearchCompletionDiagnostic
+                    {
+                        Status = parentTitleUnavailable ? "invalid_metadata" : "invalid_request",
+                        Message = result.Message,
+                    });
+                    return result;
+                }
+
+                var parentTitleSeason = await GetSeasonMatchPreview(
+                    rematchSeason,
+                    authoritativeParentSeries.Name,
+                    true,
+                    preserveProvidedSeason: true,
+                    explicitParentSeries: authoritativeParentSeries,
+                    cancellationToken: cancellationToken,
+                    parentCancellationToken: cancellationToken).ConfigureAwait(false);
+                result.Seasons.Add(parentTitleSeason);
+                result.CanStart = parentTitleSeason.AutoSelected;
+                result.Status = parentTitleSeason.Status;
+                result.Message = parentTitleSeason.Message;
+                result.MatchIntent = parentTitleSeason.MatchIntent;
+                CopyDecision(result, parentTitleSeason);
+                return result;
+            }
+
             result.MatchIntent = manualKeyword
                 ? DanmuMatchIntent.ManualKeyword
                 : rematch ? DanmuMatchIntent.Rematch : DanmuMatchIntent.Default;
@@ -1563,10 +1619,10 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 : _libraryManager.GetItemById(season.Id) as Season ?? season;
             var parent = latest.GetParent();
             var parentSeries = explicitParentSeries ?? parent as Series;
-            var authoritativeParentSeries = explicitParentSeries ?? (parentSeries == null
+            var authoritativeParentSeries = parentSeries == null
                 ? null
-                : _libraryManager.GetItemById(parentSeries.InternalId) as Series ?? parentSeries);
-            var seriesName = parent?.Name ?? string.Empty;
+                : _libraryManager.GetItemById(parentSeries.InternalId) as Series ?? parentSeries;
+            var seriesName = authoritativeParentSeries?.Name ?? string.Empty;
             var seasonName = latest.Name ?? seriesName;
             var scopeAvailable = TryBuildOwnedPlanningContext(latest, out var planningContext,
                 out var scopeError);
@@ -1585,7 +1641,7 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 MappingProtocolVersion = DanmuMappingProtocol.CurrentVersion,
                 PlanGeneration = SeasonPlanGenerations.Begin(latest.Id.ToString()),
                 SeasonId = latest.Id.ToString(),
-                SeriesId = parent?.Id.ToString() ?? string.Empty,
+                SeriesId = authoritativeParentSeries?.Id.ToString() ?? string.Empty,
                 SeasonName = seasonName,
                 SeriesName = seriesName,
                 SeasonNumber = latest.IndexNumber,
@@ -1630,7 +1686,7 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 BoundedSearchPolicy.Shared,
                 cancellationToken,
                 parentCancellationToken == default(CancellationToken) ? cancellationToken : parentCancellationToken,
-                new[] { parent?.OriginalTitle },
+                new[] { authoritativeParentSeries?.OriginalTitle },
                 new[] { latest.OriginalTitle },
                 latest,
                 manualKeywordDiscovery: manualKeywordDiscovery)
@@ -1640,8 +1696,6 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 ApplyManualKeywordSearchResult(result, evidenceTarget ?? latest, search);
                 return result;
             }
-            result.Candidates = search.Candidates;
-            StampSeasonCandidateEvidence(latest, result.Candidates);
             result.SearchErrors.AddRange(search.SearchErrors);
             result.SearchCompletionDiagnostics.AddRange(search.CompletionDiagnostics);
             var selected = search.SelectedCandidate ??
@@ -1661,6 +1715,31 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 result.Message = "No provider search completed; retry before selecting a candidate.";
                 return result;
             }
+
+            if (search.ParentTitleRematchAvailable && selected == null)
+            {
+                result.SearchCompletionDiagnostics = result.SearchCompletionDiagnostics
+                    .Where(diagnostic => !IsTmdbAliasDiagnostic(diagnostic))
+                    .ToList();
+                result.SearchErrors = result.SearchErrors
+                    .Where(error => !IsTmdbAliasError(error))
+                    .ToList();
+                result.ParentTitleRematchAvailable = true;
+                result.Status = "no_match";
+                result.Message = "未找到匹配结果，可重新匹配。";
+                result.AutoSelected = false;
+                result.MatchOrigin = string.Empty;
+                result.DecisionReason = string.Empty;
+                result.SelectedCandidate = null;
+                result.SelectedId = string.Empty;
+                result.SelectedSite = string.Empty;
+                result.SelectedSiteName = string.Empty;
+                result.Candidates.Clear();
+                return result;
+            }
+
+            result.Candidates = search.Candidates;
+            StampSeasonCandidateEvidence(latest, result.Candidates);
 
             if (selected != null)
             {
@@ -2019,6 +2098,142 @@ namespace Emby.Plugin.Danmu.Core.Controllers
         private static bool IsManualKeyword(DanmuParams request)
         {
             return string.Equals(request?.Mode, DanmuMatchIntent.ManualKeyword, StringComparison.Ordinal);
+        }
+
+        private static bool IsTmdbAliasDiagnostic(DanmuSearchCompletionDiagnostic diagnostic)
+        {
+            return IsTmdbAliasLabel(diagnostic?.Provider);
+        }
+
+        private static bool IsTmdbAliasError(string error)
+        {
+            if (string.IsNullOrWhiteSpace(error))
+            {
+                return false;
+            }
+
+            var prefix = error.TrimStart().TrimStart('[', '(', '{').Split(':', ']', ')', '}', ' ')[0];
+            return IsTmdbAliasLabel(prefix);
+        }
+
+        private static bool IsTmdbAliasLabel(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return false;
+            }
+
+            var normalized = new string(value
+                .Where(char.IsLetterOrDigit)
+                .Select(char.ToLowerInvariant)
+                .ToArray());
+            return normalized.StartsWith("tmdb", StringComparison.Ordinal);
+        }
+
+        private static bool HasMixedParentTitleRematchIntent(DanmuParams request)
+        {
+            if (request == null)
+            {
+                return true;
+            }
+
+            var mode = request.Mode ?? string.Empty;
+            return !string.IsNullOrWhiteSpace(request.Keyword) ||
+                   !string.IsNullOrWhiteSpace(request.ItemId) ||
+                   (request.NeedSites?.Count ?? 0) > 0 ||
+                   (!string.IsNullOrWhiteSpace(mode) &&
+                    !string.Equals(mode, DanmuMatchIntent.Default, StringComparison.OrdinalIgnoreCase)) ||
+                   request.Manual || request.Rematch || request.Force || request.ForceRefresh ||
+                   !string.IsNullOrWhiteSpace(request.Site) ||
+                   !string.IsNullOrWhiteSpace(request.CandidateId) ||
+                   !string.IsNullOrWhiteSpace(request.SelectionEvidenceToken) ||
+                   !string.IsNullOrWhiteSpace(request.CandidateEvidence) ||
+                   !string.IsNullOrWhiteSpace(request.MoviePartToken) ||
+                   !string.IsNullOrWhiteSpace(request.Generation) ||
+                   request.SourceEpisodeNumber.HasValue ||
+                   !string.IsNullOrWhiteSpace(request.SourceEpisodeId) ||
+                   request.CompositePlan || request.ConfirmPartial ||
+                   !string.IsNullOrWhiteSpace(request.CompositeSelections) ||
+                   !string.IsNullOrWhiteSpace(request.ExcludedLocalEpisodeItemIds) ||
+                   (request.ParsedCompositeSelections?.Count ?? 0) > 0 ||
+                   (request.ParsedExcludedLocalEpisodeItemIds?.Count ?? 0) > 0 ||
+                   !string.IsNullOrWhiteSpace(request.CompositeStartEpisodeItemId) ||
+                   request.CompositeEpisodeCount != 0 ||
+                   IsTemporaryRangeSearch(request);
+        }
+
+        private bool TryResolveParentTitleRematchTarget(
+            BaseItem item,
+            DanmuParams request,
+            out Season season,
+            out Series authoritativeParentSeries,
+            out string error)
+        {
+            season = null;
+            authoritativeParentSeries = null;
+            error = "invalid-target-season";
+
+            if (item is Season directSeason)
+            {
+                season = _libraryManager.GetItemById(directSeason.Id) as Season ?? directSeason;
+                var parent = season.GetParent() as Series;
+                authoritativeParentSeries = parent == null
+                    ? null
+                    : _libraryManager.GetItemById(parent.InternalId) as Series ?? parent;
+            }
+            else if (item is Series directSeries)
+            {
+                authoritativeParentSeries = _libraryManager.GetItemById(directSeries.Id) as Series ?? directSeries;
+                var candidates = _libraryManager.GetItemList(new InternalItemsQuery
+                {
+                    ParentIds = new[] { authoritativeParentSeries.InternalId },
+                    IncludeItemTypes = new[] { "Season" },
+                    Recursive = false,
+                }).OfType<Season>();
+                season = SelectUniqueParentTitleRematchSeason(candidates, request);
+            }
+
+            if (season == null || authoritativeParentSeries == null)
+            {
+                season = null;
+                authoritativeParentSeries = null;
+                return false;
+            }
+
+            if (string.IsNullOrWhiteSpace(authoritativeParentSeries.Name))
+            {
+                error = "parent-title-unavailable";
+                return false;
+            }
+
+            if (!string.IsNullOrWhiteSpace(request.SeriesId) &&
+                !string.Equals(request.SeriesId, authoritativeParentSeries.Id.ToString(),
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                season = null;
+                authoritativeParentSeries = null;
+                return false;
+            }
+
+            error = string.Empty;
+            return true;
+        }
+
+        private static Season SelectUniqueParentTitleRematchSeason(
+            IEnumerable<Season> candidateSeasons,
+            DanmuParams request)
+        {
+            var candidates = (candidateSeasons ?? Enumerable.Empty<Season>())
+                .Where(candidate => candidate != null)
+                .Where(candidate => !request.SeasonNumber.HasValue ||
+                    candidate.IndexNumber == request.SeasonNumber)
+                .Where(candidate => !request.SeasonYear.HasValue ||
+                    GetSeasonYear(candidate) == request.SeasonYear)
+                .Where(candidate => string.IsNullOrWhiteSpace(request.SeasonName) ||
+                    string.Equals(candidate.Name, request.SeasonName, StringComparison.OrdinalIgnoreCase))
+                .Take(2)
+                .ToList();
+            return candidates.Count == 1 ? candidates[0] : null;
         }
 
         private static bool ShouldUseCompositeSeasonPlanPreview(DanmuParams request)

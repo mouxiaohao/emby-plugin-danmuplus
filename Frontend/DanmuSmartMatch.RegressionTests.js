@@ -617,14 +617,23 @@ async function main() {
         [manualKeywordSeriesSeason], {}, {});
     const manualKeywordSeriesOverviewText = allVisibleText(manualKeywordSeriesOverviewDialog.body);
     const manualKeywordSeriesOverviewState = manualKeywordSeriesOverviewDialog.body.querySelector(".danmuSeasonSummaryState");
+    const manualKeywordSeriesOverviewAction = manualKeywordSeriesOverviewDialog.body
+        .querySelectorAll(".danmuSmartButton")[0];
     assert(manualKeywordSeriesOverviewText.includes("SeriesBroken 失败") &&
         manualKeywordSeriesOverviewText.includes("Choose a candidate to continue.") &&
         manualKeywordSeriesOverviewState && manualKeywordSeriesOverviewState.textContent === "等待人工选择" &&
+        manualKeywordSeriesOverviewAction && manualKeywordSeriesOverviewAction.textContent === "查看候选" &&
+        !hooks.parentTitleRematchAvailable(manualKeywordSeriesSeason) &&
         !manualKeywordSeriesOverviewText.includes("✕ 匹配失败") &&
         !manualKeywordSeriesOverviewText.includes("SeriesCancelled") &&
         !manualKeywordSeriesOverviewText.includes("来源：") &&
         !manualKeywordSeriesOverviewText.includes("决策："),
-        "Series overview manual-keyword cards must show a neutral manual-selection state while retaining diagnostics and hiding automatic decisions");
+        "Series overview manual-keyword cards must retain their candidate action and neutral state without entering parent-title rematch");
+    const manualKeywordOverviewCallCount = apiCalls.length;
+    await manualKeywordSeriesOverviewAction.dispatch("click");
+    assert(apiCalls.length === manualKeywordOverviewCallCount &&
+        manualKeywordSeriesOverviewDialog.body.querySelectorAll(".danmuCandidate").length === 2,
+        "manual-keyword candidate viewing must remain local and independent from the l6 request path");
     manualKeywordSeriesOverviewDialog.forceClose();
 
     hooks.renderItemCandidatePicker(manualKeywordDialog,
@@ -647,6 +656,145 @@ async function main() {
     assert(apiCalls.length === whitespaceCallCount,
         "whitespace-only explicit input must be rejected in the UI with zero provider requests");
     manualKeywordDialog.forceClose();
+
+    assert(hooks.parentTitleRematchAvailable({ ParentTitleRematchAvailable: true }) &&
+        !hooks.parentTitleRematchAvailable({ ParentTitleRematchAvailable: "true" }) &&
+        !hooks.parentTitleRematchAvailable({ MatchIntent: "manual-keyword" }),
+        "only the server-authored boolean l6 field may activate parent-title rematch");
+    const exhaustedAliasCandidates = [0, 1].map(index => ({
+        Site: "Dandan", SiteName: "弹弹Play", Id: "jojo-alias-duplicate",
+        Name: "JOJO accumulated alias candidate " + index,
+        MatchScore: 0.61, ScoreOrigin: "search-confidence",
+        MatchOrigin: "tmdb-alias", DecisionReason: "alias-low-confidence"
+    }));
+    const exhaustedJojoSeason = {
+        SeriesId: "jojo-series", SeasonId: "jojo-season-1", SeriesName: "JOJO的奇妙冒险",
+        SeasonName: "JOJO Season 1", SeasonNumber: 1, Year: 2012, EpisodeCount: 26,
+        MappingProtocolVersion: 21, PlanGeneration: 6106, PlanFingerprint: "jojo-authoritative-plan",
+        ParentTitleRematchAvailable: true,
+        Candidates: exhaustedAliasCandidates,
+        SelectedSite: "Dandan", SelectedId: "jojo-alias-duplicate",
+        SelectedCandidate: exhaustedAliasCandidates[0],
+        MatchOrigin: "tmdb-alias", DecisionReason: "tmdb-alias-exhausted",
+        Message: "TMDB aliases exhausted after trying JOJO alias values",
+        SearchCompletionDiagnostics: [
+            { Provider: "TMDB alias", Status: "failed" },
+            { Provider: "Bilibili", Status: "failed" }
+        ]
+    };
+    const jojoSelectionKey = "jojo-series::jojo-season-1";
+    const jojoSelections = { __mappingContracts: {}, __compositeSelections: {} };
+    jojoSelections.__mappingContracts[jojoSelectionKey] = "21:6106";
+    jojoSelections[jojoSelectionKey] = exhaustedAliasCandidates[0];
+    jojoSelections.__compositeSelections[jojoSelectionKey] = [{
+        LocalStartEpisodeItemId: "stale-local-episode", RequestedEpisodeCount: 1,
+        Source: { ProviderId: "Dandan", MediaId: "jojo-alias-duplicate" },
+        SelectionEvidenceToken: "stale-alias-evidence"
+    }];
+    const jojoKeywords = {};
+    jojoKeywords[jojoSelectionKey] = "stale manual keyword";
+    const jojoSeasons = [exhaustedJojoSeason];
+    const jojoDialog = hooks.openDialog("JOJO exhausted aliases");
+    const jojoItem = { Id: "jojo-series", Type: "Series", Name: "browser JOJO fallback" };
+    hooks.renderSeriesPicker(jojoDialog, jojoItem, jojoSeasons, jojoSelections, jojoKeywords);
+    const exhaustedJojoText = allVisibleText(jojoDialog.body);
+    const exhaustedJojoState = jojoDialog.body.querySelector(".danmuSeasonSummaryState");
+    const exhaustedJojoActions = jojoDialog.body.querySelectorAll(".danmuSmartButton");
+    assert(exhaustedJojoState && exhaustedJojoState.textContent === "✕ 匹配失败" &&
+        exhaustedJojoActions.length === 1 && exhaustedJojoActions[0].textContent === "重新匹配" &&
+        !exhaustedJojoText.includes("查看候选") &&
+        !exhaustedJojoText.includes("JOJO accumulated alias candidate") &&
+        !exhaustedJojoText.includes("JOJO alias values") &&
+        !exhaustedJojoText.toLowerCase().includes("tmdb") &&
+        exhaustedJojoText.includes("Bilibili 失败") &&
+        !Object.prototype.hasOwnProperty.call(jojoSelections, jojoSelectionKey) &&
+        !Object.prototype.hasOwnProperty.call(jojoSelections.__compositeSelections, jojoSelectionKey) &&
+        !Object.prototype.hasOwnProperty.call(jojoKeywords, jojoSelectionKey),
+        "JOJO alias exhaustion must be failed, hide accumulated aliases/TMDB diagnostics, retain unrelated faults, and expose only parent-title rematch");
+
+    const parentTitleCandidates = [{
+        Site: "Dandan", SiteName: "弹弹Play", Id: "jojo-parent-low", Name: "JOJO parent low",
+        MatchScore: 0.72, ScoreOrigin: "search-confidence",
+        MatchOrigin: "scored", DecisionReason: "low-confidence"
+    }, {
+        Site: "Bilibili", SiteName: "哔哩哔哩", Id: "jojo-parent-high", Name: "JOJO parent high",
+        MatchScore: 0.93, ScoreOrigin: "search-confidence",
+        MatchOrigin: "scored", DecisionReason: "confident-site-priority"
+    }];
+    const parentTitleSeason = {
+        SeriesId: "jojo-series", SeasonId: "jojo-season-1", SeriesName: "JOJO的奇妙冒险",
+        SeasonName: "JOJO Season 1", SeasonNumber: 1, Year: 2012, EpisodeCount: 26,
+        MappingProtocolVersion: 21, PlanGeneration: 6206, PlanFingerprint: "jojo-parent-plan",
+        ParentTitleRematchAvailable: false,
+        Candidates: parentTitleCandidates,
+        SelectedSite: "Bilibili", SelectedId: "jojo-parent-high",
+        SelectedCandidate: parentTitleCandidates[1],
+        MatchOrigin: "scored", DecisionReason: "confident-site-priority",
+        SearchCompletionDiagnostics: [{ Provider: "Youku", Status: "failed" }]
+    };
+    apiResponses.MatchPreview = { Seasons: [parentTitleSeason] };
+    const parentTitleCallStart = apiCalls.length;
+    await exhaustedJojoActions[0].dispatch("click");
+    const parentTitleCall = apiCalls.slice(parentTitleCallStart)
+        .find(call => call.option === "MatchPreview");
+    const forbiddenParentTitleParameters = [
+        "keyword", "mode", "manual", "rematch", "force", "site", "candidateId",
+        "candidateEvidence", "selectionEvidenceToken", "seriesName", "parentTitle"
+    ];
+    assert(parentTitleCall && parentTitleCall.itemId === "jojo-series" &&
+        parentTitleCall.parameters.parentTitleRematch === true &&
+        parentTitleCall.parameters.seriesId === "jojo-series" &&
+        parentTitleCall.parameters.seasonName === "JOJO Season 1" &&
+        parentTitleCall.parameters.seasonNumber === 1 && parentTitleCall.parameters.seasonYear === 2012 &&
+        parentTitleCall.parameters.planGeneration === 6106 &&
+        parentTitleCall.parameters.planFingerprint === "jojo-authoritative-plan" &&
+        parentTitleCall.parameters.mappingProtocolVersion === 21 &&
+        parentTitleCall.parameters.searchScope === "provider-search" &&
+        forbiddenParentTitleParameters.every(name =>
+            !Object.prototype.hasOwnProperty.call(parentTitleCall.parameters, name)),
+        "parent-title rematch must send only its boolean discriminator plus authoritative Season/Series context and never l10 or candidate-selection fields");
+    const parentTitlePickerText = allVisibleText(jojoDialog.body);
+    const parentTitleRows = jojoDialog.body.querySelectorAll(".danmuCandidate");
+    assert(jojoSeasons[0] === parentTitleSeason && parentTitleRows.length === 2 &&
+        allVisibleText(parentTitleRows[0]).includes("匹配分：72（标题匹配）") &&
+        allVisibleText(parentTitleRows[1]).includes("匹配分：93（标题匹配）") &&
+        parentTitleRows[1].children[0].checked &&
+        parentTitlePickerText.includes("Youku 失败") &&
+        !parentTitlePickerText.includes("JOJO accumulated alias candidate") &&
+        !jojoDialog.body.querySelectorAll(".danmuSmartButton")
+            .some(button => button.textContent === "重新匹配"),
+        "the fresh response must replace exhausted state and restore ordinary scored candidates, diagnostics, and normal selection");
+    const parentTitleBack = jojoDialog.footer.children
+        .find(button => button.textContent === "返回总览");
+    await parentTitleBack.dispatch("click");
+    const ordinaryJojoAction = jojoDialog.body.querySelectorAll(".danmuSmartButton")
+        .find(button => button.textContent === "查看候选");
+    assert(ordinaryJojoAction &&
+        !jojoDialog.body.querySelectorAll(".danmuSmartButton")
+            .some(button => button.textContent === "重新匹配") &&
+        allVisibleText(jojoDialog.body).includes("Youku 失败"),
+        "after replacement the overview must lose the exhausted action and restore the ordinary candidate path");
+    const ordinaryJojoCallCount = apiCalls.length;
+    await ordinaryJojoAction.dispatch("click");
+    assert(apiCalls.length === ordinaryJojoCallCount &&
+        jojoDialog.body.querySelectorAll(".danmuCandidate").length === 2,
+        "ordinary 查看候选 must remain a local navigation path without issuing parent-title rematch");
+    jojoDialog.forceClose();
+    delete apiResponses.MatchPreview;
+
+    const directJojoDialog = hooks.openDialog("direct Season exhausted aliases");
+    const directJojoCallCount = apiCalls.length;
+    hooks.renderCandidatePicker(directJojoDialog,
+        { Id: "jojo-season-1", Type: "Season", Name: "JOJO Season 1" }, exhaustedJojoSeason, "");
+    const directJojoText = allVisibleText(directJojoDialog.body);
+    const directJojoActions = directJojoDialog.body.querySelectorAll(".danmuSmartButton");
+    assert(directJojoDialog.title.textContent === "本季弹幕智能匹配" &&
+        directJojoActions.length === 1 && directJojoActions[0].textContent === "重新匹配" &&
+        directJojoDialog.body.querySelectorAll(".danmuCandidate").length === 0 &&
+        directJojoText.includes("Bilibili 失败") && !directJojoText.toLowerCase().includes("tmdb") &&
+        !directJojoText.includes("JOJO accumulated alias candidate") && apiCalls.length === directJojoCallCount,
+        "a direct Season exhaustion response must use the same neutral l6 card without leaking alias rows or searching eagerly");
+    directJojoDialog.forceClose();
 
     const compositeSeason = {
         SeriesId: "series", SeasonId: "season-composite", SeasonNumber: 1,

@@ -679,6 +679,12 @@
         return parameters;
     }
 
+    function parentTitleRematchParameters(season) {
+        var parameters = seasonRequestParameters(season);
+        parameters.parentTitleRematch = true;
+        return parameters;
+    }
+
     function seasonPlanGeneration(season) {
         var generation = value(season, "PlanGeneration", "planGeneration", null);
         var numeric = Number(generation);
@@ -859,6 +865,10 @@
         return String(value(target, "MatchIntent", "matchIntent", "") || "") === "manual-keyword";
     }
 
+    function parentTitleRematchAvailable(target) {
+        return value(target, "ParentTitleRematchAvailable", "parentTitleRematchAvailable", false) === true;
+    }
+
     function matchOrigin(target) {
         return String(value(target, "MatchOrigin", "matchOrigin", "") || "").trim();
     }
@@ -996,10 +1006,18 @@
         return "匹配分：" + text + "（" + scoreOriginLabel(origin) + "）";
     }
 
+    function isTmdbSearchDiagnostic(entry) {
+        var provider = normalizeDecisionCode(value(entry,
+            "Provider", "provider", value(entry, "ProviderName", "providerName", "")));
+        return provider === "tmdb" || provider === "tmdbalias" || provider.indexOf("tmdb-") === 0;
+    }
+
     function searchDiagnosticsLine(target) {
         var diagnostics = value(target, "SearchCompletionDiagnostics", "searchCompletionDiagnostics", []) || [];
         var manualKeyword = isManualKeyword(target);
+        var suppressTmdb = parentTitleRematchAvailable(target);
         var incomplete = diagnostics.filter(function (entry) {
+            if (suppressTmdb && isTmdbSearchDiagnostic(entry)) return false;
             var status = normalizeDecisionCode(value(entry, "Status", "status", ""));
             return status !== "completed" && (!manualKeyword || status !== "cancelled");
         });
@@ -2542,7 +2560,9 @@
     }
 
     function appendCompositeMappingHint(container, seasons) {
-        if (!(seasons || []).some(hasCompositePlan)) return;
+        if (!(seasons || []).some(function (season) {
+            return !parentTitleRematchAvailable(season) && hasCompositePlan(season);
+        })) return;
         var hint = document.createElement("div");
         hint.className = "danmuCompositeHint";
         hint.textContent = "下列卡片仅用于本次下载映射，不会改变Emby 的季归属。";
@@ -2784,12 +2804,22 @@
             }
         }
         discardIncompatibleSeasonDrafts(dialog, seasons, selections);
-        if (dialog.title) dialog.title.textContent = "整部剧弹幕智能匹配";
+        if (dialog.title) {
+            dialog.title.textContent = item.Type === "Series"
+                ? "整部剧弹幕智能匹配"
+                : "本季弹幕智能匹配";
+        }
         dialog.body.replaceChildren();
         dialog.footer.replaceChildren();
 
         seasons.forEach(function (season) {
             var key = seasonSelectionKey(season);
+            if (parentTitleRematchAvailable(season)) {
+                delete selections[key];
+                clearCompositeSelectionStore(selections, season);
+                delete keywords[key];
+                return;
+            }
             if (!isManualKeyword(season) && !selections[key] && hasBackendMatch(season)) {
                 var current = selectedCandidate(season);
                 if (current) selections[key] = current;
@@ -2803,6 +2833,7 @@
         appendCompositeMappingHint(dialog.body, seasons);
 
         seasons.forEach(function (season, seasonIndex) {
+            var parentRematch = parentTitleRematchAvailable(season);
             var diagnosticsText = searchDiagnosticsLine(season);
             if (diagnosticsText) {
                 var diagnostics = document.createElement("div");
@@ -2810,20 +2841,20 @@
                 diagnostics.textContent = diagnosticsText;
                 dialog.body.appendChild(diagnostics);
             }
-            if (hasCompositePlan(season)) {
+            if (!parentRematch && hasCompositePlan(season)) {
                 renderCompositeSeasonSummary(dialog, item, season, seasonIndex, seasons, selections, keywords);
                 return;
             }
             var selectionKey = seasonSelectionKey(season);
             var manualKeyword = isManualKeyword(season);
-            var selection = manualKeyword ? null : selections[selectionKey];
+            var selection = manualKeyword || parentRematch ? null : selections[selectionKey];
             var block = document.createElement("div");
             block.className = "danmuSeasonSummary " + (selection ? "matched" : "unmatched");
             var main = document.createElement("div");
             var title = document.createElement("div");
             title.className = "danmuSeasonSummaryTitle";
             title.textContent = seasonLibraryContextLine(season);
-            var matched = !manualKeyword && hasBackendMatch(season);
+            var matched = !manualKeyword && !parentRematch && hasBackendMatch(season);
             var state = document.createElement("div");
             state.className = "danmuSeasonSummaryState";
             state.textContent = manualKeyword ? "等待人工选择" : (matched ? "✓ 匹配成功" : "✕ 匹配失败");
@@ -2831,9 +2862,11 @@
             detail.className = "danmuSeasonSummaryDetail";
             detail.textContent = manualKeyword
                 ? value(season, "Message", "message", "请选择一个候选结果。")
-                : backendDecisionLine(season) ||
-                    value(season, "Message", "message", "服务器未返回决策说明");
-            if (!manualKeyword && selection) {
+                : (parentRematch
+                    ? "未找到可靠匹配，可使用父剧标题重新匹配。"
+                    : backendDecisionLine(season) ||
+                        value(season, "Message", "message", "服务器未返回决策说明"));
+            if (!manualKeyword && !parentRematch && selection) {
                 detail.textContent += (detail.textContent ? "　" : "") + candidateLine(selection);
             }
             var scopeLine = scopeSummaryLine(season);
@@ -2841,8 +2874,46 @@
             main.append(title, state, detail);
             var manual = document.createElement("button");
             manual.className = "danmuSmartButton";
-            manual.textContent = isProviderIdMatch(season) ? "重新智能匹配" : "查看候选";
+            manual.textContent = parentRematch
+                ? "重新匹配"
+                : (isProviderIdMatch(season) ? "重新智能匹配" : "查看候选");
             manual.addEventListener("click", async function () {
+                if (parentRematch) {
+                    try {
+                        var parentParameters = parentTitleRematchParameters(season);
+                        var parentRefreshed = await runDialogSearch(
+                            dialog, parentParameters.seriesId || item.Id, "provider-search", parentParameters,
+                            "正在使用父剧标题重新匹配本季候选…", function (status, error) {
+                                renderSeriesPicker(dialog, item, seasons, selections, keywords);
+                                notify(status === "cancelled" ? "已取消父剧标题重新匹配。" :
+                                    "父剧标题重新匹配失败：" + publicErrorMessage(error), true);
+                            });
+                        if (!parentRefreshed) return;
+                        var parentRefreshedSeason = (value(parentRefreshed, "Seasons", "seasons", []) || [])[0];
+                        if (!parentRefreshedSeason) throw new Error("服务器没有返回本季候选");
+                        var parentOldKey = selectionKey;
+                        var parentNewKey = seasonSelectionKey(parentRefreshedSeason);
+                        delete selections[parentOldKey];
+                        delete selections[parentNewKey];
+                        clearCompositeSelectionStore(selections, season);
+                        clearCompositeSelectionStore(selections, parentRefreshedSeason);
+                        delete keywords[parentOldKey];
+                        delete keywords[parentNewKey];
+                        seasons[seasonIndex] = parentRefreshedSeason;
+                        discardIncompatibleSeasonDrafts(dialog, [parentRefreshedSeason], selections);
+                        if (item.Type === "Season") {
+                            renderCandidatePicker(dialog, item, parentRefreshedSeason, "");
+                        } else if (parentTitleRematchAvailable(parentRefreshedSeason)) {
+                            renderSeriesPicker(dialog, item, seasons, selections, keywords);
+                        } else {
+                            renderSeriesSeasonPicker(dialog, item, seasons, seasonIndex, selections, keywords);
+                        }
+                    } catch (error) {
+                        renderSeriesPicker(dialog, item, seasons, selections, keywords);
+                        notify("父剧标题重新匹配失败：" + publicErrorMessage(error), true);
+                    }
+                    return;
+                }
                 if (!isProviderIdMatch(season)) {
                     renderSeriesSeasonPicker(dialog, item, seasons, seasonIndex, selections, keywords);
                     return;
@@ -2875,7 +2946,8 @@
         var ok = document.createElement("button");
         ok.className = "danmuSmartButton primary";
         var matchedSeasons = seasons.filter(function (season) {
-            return hasCompositePlan(season) && compositeHasDownloadableMappings(season, selections);
+            return !parentTitleRematchAvailable(season) && hasCompositePlan(season) &&
+                compositeHasDownloadableMappings(season, selections);
         });
         var compositeTotals = matchedSeasons.filter(hasCompositePlan).reduce(function (totals, season) {
             var coverage = compositeCoverage(season, selections);
@@ -3066,6 +3138,17 @@
     }
 
     function renderCandidatePicker(dialog, item, season, keyword) {
+        if (parentTitleRematchAvailable(season)) {
+            var parentState = dialog.parentTitleRematchState;
+            var parentSeasonId = String(value(season, "SeasonId", "seasonId", item.Id) || "");
+            if (!parentState || parentState.seasonId !== parentSeasonId) {
+                parentState = dialog.parentTitleRematchState = {
+                    seasonId: parentSeasonId, selections: {}, keywords: {}
+                };
+            }
+            renderSeriesPicker(dialog, item, [season], parentState.selections, parentState.keywords);
+            return;
+        }
         if (hasCompositePlan(season)) {
             renderCompositeTargetPicker(dialog, item, season);
             return;
@@ -3964,7 +4047,9 @@
         manualKeywordParameters: manualKeywordParameters,
         keywordRematchParameters: keywordRematchParameters,
         isManualKeyword: isManualKeyword,
+        parentTitleRematchAvailable: parentTitleRematchAvailable,
         seasonRequestParameters: seasonRequestParameters,
+        parentTitleRematchParameters: parentTitleRematchParameters,
         seasonPlanGeneration: seasonPlanGeneration,
         hasCurrentMappingContract: hasCurrentMappingContract,
         targetSeasonNumber: targetSeasonNumber,

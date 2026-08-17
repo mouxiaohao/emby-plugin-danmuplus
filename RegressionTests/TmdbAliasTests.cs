@@ -4,11 +4,13 @@ using System.IO;
 using System.Linq;
 using System.Net;
 using System.Reflection;
+using System.Runtime.Serialization;
 using System.Runtime.Serialization.Json;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Emby.Plugin.Danmu.Configuration;
+using Emby.Plugin.Danmu.Core.Controllers;
 using Emby.Plugin.Danmu.Model;
 using Emby.Plugin.Danmu.Scraper;
 using Emby.Plugin.Danmu.Scraper.Entity;
@@ -42,6 +44,9 @@ namespace Emby.Plugin.Danmu.RegressionTests
             ReplacesCanonicalCandidatesForAutomaticSelection();
             PreservesLazyRoundOrderingAndShortCircuitContract();
             TracksCompletedAliasProviderCalls();
+            KeepsExhaustedSeasonAliasesServerLocal();
+            SearchesParentTitleOnceWithOrdinarySeasonScoring();
+            FreezesParentTitleRematchRequestBoundary();
         }
 
         private static void ParsesTvResultsIntoChineseAliasSearchPlan()
@@ -470,20 +475,251 @@ namespace Emby.Plugin.Danmu.RegressionTests
             }
         }
 
+        private static void KeepsExhaustedSeasonAliasesServerLocal()
+        {
+            var baseline = new DanmuMatchCandidate
+            {
+                Id = "ordinary-low",
+                Site = "other",
+                Score = 0.42,
+            };
+            var result = new DanmuMatchSearchResult
+            {
+                CanonicalCandidates = new List<DanmuMatchCandidate> { baseline },
+                Candidates = new List<DanmuMatchCandidate> { baseline },
+            };
+            var aliases = new List<DanmuMatchCandidate>
+            {
+                new DanmuMatchCandidate { Id = "jojo-repeat", Site = "dandan", Score = 0.61 },
+                new DanmuMatchCandidate { Id = "jojo-repeat", Site = "dandan", Score = 0.64 },
+            };
+
+            var exhausted = DanmuMatchSearchEngine.CompleteTmdbAliasPlan(
+                result, aliases, 2, false, false);
+            Assert(exhausted && !result.UsedTmdbAlias &&
+                   result.CanonicalCandidates.Count == 1 &&
+                   result.CanonicalCandidates[0].Id == "ordinary-low" &&
+                   result.Candidates.Count == 1,
+                "low-confidence repeated Season aliases must stay server-local and expose only exhaustion state");
+
+            var calls = new List<string>();
+            var faultThenSuccess = new TermFixtureScraper(calls, term =>
+            {
+                if (term == "fault")
+                {
+                    throw new InvalidOperationException("fixture fault");
+                }
+                return new List<ScraperSearchInfo>
+                {
+                    new ScraperSearchInfo
+                    {
+                        Id = "jojo-low",
+                        Name = "unrelated",
+                        Category = "动画",
+                        Year = 1990,
+                        EpisodeSize = 1,
+                    },
+                };
+            });
+            var accumulated = new List<DanmuMatchCandidate>();
+            var attempted = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            Assert(!InvokeAliasTerm(result, faultThenSuccess, "fault", accumulated, attempted) &&
+                   !InvokeAliasTerm(result, faultThenSuccess, "later", accumulated, attempted) &&
+                   calls.SequenceEqual(new[] { "fault", "later" }) &&
+                   result.HasCompletedProviders,
+                "one alias fault must not prevent the next unique alias from completing");
+
+            var thresholdResult = new DanmuMatchSearchResult();
+            var thresholdCalls = new List<string>();
+            var thresholdScraper = new TermFixtureScraper(thresholdCalls, term =>
+                new List<ScraperSearchInfo>
+                {
+                    new ScraperSearchInfo
+                    {
+                        Id = "jojo-winner",
+                        Name = term,
+                        Category = "动画",
+                        Year = 2012,
+                        EpisodeSize = 26,
+                    },
+                });
+            var thresholdAliases = new List<DanmuMatchCandidate>();
+            var thresholdTerms = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var reached = InvokeAliasTerm(
+                thresholdResult, thresholdScraper, "JOJO的奇妙冒险", thresholdAliases, thresholdTerms);
+            Assert(reached && thresholdCalls.Count == 1 &&
+                   !DanmuMatchSearchEngine.CompleteTmdbAliasPlan(
+                       thresholdResult, thresholdAliases, thresholdTerms.Count, true, false) &&
+                   thresholdResult.UsedTmdbAlias && thresholdResult.CanonicalCandidates.Count > 0,
+                "the first threshold-reaching Season alias must be immediately eligible to short-circuit and apply");
+
+            var movieResult = new DanmuMatchSearchResult();
+            Assert(!DanmuMatchSearchEngine.CompleteTmdbAliasPlan(
+                       movieResult, aliases, 2, false, true) && movieResult.UsedTmdbAlias,
+                "Movie alias replacement must remain unchanged even when its candidates are below the Season alias threshold");
+        }
+
+        private static void SearchesParentTitleOnceWithOrdinarySeasonScoring()
+        {
+            const string authoritativeParentTitle = "JOJO的奇妙冒险";
+            var providerTerms = new List<string>();
+            var scraper = new TermFixtureScraper(providerTerms, term =>
+                new List<ScraperSearchInfo>
+                {
+                    new ScraperSearchInfo
+                    {
+                        Id = "jojo-parent",
+                        Name = authoritativeParentTitle,
+                        Category = "动画",
+                        Year = 2012,
+                        EpisodeSize = 26,
+                    },
+                });
+            var tmdbCalls = 0;
+            var originalSender = TmdbAliasClient.HttpGetResponseAsync;
+            try
+            {
+                TmdbAliasClient.HttpGetResponseAsync = request =>
+                {
+                    tmdbCalls++;
+                    throw new InvalidOperationException("parent-title rematch must not call TMDB");
+                };
+                var search = DanmuMatchSearchEngine.SearchSeasonAsync(
+                    new[] { scraper }, authoritativeParentTitle, "Season 1", 2012, 26,
+                    authoritativeParentTitle, null, Core.BoundedSearchPolicy.Shared,
+                    CancellationToken.None, CancellationToken.None, null, null,
+                    new Season { IndexNumber = 1 }).GetAwaiter().GetResult();
+
+                Assert(providerTerms.SequenceEqual(new[] { authoritativeParentTitle }) &&
+                       tmdbCalls == 0 && search.SelectedCandidate?.Id == "jojo-parent" &&
+                       !search.UsedTmdbAlias && !search.ParentTitleRematchAvailable,
+                    "parent-title rematch must make one provider round with the authoritative title, ordinary auto scoring, and zero TMDB expansion");
+            }
+            finally
+            {
+                TmdbAliasClient.HttpGetResponseAsync = originalSender;
+            }
+        }
+
+        private static void FreezesParentTitleRematchRequestBoundary()
+        {
+            Assert(typeof(DanmuParams).GetProperty("ParentTitleRematch")?
+                       .GetCustomAttribute<DataMemberAttribute>()?.Name == "parentTitleRematch" &&
+                   typeof(DanmuSeasonMatchResult).GetProperty("ParentTitleRematchAvailable") != null &&
+                   typeof(DanmuItemMatchResult).GetProperty("ParentTitleRematchAvailable") == null,
+                "l6 request/response fields must remain additive and Season-owned");
+
+            var mixedIntent = typeof(DanmuController).GetMethod(
+                "HasMixedParentTitleRematchIntent", BindingFlags.Static | BindingFlags.NonPublic);
+            Assert(!(bool)mixedIntent.Invoke(null, new object[]
+                   {
+                       new DanmuParams { ParentTitleRematch = true },
+                   }) &&
+                   (bool)mixedIntent.Invoke(null, new object[]
+                   {
+                       new DanmuParams { ParentTitleRematch = true, Keyword = "forged parent" },
+                   }) &&
+                   (bool)mixedIntent.Invoke(null, new object[]
+                   {
+                       new DanmuParams { ParentTitleRematch = true, Mode = DanmuMatchIntent.Rematch },
+                   }) &&
+                   (bool)mixedIntent.Invoke(null, new object[]
+                   {
+                       new DanmuParams { ParentTitleRematch = true, Site = "dandan" },
+                   }) &&
+                   (bool)mixedIntent.Invoke(null, new object[]
+                   {
+                       new DanmuParams { ParentTitleRematch = true, CompositePlan = true },
+                   }) &&
+                   (bool)mixedIntent.Invoke(null, new object[]
+                   {
+                       new DanmuParams { ParentTitleRematch = true, SearchScope = "temporary-range" },
+                   }),
+                "mixed keyword, mode, selection, composite, and temporary parent-rematch intents must be rejected before search");
+
+            var selector = typeof(DanmuController).GetMethod(
+                "SelectUniqueParentTitleRematchSeason", BindingFlags.Static | BindingFlags.NonPublic);
+            var seasons = new[]
+            {
+                new Season { Name = "Season 1", IndexNumber = 1 },
+                new Season { Name = "Season 2", IndexNumber = 2 },
+            };
+            Assert(selector.Invoke(null, new object[]
+                   {
+                       seasons, new DanmuParams { SeasonNumber = 1, SeasonName = "Season 1" },
+                   }) == seasons[0] &&
+                   selector.Invoke(null, new object[] { seasons, new DanmuParams() }) == null &&
+                   selector.Invoke(null, new object[]
+                   {
+                       seasons, new DanmuParams { SeasonName = "client-forged-title" },
+                   }) == null,
+                "parent-title rematch must resolve exactly one authoritative Season and reject missing, ambiguous, or forged locators");
+
+            var tmdbDiagnostic = typeof(DanmuController).GetMethod(
+                "IsTmdbAliasDiagnostic", BindingFlags.Static | BindingFlags.NonPublic);
+            var tmdbError = typeof(DanmuController).GetMethod(
+                "IsTmdbAliasError", BindingFlags.Static | BindingFlags.NonPublic);
+            Assert((bool)tmdbDiagnostic.Invoke(null, new object[]
+                   {
+                       new DanmuSearchCompletionDiagnostic { Provider = "TMDB Alias" },
+                   }) &&
+                   (bool)tmdbDiagnostic.Invoke(null, new object[]
+                   {
+                       new DanmuSearchCompletionDiagnostic { Provider = "tmdb-fallback" },
+                   }) &&
+                   !(bool)tmdbDiagnostic.Invoke(null, new object[]
+                   {
+                       new DanmuSearchCompletionDiagnostic { Provider = "Youku" },
+                   }) &&
+                   (bool)tmdbError.Invoke(null, new object[] { "[tmdb-alias]: failed" }) &&
+                   !(bool)tmdbError.Invoke(null, new object[] { "Youku: failed" }),
+                "alias exhaustion must suppress normalized TMDB-only diagnostics while retaining ordinary provider failures");
+
+            var controllerSource = File.ReadAllText(Path.GetFullPath(Path.Combine(
+                AppContext.BaseDirectory, "..", "..", "..", "..", "Core", "Controllers", "DanmuController.cs")));
+            var parentBranchStart = controllerSource.IndexOf(
+                "if (request.ParentTitleRematch)", StringComparison.Ordinal);
+            var mixedGateIndex = controllerSource.IndexOf(
+                "HasMixedParentTitleRematchIntent(request)", parentBranchStart, StringComparison.Ordinal);
+            var resolutionGateIndex = controllerSource.IndexOf(
+                "TryResolveParentTitleRematchTarget(item, request", parentBranchStart, StringComparison.Ordinal);
+            var providerSearchIndex = controllerSource.IndexOf(
+                "var parentTitleSeason = await GetSeasonMatchPreview(", parentBranchStart, StringComparison.Ordinal);
+            Assert(controllerSource.Contains("var seriesName = authoritativeParentSeries?.Name ?? string.Empty;") &&
+                   controllerSource.Contains("SeriesId = authoritativeParentSeries?.Id.ToString() ?? string.Empty") &&
+                   controllerSource.Contains("new[] { authoritativeParentSeries?.OriginalTitle }") &&
+                   controllerSource.Contains("authoritativeParentSeries.Name,") &&
+                   controllerSource.Contains("parent-title-unavailable") &&
+                   parentBranchStart >= 0 && mixedGateIndex > parentBranchStart &&
+                   resolutionGateIndex > mixedGateIndex && providerSearchIndex > resolutionGateIndex,
+                "Season preview must use authoritative Series identity, and mixed/missing/ambiguous requests must return before any provider search");
+        }
+
         private static void InvokeAliasTerm(
             DanmuMatchSearchResult result,
             AbstractScraper scraper,
             CancellationToken cancellationToken)
         {
+            InvokeAliasTerm(result, scraper, "alias", new List<DanmuMatchCandidate>(),
+                new HashSet<string>(StringComparer.OrdinalIgnoreCase), cancellationToken);
+        }
+
+        private static bool InvokeAliasTerm(
+            DanmuMatchSearchResult result,
+            AbstractScraper scraper,
+            string term,
+            List<DanmuMatchCandidate> candidates,
+            ISet<string> attemptedTerms,
+            CancellationToken cancellationToken = default(CancellationToken))
+        {
             var method = typeof(DanmuMatchSearchEngine).GetMethod(
                 "SearchTmdbTermAsync", BindingFlags.Static | BindingFlags.NonPublic);
             var task = (Task<bool>)method.Invoke(null, new object[]
             {
-                result, scraper, "alias", new List<DanmuMatchCandidate>(),
-                new HashSet<string>(StringComparer.OrdinalIgnoreCase), 0, "Series", "Season 1", 1,
-                2024, 12, false, null, cancellationToken,
+                result, scraper, term, candidates, attemptedTerms, 0, "Series", "Season 1", 1,
+                2012, 26, false, null, cancellationToken,
             });
-            task.GetAwaiter().GetResult();
+            return task.GetAwaiter().GetResult();
         }
 
         private static void Classify(DanmuMatchSearchResult result)
@@ -513,6 +749,35 @@ namespace Emby.Plugin.Danmu.RegressionTests
             public override Task<List<ScraperSearchInfo>> SearchForApi(string keyword) => _throws
                 ? Task.FromException<List<ScraperSearchInfo>>(new InvalidOperationException("alias fixture failure"))
                 : Task.FromResult(new List<ScraperSearchInfo>());
+            public override Task<ScraperMedia> GetMedia(BaseItem item, string id) => Task.FromResult<ScraperMedia>(null);
+            public override Task<ScraperEpisode> GetMediaEpisode(BaseItem item, string id) => Task.FromResult<ScraperEpisode>(null);
+            public override Task<ScraperDanmaku> GetDanmuContent(BaseItem item, string commentId) => Task.FromResult<ScraperDanmaku>(null);
+        }
+
+        private sealed class TermFixtureScraper : AbstractScraper
+        {
+            private readonly IList<string> _terms;
+            private readonly Func<string, List<ScraperSearchInfo>> _search;
+
+            public TermFixtureScraper(
+                IList<string> terms,
+                Func<string, List<ScraperSearchInfo>> search) : base(null)
+            {
+                _terms = terms;
+                _search = search;
+            }
+
+            public override string Name => "Dandan";
+            public override string ProviderName => "Dandan";
+            public override string ProviderId => "dandan";
+            public override Task<List<ScraperSearchInfo>> Search(BaseItem item) =>
+                SearchForApi(item?.Name);
+            public override Task<string> SearchMediaId(BaseItem item) => Task.FromResult(string.Empty);
+            public override Task<List<ScraperSearchInfo>> SearchForApi(string keyword)
+            {
+                _terms.Add(keyword);
+                return Task.FromResult(_search(keyword));
+            }
             public override Task<ScraperMedia> GetMedia(BaseItem item, string id) => Task.FromResult<ScraperMedia>(null);
             public override Task<ScraperEpisode> GetMediaEpisode(BaseItem item, string id) => Task.FromResult<ScraperEpisode>(null);
             public override Task<ScraperDanmaku> GetDanmuContent(BaseItem item, string commentId) => Task.FromResult<ScraperDanmaku>(null);
