@@ -165,7 +165,7 @@ namespace Emby.Plugin.Danmu.Scraper.Iqiyi
                     {
                         if (albumInfo != null)
                         {
-                            videoInfo.VideoCount = albumInfo.VideoCount;
+                            ApplyLegacyAlbumInfo(videoInfo, albumInfo);
                         }
 
                         return videoInfo.ToJson();
@@ -197,6 +197,15 @@ namespace Emby.Plugin.Danmu.Scraper.Iqiyi
         }
 
         return baseInfoVideo;
+    }
+
+    internal static void ApplyLegacyAlbumInfo(
+        IqiyiHtmlVideoInfo videoInfo,
+        IqiyiHtmlAlbumInfo albumInfo)
+    {
+        if (videoInfo == null || albumInfo == null) return;
+        videoInfo.VideoCount = albumInfo.VideoCount;
+        videoInfo.ParentTitle = albumInfo.albumName ?? string.Empty;
     }
 
     private static bool IsLegacyVideoInfoUsable(IqiyiHtmlVideoInfo videoInfo)
@@ -284,6 +293,7 @@ namespace Emby.Plugin.Danmu.Scraper.Iqiyi
 
                     result.AlbumId = albumId;
                     result.VideoName = GetString(baseData, "title") ?? GetString(baseData, "current_video_title") ?? string.Empty;
+                    result.ParentTitle = GetString(baseData, "title") ?? string.Empty;
                     result.VideoUrl = GetString(baseData, "share_url") ?? $"https://www.iqiyi.com/v_{id}.html";
                     result.VideoCount = GetInt32(baseData, "total_episode");
                     var channelId = GetInt32(baseData, "channel_id");

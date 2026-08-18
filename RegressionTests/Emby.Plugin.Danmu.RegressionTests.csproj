@@ -18,5 +18,6 @@
     <Compile Remove="R4IdentifierMetamorphic\**\*.cs" />
     <Compile Remove="R5TargetSeasonScope\**\*.cs" />
     <Compile Remove="MgtvSearch\**\*.cs" />
+    <Compile Remove="TitleFidelity\**\*.cs" />
   </ItemGroup>
 </Project>

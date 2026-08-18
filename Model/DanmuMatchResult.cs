@@ -2,9 +2,49 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json;
+using System.Text.Json.Serialization;
+using System.Runtime.Serialization;
 
 namespace Emby.Plugin.Danmu.Model
 {
+    /// <summary>
+    /// Optional, provider-neutral presentation metadata for an exact or selected
+    /// upstream source. It deliberately contains no provider or media identity.
+    /// </summary>
+    public sealed class SourceMetadata
+    {
+        public string Title { get; set; } = string.Empty;
+        public int? Year { get; set; }
+        public string Category { get; set; } = string.Empty;
+
+        public SourceMetadata Clone() => new SourceMetadata
+        {
+            Title = Title ?? string.Empty,
+            Year = Year,
+            Category = Category ?? string.Empty,
+        };
+
+        [JsonIgnore]
+        [IgnoreDataMember]
+        public bool HasValue => !string.IsNullOrWhiteSpace(Title) || Year.HasValue ||
+                                !string.IsNullOrWhiteSpace(Category);
+
+        public static SourceMetadata MergeDetailWithSnapshot(
+            SourceMetadata detail,
+            SourceMetadata snapshot)
+        {
+            if (detail?.HasValue != true && snapshot?.HasValue != true) return null;
+            return new SourceMetadata
+            {
+                Title = !string.IsNullOrWhiteSpace(detail?.Title)
+                    ? detail.Title : snapshot?.Title ?? string.Empty,
+                Year = detail?.Year ?? snapshot?.Year,
+                Category = !string.IsNullOrWhiteSpace(detail?.Category)
+                    ? detail.Category : snapshot?.Category ?? string.Empty,
+            };
+        }
+    }
+
     public static class DanmuMatchScoreOrigin
     {
         public const string SearchConfidence = "search-confidence";
@@ -103,6 +143,7 @@ namespace Emby.Plugin.Danmu.Model
         public string Status { get; set; } = string.Empty;
         public string Message { get; set; } = string.Empty;
         public bool AutoSelected { get; set; }
+        public bool ParentTitleRematchAvailable { get; set; }
         public string MatchIntent { get; set; } = DanmuMatchIntent.Default;
         public string MatchOrigin { get; set; } = string.Empty;
         public string DecisionReason { get; set; } = string.Empty;
@@ -127,9 +168,19 @@ namespace Emby.Plugin.Danmu.Model
         // special).  These groups are a plugin-side presentation only; Emby's
         // actual Season membership is never altered.
         public bool RequiresCompositeMapping { get; set; }
+        // Response-only advisory derived from provider Episode details consumed
+        // by the authoritative plan. It is never accepted as planning evidence.
+        public bool HasVerifiedSourceEpisodeSurplus { get; set; }
         public CompositeSeasonPlan CompositePlan { get; set; }
         public List<DanmuCompositeSeasonGroup> CompositeGroups { get; set; } =
             new List<DanmuCompositeSeasonGroup>();
+        // Response-only compact authoritative intent. Unlike CompositeGroups,
+        // this preserves the exact ordered selection fields that produced the
+        // plan fingerprint, including RequestedEpisodeCount == 0 and sparse
+        // anchors. ServerSource*, resolved modes, mappings, and CommentIds are
+        // never projected into this list.
+        public List<DanmuCompositeSeasonSelection> CompositeSelections { get; set; } =
+            new List<DanmuCompositeSeasonSelection>();
     }
 
     public class DanmuCompositeSeasonGroup
@@ -140,10 +191,15 @@ namespace Emby.Plugin.Danmu.Model
         public string CandidateId { get; set; } = string.Empty;
         public string SourceStartEpisodeId { get; set; } = string.Empty;
         public int? SourceStartEpisodeNumber { get; set; }
+        // Response-only echo of the server-validated selection intent. The
+        // browser uses it to preserve an explicit anchor across rerenders; it
+        // is never accepted as exact mapping evidence.
+        public string AlignmentIntent { get; set; } = string.Empty;
         public string MatchOrigin { get; set; } = string.Empty;
         public double? MatchScore { get; set; }
         public string ScoreOrigin { get; set; } = string.Empty;
         public string SelectionEvidenceToken { get; set; } = string.Empty;
+        public SourceMetadata SourceMetadata { get; set; }
         public List<DanmuCompositeEpisode> Episodes { get; set; } = new List<DanmuCompositeEpisode>();
     }
 
@@ -162,9 +218,34 @@ namespace Emby.Plugin.Danmu.Model
     // This is intentionally compact. Comment IDs and arbitrary item mappings
     // are not accepted from the browser; the server re-fetches the selected
     // upstream media and derives each exact mapping itself.
+    public static class DanmuCompositeAlignmentIntentWire
+    {
+        public const string DefaultZeroOffset = "DefaultZeroOffset";
+        public const string ExplicitAnchor = "ExplicitAnchor";
+
+        public static bool TryParse(string value, out CompositeSeasonAlignmentIntent intent)
+        {
+            if (string.Equals(value, DefaultZeroOffset, StringComparison.Ordinal))
+            {
+                intent = CompositeSeasonAlignmentIntent.DefaultZeroOffset;
+                return true;
+            }
+            if (string.Equals(value, ExplicitAnchor, StringComparison.Ordinal))
+            {
+                intent = CompositeSeasonAlignmentIntent.ExplicitAnchor;
+                return true;
+            }
+            intent = default(CompositeSeasonAlignmentIntent);
+            return false;
+        }
+    }
+
     public class DanmuCompositeSeasonSelection
     {
         public int MappingProtocolVersion { get; set; } = Core.DanmuMappingProtocol.CurrentVersion;
+        // Required V22 wire value. Missing, numeric, differently-cased, or
+        // unknown values fail closed in the server reconstruction path.
+        public string AlignmentIntent { get; set; } = string.Empty;
         public long PlanGeneration { get; set; }
         public string LocalStartEpisodeItemId { get; set; } = string.Empty;
         public int RequestedEpisodeCount { get; set; }
@@ -174,6 +255,25 @@ namespace Emby.Plugin.Danmu.Model
         public int? SourceStartEpisodeNumber { get; set; }
         public string MatchOrigin { get; set; } = "manual";
         public string SelectionEvidenceToken { get; set; } = string.Empty;
+        // Server-owned automatic-planning snapshot. Browser JSON cannot set or
+        // observe it; interactive reconstruction uses registry evidence instead.
+        [JsonIgnore]
+        [IgnoreDataMember]
+        public SourceMetadata ServerSourceMetadata { get; set; }
+        // Authoritative reconstruction provenance. The browser selects only
+        // intent and exact anchors; it cannot choose the resolved algorithm or
+        // supply provider Episode facts.
+        [JsonIgnore]
+        [IgnoreDataMember]
+        public CompositeSeasonAlignmentMode? ServerResolvedAlignmentMode { get; set; }
+        [JsonIgnore]
+        [IgnoreDataMember]
+        public List<CompositeSeasonSourceEpisode> ServerSourceEpisodes { get; set; } =
+            new List<CompositeSeasonSourceEpisode>();
+        [JsonIgnore]
+        [IgnoreDataMember]
+        public List<string> ServerConsideredLocalEpisodeItemIds { get; set; } =
+            new List<string>();
     }
 
     /// <summary>
@@ -351,6 +451,13 @@ namespace Emby.Plugin.Danmu.Model
         public string DecisionReason { get; set; } = string.Empty;
         public int? SuggestedEpisodeNumber { get; set; }
         public string Reason { get; set; } = string.Empty;
+        public SourceMetadata SourceMetadata { get; set; }
+        public string PartTitle { get; set; } = string.Empty;
+        public List<DanmuMoviePartChoice> MovieParts { get; set; } =
+            new List<DanmuMoviePartChoice>();
+        [JsonIgnore]
+        [IgnoreDataMember]
+        public int FidelityTitleEvidence { get; set; }
     }
 
     /// <summary>
@@ -370,6 +477,10 @@ namespace Emby.Plugin.Danmu.Model
         public int SourceOrder { get; set; }
         public string MatchOrigin { get; set; } = string.Empty;
         public string DecisionReason { get; set; } = string.Empty;
+        public SourceMetadata SourceMetadata { get; set; }
+        public string PartTitle { get; set; } = string.Empty;
+        public List<DanmuMoviePartChoice> MovieParts { get; set; } =
+            new List<DanmuMoviePartChoice>();
     }
 
     /// <summary>
@@ -386,8 +497,21 @@ namespace Emby.Plugin.Danmu.Model
         public string SearchOperationId { get; set; } = string.Empty;
         public string Status { get; set; } = string.Empty;
         public string Message { get; set; } = string.Empty;
+        public SourceMetadata SourceMetadata { get; set; }
+        public string PartTitle { get; set; } = string.Empty;
+        public List<DanmuMoviePartChoice> MovieParts { get; set; } =
+            new List<DanmuMoviePartChoice>();
         public List<DanmuSelectedCandidateSourceEpisode> Episodes { get; set; } =
             new List<DanmuSelectedCandidateSourceEpisode>();
+    }
+
+    /// <summary>Safe Movie part presentation. Token is opaque; provider Id is never serialized.</summary>
+    public sealed class DanmuMoviePartChoice
+    {
+        public string Token { get; set; } = string.Empty;
+        public string PartTitle { get; set; } = string.Empty;
+        public int? Index { get; set; }
+        public bool Selected { get; set; }
     }
 
     public class DanmuSelectedCandidateSourceEpisode
@@ -454,6 +578,10 @@ namespace Emby.Plugin.Danmu.Model
         public string Site { get; set; } = string.Empty;
         public string SiteName { get; set; } = string.Empty;
         public string CandidateId { get; set; } = string.Empty;
+        public string PartTitle { get; set; } = string.Empty;
+        [JsonIgnore]
+        [IgnoreDataMember]
+        public string SelectedMoviePartId { get; set; } = string.Empty;
         public string MatchOrigin { get; set; } = string.Empty;
         // Whether this task requires composite safety handling. This can remain
         // true after direct identities normalize to one upstream source, so the
@@ -481,6 +609,11 @@ namespace Emby.Plugin.Danmu.Model
         public int Partial { get; set; }
         public int Failed { get; set; }
         public bool ForceRefresh { get; set; }
+        public bool ReplayEligible { get; set; }
+        public int ReplayEligibleCount { get; set; }
+        public string ReplayOriginTaskId { get; set; } = string.Empty;
+        public string ReplayChildTaskId { get; set; } = string.Empty;
+        public string ReplayKind { get; set; } = string.Empty;
         public List<DanmuEpisodeDownloadResult> Episodes { get; set; } = new List<DanmuEpisodeDownloadResult>();
     }
 
@@ -510,7 +643,19 @@ namespace Emby.Plugin.Danmu.Model
         public string SourceSite { get; set; } = string.Empty;
         public string SourceCandidateId { get; set; } = string.Empty;
         public string SourceEpisodeId { get; set; } = string.Empty;
+        // Exact server-owned download evidence. It must survive task snapshots
+        // and seven-day replay cloning but must never be exposed to the browser.
+        [JsonIgnore]
+        [IgnoreDataMember]
+        public string FrozenCommentId { get; set; } = string.Empty;
+        // Frozen provider-id provenance.  MatchOrigin describes the match
+        // decision, whereas this records whether SourceCandidateId identifies
+        // an upstream Episode or a Season/media collection.
+        public string SourceScopeType { get; set; } = string.Empty;
         public string MatchOrigin { get; set; } = string.Empty;
+        // This is intentionally populated only by the seven-day existing-file
+        // branch. Other skipped outcomes remain ineligible for replay.
+        public string SkipReason { get; set; } = string.Empty;
     }
 
     public class DanmuEpisodeDownloadOutcome
@@ -527,11 +672,14 @@ namespace Emby.Plugin.Danmu.Model
         public string ProviderValue { get; set; } = string.Empty;
         public bool FilePersisted { get; set; }
         public long ProviderWriteGeneration { get; set; }
+        // Set only for the filesystem age check in DownloadItemForProgress.
+        public string SkipReason { get; set; } = string.Empty;
     }
 
     public static class DanmuMatchIntent
     {
         public const string Default = "default";
         public const string Rematch = "rematch";
+        public const string ManualKeyword = "manual-keyword";
     }
 }

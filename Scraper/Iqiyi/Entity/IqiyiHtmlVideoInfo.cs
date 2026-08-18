@@ -14,6 +14,8 @@ namespace Emby.Plugin.Danmu.Scraper.Iqiyi.Entity
         public long TvId { get; set; }
         [DataMember(Name="videoName")]
         public string VideoName { get; set; }
+
+        public string ParentTitle { get; set; }
         
         private string _videoUrl;
         [DataMember(Name="videoUrl")]

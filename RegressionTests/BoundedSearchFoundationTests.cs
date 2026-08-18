@@ -18,8 +18,8 @@ namespace Emby.Plugin.Danmu.RegressionTests
         public static void Run()
         {
             PreservesScalarJsonContracts();
-            RegistersClientOperationIdsAndDeadlines();
-            RetainsGateForLateNonCooperativeProvider();
+            RegistersClientOperationIdsWithoutDeadlines();
+            RetainsGateUntilExplicitlyCancelledProviderSettles();
         }
 
         private static void PreservesScalarJsonContracts()
@@ -65,12 +65,16 @@ namespace Emby.Plugin.Danmu.RegressionTests
             }
         }
 
-        private static void RegistersClientOperationIdsAndDeadlines()
+        private static void RegistersClientOperationIdsWithoutDeadlines()
         {
             var options = new BoundedSearchPolicyOptions(
-                providerCallTimeout: TimeSpan.FromMilliseconds(100),
-                interactiveOperationTimeout: TimeSpan.FromMilliseconds(40),
-                automaticOperationTimeout: TimeSpan.FromMilliseconds(100));
+                providerCallTimeout: TimeSpan.Zero,
+                interactiveOperationTimeout: TimeSpan.Zero,
+                automaticOperationTimeout: TimeSpan.Zero);
+            Assert(options.ProviderCallTimeout == Timeout.InfiniteTimeSpan &&
+                   options.InteractiveOperationTimeout == Timeout.InfiniteTimeSpan &&
+                   options.AutomaticOperationTimeout == Timeout.InfiniteTimeSpan,
+                "legacy timeout inputs must be inert compatibility shims");
             using (var registry = new SearchOperationRegistry(options))
             {
                 Assert(!registry.TryBegin("short", SearchOperationScope.Interactive, out _, out _),
@@ -85,39 +89,70 @@ namespace Emby.Plugin.Danmu.RegressionTests
                 Assert(!registry.IsActive("interactive-01"),
                     "disposing an operation lease must remove its server CTS");
 
-                Assert(registry.TryBegin("interactive-02", SearchOperationScope.Interactive, out var deadline, out _),
-                    "a second valid operation should register");
-                Thread.Sleep(80);
-                Assert(deadline.IsCancellationRequested,
-                    "the injected interactive overall deadline must cancel its CTS");
-                deadline.Dispose();
+                Assert(registry.TryBegin("interactive-02", SearchOperationScope.Interactive,
+                    out var interactiveWithoutDeadline, out _),
+                    "a second valid interactive operation should register");
+                Assert(registry.TryBegin("automatic-0002", SearchOperationScope.Automatic,
+                    out var automaticWithoutDeadline, out _),
+                    "a valid automatic operation should register");
+                Assert(!interactiveWithoutDeadline.IsCancellationRequested &&
+                       !automaticWithoutDeadline.IsCancellationRequested,
+                    "neither search scope may manufacture an elapsed-time cancellation");
+                Assert(registry.TryCancel("automatic-0002") &&
+                       automaticWithoutDeadline.IsCancellationRequested &&
+                       !interactiveWithoutDeadline.IsCancellationRequested,
+                    "only an explicit operation id cancellation may cancel the registered CTS");
+                interactiveWithoutDeadline.Dispose();
+                automaticWithoutDeadline.Dispose();
             }
         }
 
-        private static void RetainsGateForLateNonCooperativeProvider()
+        private static void RetainsGateUntilExplicitlyCancelledProviderSettles()
         {
             var options = new BoundedSearchPolicyOptions(
-                providerCallTimeout: TimeSpan.FromMilliseconds(25),
-                interactiveOperationTimeout: TimeSpan.FromMilliseconds(100),
-                automaticOperationTimeout: TimeSpan.FromMilliseconds(150),
+                providerCallTimeout: TimeSpan.Zero,
+                interactiveOperationTimeout: TimeSpan.Zero,
+                automaticOperationTimeout: TimeSpan.Zero,
                 maximumConcurrentProviders: 1);
             var policy = new BoundedSearchPolicy(options);
             var lateProvider = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
-            var first = policy.ExecuteAsync("site-a", _ => lateProvider.Task, CancellationToken.None)
-                .GetAwaiter().GetResult();
-            Assert(first.Status == BoundedSearchExecutionStatus.ProviderTimedOut && !first.Settlement.IsCompleted,
-                "a non-cooperative provider must time out without releasing its gate lease");
-
-            using (var waitingOperation = new CancellationTokenSource(TimeSpan.FromMilliseconds(35)))
+            var providerStarted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            using (var ownerCancellation = new CancellationTokenSource())
             {
-                var blocked = policy.ExecuteAsync("site-b", _ => Task.FromResult(2), waitingOperation.Token)
-                    .GetAwaiter().GetResult();
-                Assert(blocked.Status == BoundedSearchExecutionStatus.Cancelled,
-                    "a global provider gate wait must consume the enclosing operation deadline");
-            }
+                var firstTask = policy.ExecuteAsync("site-a", _ =>
+                {
+                    providerStarted.TrySetResult(true);
+                    return lateProvider.Task;
+                }, ownerCancellation.Token);
+                providerStarted.Task.GetAwaiter().GetResult();
+                Assert(!firstTask.IsCompleted,
+                    "a provider must remain pending until it settles or the caller explicitly cancels");
 
-            lateProvider.SetResult(1);
-            first.Settlement.GetAwaiter().GetResult();
+                ownerCancellation.Cancel();
+                var first = firstTask.GetAwaiter().GetResult();
+                Assert(first.Status == BoundedSearchExecutionStatus.Cancelled &&
+                       !first.Settlement.IsCompleted,
+                    "explicit cancellation must return promptly without releasing a non-cooperative provider lease");
+
+                using (var waitingCancellation = new CancellationTokenSource())
+                {
+                    var sameProvider = policy.ExecuteAsync(
+                        "site-a", _ => Task.FromResult(2), waitingCancellation.Token);
+                    var otherProvider = policy.ExecuteAsync(
+                        "site-b", _ => Task.FromResult(3), waitingCancellation.Token);
+                    Assert(!sameProvider.IsCompleted && !otherProvider.IsCompleted,
+                        "the per-provider and global gates must remain owned until the underlying task settles");
+                    waitingCancellation.Cancel();
+                    Assert(sameProvider.GetAwaiter().GetResult().Status ==
+                               BoundedSearchExecutionStatus.Cancelled &&
+                           otherProvider.GetAwaiter().GetResult().Status ==
+                               BoundedSearchExecutionStatus.Cancelled,
+                        "blocked gate waiters must still observe explicit cancellation");
+                }
+
+                lateProvider.SetResult(1);
+                first.Settlement.GetAwaiter().GetResult();
+            }
             var afterSettlement = policy.ExecuteAsync("site-b", _ => Task.FromResult(2), CancellationToken.None)
                 .GetAwaiter().GetResult();
             Assert(afterSettlement.Status == BoundedSearchExecutionStatus.Completed && afterSettlement.Result == 2,

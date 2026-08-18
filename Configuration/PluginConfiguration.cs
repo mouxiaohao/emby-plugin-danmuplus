@@ -14,9 +14,11 @@ namespace Emby.Plugin.Danmu.Configuration
         /// <summary>
         /// 版本信息
         /// </summary>
-        public string Version { get; } = "2.0.3r9";//Assembly.GetExecutingAssembly().GetName().Version.ToString();
+        public string Version { get; } = "2.0.5r1";//Assembly.GetExecutingAssembly().GetName().Version.ToString();
 
         public DandanOption Dandan { get; set; } = new DandanOption();
+
+        public TmdbOption Tmdb { get; set; } = new TmdbOption();
 
         /// <summary>
         /// 是否同时生成ASS格式弹幕.
@@ -167,5 +169,14 @@ namespace Emby.Plugin.Danmu.Configuration
         /// 中文简繁转换。0-不转换，1-转换为简体，2-转换为繁体
         /// </summary>
         public int ChConvert { get; set; } = 0;
+    }
+
+    public class TmdbOption
+    {
+        public bool UseAliasSearch { get; set; } = false;
+
+        public string ApiKey { get; set; } = string.Empty;
+
+        public string ReadAccessToken { get; set; } = string.Empty;
     }
 }

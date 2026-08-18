@@ -1,13 +1,15 @@
 ﻿/*
  * Emby.CustomCssJS: 电视剧/季/集/电影智能匹配并一键下载弹幕
- * 适用于 Emby 4.9.x + 本方案配套的 Emby.Plugin.Danmu 2.0.3r7 DLL
+ * 适用于 Emby 4.9.x + 本方案配套的 Emby.Plugin.Danmu 2.0.5r1 DLL
  */
 (function () {
     "use strict";
 
-    // V23 refreshes the installed UI while retaining the V21 mapping contract.
-    var INSTALL_FLAG = "__embyDanmuSmartMenuV23";
-    var MAPPING_PROTOCOL_VERSION = 21;
+    // V28 refreshes the installed UI together with the V22 mapping contract.
+    var INSTALL_FLAG = "__embyDanmuSmartMenuV28";
+    var MAPPING_PROTOCOL_VERSION = 22;
+    var DEFAULT_ZERO_OFFSET = "DefaultZeroOffset";
+    var EXPLICIT_ANCHOR = "ExplicitAnchor";
     var BUTTON_ID = "danmu-bulk-download";
     var activeDialogs = [];
     var dialogHistoryGeneration = 0;
@@ -412,7 +414,7 @@
             ".danmuSeasonProblem{padding:.75rem 0;border-bottom:1px solid rgba(255,255,255,.12)}",
             ".danmuSeasonSummary{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:.75rem;align-items:center;padding:.9rem;margin:.65rem 0;border:1px solid rgba(255,255,255,.16);border-radius:.45rem;background:rgba(255,255,255,.025)}",
             ".danmuSeasonSummary.matched{border-color:#2e7d32}.danmuSeasonSummary.unmatched{border-color:#c62828}.danmuSeasonSummaryTitle{font-weight:600}.danmuSeasonSummaryState{margin:.22rem 0;font-size:.92rem}.danmuSeasonSummary.matched .danmuSeasonSummaryState{color:#81c784}.danmuSeasonSummary.unmatched .danmuSeasonSummaryState{color:#ef9a9a}.danmuSeasonSummaryDetail{opacity:.78;font-size:.88rem;word-break:break-all}",
-            ".danmuCompositeSeason{margin:.7rem 0;padding:.8rem;border:1px solid rgba(255,255,255,.2);border-radius:.48rem;background:rgba(255,255,255,.02)}.danmuCompositeHeader{font-weight:600;margin-bottom:.45rem}.danmuCompositeHint,.danmuSeasonScopeSummary{opacity:.78;font-size:.88rem;margin:.25rem 0 .55rem}.danmuSeasonScopeSummary{padding:.45rem .55rem;border-radius:.3rem;background:rgba(255,255,255,.045)}.danmuVirtualSeason{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:.7rem;align-items:center;margin:.45rem 0;padding:.7rem;border-left:3px solid #666;border-radius:.35rem;background:rgba(255,255,255,.035)}.danmuVirtualSeason.matched{border-left-color:#2e7d32}.danmuVirtualSeason.unmatched{border-left-color:#ffb300}.danmuVirtualSeasonTitle{font-weight:600}.danmuVirtualSeasonDetail{opacity:.8;font-size:.88rem;overflow-wrap:anywhere}.danmuVirtualSeasonMappings{grid-column:1 / -1;min-width:0;max-width:100%;white-space:normal;overflow-wrap:anywhere}.danmuVirtualSeasonMappings summary{cursor:pointer}.danmuVirtualSeasonActions{grid-column:2;justify-self:end;display:flex;gap:.45rem}.danmuCompositeWarning{margin:.5rem 0;padding:.55rem .65rem;border-radius:.35rem;background:rgba(255,179,0,.15);color:#ffe082;font-size:.88rem}.danmuCompositeInputs{display:flex;flex-wrap:wrap;gap:.6rem;margin:.65rem 0}.danmuCompositeInputs label{display:flex;align-items:center;gap:.35rem;font-size:.9rem}.danmuCompositeInputs input{width:5.8rem;padding:.4rem;border:1px solid #777;border-radius:.3rem;background:#111;color:#fff}",
+            ".danmuCompositeSeason{margin:.7rem 0;padding:.8rem;border:1px solid rgba(255,255,255,.2);border-radius:.48rem;background:rgba(255,255,255,.02)}.danmuCompositeHeader{font-weight:600;margin-bottom:.45rem}.danmuEpisodeShortfallNotice{color:#ffd54f;font-size:.9rem;font-weight:600;margin:.25rem 0 .55rem}.danmuCompositeHint,.danmuSeasonScopeSummary{opacity:.78;font-size:.88rem;margin:.25rem 0 .55rem}.danmuSeasonScopeSummary{padding:.45rem .55rem;border-radius:.3rem;background:rgba(255,255,255,.045)}.danmuVirtualSeason{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:.7rem;align-items:center;margin:.45rem 0;padding:.7rem;border-left:3px solid #666;border-radius:.35rem;background:rgba(255,255,255,.035)}.danmuVirtualSeason.matched{border-left-color:#2e7d32}.danmuVirtualSeason.unmatched{border-left-color:#ffb300}.danmuVirtualSeasonTitle{font-weight:600}.danmuVirtualSeasonDetail{opacity:.8;font-size:.88rem;overflow-wrap:anywhere}.danmuVirtualSeasonMappings{grid-column:1 / -1;min-width:0;max-width:100%;white-space:normal;overflow-wrap:anywhere}.danmuVirtualSeasonMappings summary{cursor:pointer}.danmuVirtualSeasonActions{grid-column:2;justify-self:end;display:flex;gap:.45rem}.danmuCompositeWarning{margin:.5rem 0;padding:.55rem .65rem;border-radius:.35rem;background:rgba(255,179,0,.15);color:#ffe082;font-size:.88rem}.danmuCompositeInputs{display:flex;flex-wrap:wrap;gap:.6rem;margin:.65rem 0}.danmuCompositeInputs label{display:flex;align-items:center;gap:.35rem;font-size:.9rem}.danmuCompositeInputs input{width:5.8rem;padding:.4rem;border:1px solid #777;border-radius:.3rem;background:#111;color:#fff}",
             ".danmuProgressSeason{padding:.9rem;margin:.7rem 0;border:1px solid rgba(255,255,255,.14);border-radius:.45rem;background:rgba(255,255,255,.025)}",
             ".danmuProgressSeason.running{border-color:#00a4dc}.danmuProgressSeason.success{border-color:#2e7d32}.danmuProgressSeason.warning{border-color:#ffb300}.danmuProgressSeason.failed{border-color:#c62828}.danmuProgressSeason.cancelled{border-color:#777}",
             ".danmuProgressTitle{display:flex;justify-content:space-between;gap:1rem;font-weight:600}.danmuProgressMeta{opacity:.8;font-size:.9rem;margin:.3rem 0 .55rem}",
@@ -679,6 +681,12 @@
         return parameters;
     }
 
+    function parentTitleRematchParameters(season) {
+        var parameters = seasonRequestParameters(season);
+        parameters.parentTitleRematch = true;
+        return parameters;
+    }
+
     function seasonPlanGeneration(season) {
         var generation = value(season, "PlanGeneration", "planGeneration", null);
         var numeric = Number(generation);
@@ -744,13 +752,62 @@
         return parts.join("；");
     }
 
+    function nonNegativeCount(raw) {
+        var count = Number(raw);
+        return isFinite(count) && count > 0 ? Math.floor(count) : 0;
+    }
+
+    function seasonMappedEpisodeCount(season) {
+        var mapped = value(season, "MappedEpisodeCount", "mappedEpisodeCount", null);
+        if (mapped !== null && mapped !== undefined && mapped !== "") return nonNegativeCount(mapped);
+        var plan = compositePlan(season);
+        var mappings = compositeArray(plan, "Mappings", "mappings");
+        if (mappings.length) return mappings.length;
+        return nonNegativeCount(value(season, "EligibleEpisodeCount", "eligibleEpisodeCount", 0));
+    }
+
+    function seasonDisplayName(season) {
+        var name = String(value(season, "SeasonName", "seasonName", "") || "").trim();
+        if (name) return name;
+        var number = targetSeasonNumber(season);
+        return number === null ? "未命名季度" : "第 " + number + " 季";
+    }
+
+    function seasonLibraryContextLine(season) {
+        var seriesName = String(value(season, "SeriesName", "seriesName", "") || "").trim() || "未命名剧集";
+        var parts = ["库内信息：" + seriesName + " / " + seasonDisplayName(season)];
+        var year = value(season, "Year", "year", null);
+        if (year !== null && year !== undefined && year !== "") parts.push(String(year));
+        parts.push("本地 " + nonNegativeCount(value(season, "EpisodeCount", "episodeCount", 0)) + " 集");
+        parts.push("映射 " + seasonMappedEpisodeCount(season) + " 集");
+        return parts.join("，");
+    }
+
+    function seriesLibraryContextLine(seasons) {
+        var positive = (seasons || []).filter(function (season) {
+            return targetSeasonNumber(season) > 0;
+        });
+        var seriesName = "";
+        positive.some(function (season) {
+            seriesName = String(value(season, "SeriesName", "seriesName", "") || "").trim();
+            return Boolean(seriesName);
+        });
+        var totalEpisodes = positive.reduce(function (total, season) {
+            return total + nonNegativeCount(value(season, "EpisodeCount", "episodeCount", 0));
+        }, 0);
+        return "库内信息：" + (seriesName || "未命名剧集") + "，返回 " + positive.length +
+            " 季，本地共 " + totalEpisodes + " 集。";
+    }
+
     function discardIncompatibleSeasonDrafts(dialog, seasons, selections) {
         selections = selections || {};
         var contracts = selections.__mappingContracts || (selections.__mappingContracts = {});
         (seasons || []).forEach(function (season) {
             var key = seasonSelectionKey(season);
             var generation = seasonPlanGeneration(season);
-            var contract = hasCurrentMappingContract(season)
+            var contract = hasCurrentMappingContract(season) &&
+                serverCompositeAlignmentIntentsAreClosed(season) &&
+                manualCompositeAlignmentIntentsAreClosed(selections, season)
                 ? MAPPING_PROTOCOL_VERSION + ":" + generation : "";
             if (!contract || contracts[key] !== contract) {
                 delete selections[key];
@@ -791,13 +848,29 @@
         updateLabel();
     }
 
+    function manualKeywordParameters(parameters, input) {
+        if (!input || input.dataset.danmuExplicitKeyword !== "true") return null;
+        var keyword = String(input.value || "").trim();
+        if (!keyword) return null;
+        return Object.assign(rematchParameters(parameters), {
+            mode: "manual-keyword",
+            keyword: keyword
+        });
+    }
+
     function keywordRematchParameters(parameters, input) {
-        var keyword = String(input && input.value || "").trim();
-        var request = Object.assign({}, parameters || {});
         if (input && input.dataset.danmuExplicitKeyword === "true") {
-            request.keyword = keyword;
+            return manualKeywordParameters(parameters, input);
         }
-        return rematchParameters(request);
+        return rematchParameters(parameters);
+    }
+
+    function isManualKeyword(target) {
+        return String(value(target, "MatchIntent", "matchIntent", "") || "") === "manual-keyword";
+    }
+
+    function parentTitleRematchAvailable(target) {
+        return value(target, "ParentTitleRematchAvailable", "parentTitleRematchAvailable", false) === true;
     }
 
     function matchOrigin(target) {
@@ -937,10 +1010,20 @@
         return "匹配分：" + text + "（" + scoreOriginLabel(origin) + "）";
     }
 
+    function isTmdbSearchDiagnostic(entry) {
+        var provider = normalizeDecisionCode(value(entry,
+            "Provider", "provider", value(entry, "ProviderName", "providerName", "")));
+        return provider === "tmdb" || provider === "tmdbalias" || provider.indexOf("tmdb-") === 0;
+    }
+
     function searchDiagnosticsLine(target) {
         var diagnostics = value(target, "SearchCompletionDiagnostics", "searchCompletionDiagnostics", []) || [];
+        var manualKeyword = isManualKeyword(target);
+        var suppressTmdb = parentTitleRematchAvailable(target);
         var incomplete = diagnostics.filter(function (entry) {
-            return normalizeDecisionCode(value(entry, "Status", "status", "")) !== "completed";
+            if (suppressTmdb && isTmdbSearchDiagnostic(entry)) return false;
+            var status = normalizeDecisionCode(value(entry, "Status", "status", ""));
+            return status !== "completed" && (!manualKeyword || status !== "cancelled");
         });
         if (!incomplete.length) return "";
         return "搜索诊断：" + incomplete.map(function (entry) {
@@ -952,6 +1035,7 @@
     }
 
     function hasBackendMatch(target) {
+        if (isManualKeyword(target)) return false;
         var origin = matchOrigin(target).toLowerCase();
         var status = String(value(target, "Status", "status", "") || "").trim().toLowerCase();
         if (["ambiguous", "no_match", "not_found", "notfound", "failed", "unsupported", "unmatched"].indexOf(status) >= 0) {
@@ -962,12 +1046,63 @@
 
     function candidateLine(candidate) {
         var site = value(candidate, "SiteName", "siteName", value(candidate, "Site", "site", "未知网站"));
-        var name = value(candidate, "Name", "name", "未命名项目");
-        var year = value(candidate, "Year", "year", null);
+        var source = value(candidate, "SourceMetadata", "sourceMetadata", null);
+        var name = value(source, "Title", "title", value(candidate, "Name", "name", "未命名项目"));
+        var year = value(source, "Year", "year", value(candidate, "Year", "year", null));
         var episodes = value(candidate, "EpisodeSize", "episodeSize", 0);
         var score = matchScoreLine(candidate);
         return site + "｜" + name + "｜" + (year || "年份未知") + "｜" +
             (episodes > 0 ? episodes + " 集" : "集数未知") + (score ? "｜" + score : "");
+    }
+
+    function candidateReasonLine(candidate) {
+        var reason = boundedText(value(candidate, "Reason", "reason", ""));
+        return reason ? "评分理由：" + reason : "";
+    }
+
+    function manualKeywordCandidateLine(candidate) {
+        var line = candidateLine(candidate);
+        var reason = candidateReasonLine(candidate);
+        return line + (reason ? "｜" + reason : "");
+    }
+
+    function normalizedDisplayIdentity(text) {
+        var normalized = String(text || "");
+        if (normalized.normalize) {
+            try { normalized = normalized.normalize("NFKC"); } catch (error) { /* legacy WebView */ }
+        }
+        return normalized.trim().replace(/\s+/g, " ").toLocaleLowerCase();
+    }
+
+    function movieCandidateHeading(candidate, detail, partTitle) {
+        var source = value(detail, "SourceMetadata", "sourceMetadata",
+            value(candidate, "SourceMetadata", "sourceMetadata", null));
+        var site = value(candidate, "SiteName", "siteName", value(candidate, "Site", "site", "未知网站"));
+        // candidate.Name may describe the selected leaf (for example, "正片"),
+        // so only server-owned SourceMetadata may be presented as the parent title.
+        var title = String(value(source, "Title", "title", "") || "").trim();
+        var year = value(source, "Year", "year", null);
+        var category = String(value(source, "Category", "category", "") || "").trim();
+        var selectedPart = String(partTitle || "").trim();
+        var components = [site];
+        if (title) {
+            components.push(title + (year ? "（" + year + "）" : ""));
+            if (category) components.push(category);
+        }
+        if (selectedPart && (!title || normalizedDisplayIdentity(selectedPart) !== normalizedDisplayIdentity(title))) {
+            components.push(selectedPart);
+        }
+        return components.join(" · ");
+    }
+
+    function manualKeywordMovieCandidateHeading(candidate) {
+        var source = value(candidate, "SourceMetadata", "sourceMetadata", null);
+        var sourceTitle = String(value(source, "Title", "title", "") || "").trim();
+        if (sourceTitle) return movieCandidateHeading(candidate, null, "");
+        var site = String(value(candidate, "SiteName", "siteName",
+            value(candidate, "Site", "site", "未知网站")) || "未知网站");
+        var name = String(value(candidate, "Name", "name", "") || "").trim() || "未命名项目";
+        return site + " · " + name;
     }
 
     function beginCandidateDetailGeneration(dialog, targetId, candidates, serverGeneration) {
@@ -987,7 +1122,8 @@
 
     function candidateDetailState(dialog, targetId, candidate, generation) {
         var key = [targetId || "", value(candidate, "Site", "site", ""),
-            value(candidate, "Id", "id", ""), generation].join("::");
+            value(candidate, "Id", "id", ""),
+            value(candidate, "SelectionEvidenceToken", "selectionEvidenceToken", ""), generation].join("::");
         if (!dialog.candidateDetails[key]) {
             dialog.candidateDetails[key] = { status: "idle", expanded: false, rows: [], message: "" };
         }
@@ -1119,8 +1255,10 @@
         var start = ordered.findIndex(function (episode) {
             return String(value(episode, "ItemId", "itemId", "") || "") === startId;
         });
-        var requested = Math.max(1, Number(value(selection, "RequestedEpisodeCount", "requestedEpisodeCount", 0)) || 1);
-        return start < 0 ? [] : ordered.slice(start, start + requested).map(function (episode) {
+        if (start < 0) return [];
+        var requested = Number(value(selection, "RequestedEpisodeCount", "requestedEpisodeCount", 0));
+        var end = requested > 0 ? Math.min(ordered.length, start + requested) : ordered.length;
+        return ordered.slice(start, end).map(function (episode) {
             return String(value(episode, "ItemId", "itemId", "") || "");
         }).filter(Boolean);
     }
@@ -1129,8 +1267,17 @@
         var targets = {};
         (localItemIds || []).forEach(function (id) { targets[String(id)] = true; });
         var result = { kept: [], removed: [] };
+        var hasExactStart = (selections || []).some(function (selection) {
+            return Boolean(targets[String(value(selection,
+                "LocalStartEpisodeItemId", "localStartEpisodeItemId", "") || "")]);
+        });
         (selections || []).forEach(function (selection) {
-            var overlaps = selectionLocalEpisodeItemIds(season, selection).some(function (id) { return targets[id]; });
+            var exactStart = Boolean(targets[String(value(selection,
+                "LocalStartEpisodeItemId", "localStartEpisodeItemId", "") || "")]);
+            var overlaps = exactStart || (!hasExactStart &&
+                selectionLocalEpisodeItemIds(season, selection).some(function (id) {
+                    return targets[id];
+                }));
             result[overlaps ? "removed" : "kept"].push(selection);
         });
         return result;
@@ -1214,15 +1361,17 @@
             value(season, "SeasonName", "seasonName", item && item.Name || "") || "").trim();
     }
 
-    function temporaryRangeSearchParameters(dialog, item, season, group, selections, keyword) {
+    function temporaryRangeSearchParameters(dialog, item, season, group, selections, keyword, input) {
         var parameters = compositeDraftParameters(dialog, season, seasonRequestParameters(season));
         parameters.searchScope = "temporary-range";
         parameters.compositeStartEpisodeItemId = value(group.episodes[0], "ItemId", "itemId", "");
         parameters.compositeEpisodeCount = String(group.episodes.length);
         parameters.compositeSelections = JSON.stringify(compositeRequestSelections(selections, season));
         parameters.compositePlan = "true";
-        parameters.keyword = String(keyword || "").trim();
-        return rematchParameters(parameters);
+        parameters.keyword = String(keyword || "");
+        return input && input.dataset.danmuExplicitKeyword === "true"
+            ? manualKeywordParameters(parameters, input)
+            : rematchParameters(parameters);
     }
 
     function cloneDialogState(value) {
@@ -1260,6 +1409,7 @@
         dialog.candidateDetails = cloneDialogState(draft.candidateDetails);
         dialog.candidateDetailFingerprint = draft.candidateDetailFingerprint || "";
         dialog.candidateDetailGeneration = draft.candidateDetailGeneration || 0;
+        discardIncompatibleSeasonDrafts(dialog, [seasons[seasonIndex]], selections);
     }
 
     function temporaryRangeStateKey(season, group) {
@@ -1272,7 +1422,10 @@
     function temporaryRangeState(dialog, season, group) {
         var store = dialog.temporaryRangeCandidates || (dialog.temporaryRangeCandidates = {});
         var key = temporaryRangeStateKey(season, group);
-        if (!store[key]) store[key] = { candidates: [], message: "", candidateGeneration: "" };
+        if (!store[key]) store[key] = {
+            candidates: [], message: "", candidateGeneration: "", matchIntent: "",
+            searchCompletionDiagnostics: []
+        };
         return store[key];
     }
 
@@ -1328,6 +1481,17 @@
             "tencent": "腾讯视频", "tencentid": "腾讯视频",
             "mgtv": "芒果TV", "mgtvid": "芒果TV"
         }[provider] || "来源网站";
+    }
+
+    function sourceMetadataPublicLabel(metadata) {
+        metadata = metadata || {};
+        var title = boundedText(value(metadata, "Title", "title", ""));
+        var rawYear = value(metadata, "Year", "year", null);
+        var numericYear = Number(rawYear);
+        var year = rawYear === null || rawYear === undefined || rawYear === "" ||
+            !isFinite(numericYear) || numericYear < 1000 || numericYear > 9999
+            ? "" : String(Math.floor(numericYear));
+        return title + (title && year ? "（" + year + "）" : year);
     }
 
     function sourceEpisodePublicLabel(mapping, fallbackNumber) {
@@ -1445,6 +1609,7 @@
                         ProviderId: value(group, "Site", "site", ""),
                         MediaId: value(group, "CandidateId", "candidateId", "")
                     }, sourceStart: value(group, "SourceStartEpisodeNumber", "sourceStartEpisodeNumber", null),
+                        sourceMetadata: value(group, "SourceMetadata", "sourceMetadata", null),
                         origin: value(group, "MatchOrigin", "matchOrigin", ""),
                         MatchScore: value(group, "MatchScore", "matchScore", null),
                         ScoreOrigin: value(group, "ScoreOrigin", "scoreOrigin", ""),
@@ -1500,6 +1665,8 @@
                 current = { kind: "mapped", key: key, source: value(mapping, "Source", "source", {}),
                     origin: mappingOrigin, MatchScore: mappingScore,
                     ScoreOrigin: scoreOrigin,
+                    sourceMetadata: value(mapping, "SourceMetadata", "sourceMetadata",
+                        value(previewGroup, "SourceMetadata", "sourceMetadata", null)),
                     mappings: [], episodes: [], index: index };
                 groups.push(current);
             }
@@ -1532,6 +1699,8 @@
     }
 
     function compositeHasDownloadableMappings(season, selections) {
+        if (!serverCompositeAlignmentIntentsAreClosed(season) ||
+            !manualCompositeAlignmentIntentsAreClosed(selections, season)) return false;
         var plan = compositePlan(season);
         var eligibleIds = eligibleCompositeItemIds(season);
         var exactGroups = compositeArray(season, "CompositeGroups", "compositeGroups").some(function (group) {
@@ -1560,8 +1729,178 @@
         return isForbiddenBatchOrigin(origin);
     }
 
+    function closedAlignmentIntent(intent) {
+        var normalized = String(intent || "");
+        if (normalized === DEFAULT_ZERO_OFFSET || normalized === EXPLICIT_ANCHOR) {
+            return normalized;
+        }
+        return "";
+    }
+
+    function defaultAlignmentIntentForLocalStart(season, localStartEpisodeItemId) {
+        var ordered = compositeOrderedEpisodesForSeason(season);
+        var firstLocalId = ordered.length
+            ? String(value(ordered[0], "ItemId", "itemId", "") || "") : "";
+        var localStart = String(localStartEpisodeItemId || "");
+        return firstLocalId && localStart && firstLocalId !== localStart
+            ? EXPLICIT_ANCHOR : DEFAULT_ZERO_OFFSET;
+    }
+
+    function sourceStartAlignmentIntent(sourceStart, season, group, existingSelection) {
+        if (existingSelection) {
+            var existingIntent = closedAlignmentIntent(value(
+                existingSelection, "AlignmentIntent", "alignmentIntent", ""));
+            if (!existingIntent) return "";
+            return sourceStart && sourceStart.dataset.danmuSourceStartDirty === "true"
+                ? EXPLICIT_ANCHOR : existingIntent;
+        }
+        if (sourceStart && sourceStart.dataset.danmuSourceStartDirty === "true") {
+            return EXPLICIT_ANCHOR;
+        }
+        var episodes = group && group.episodes || [];
+        var localStart = episodes.length
+            ? value(episodes[0], "ItemId", "itemId", "") : "";
+        return defaultAlignmentIntentForLocalStart(season, localStart);
+    }
+
+    function sourceStartEpisodeIdForSubmission(sourceStart, existingSelection) {
+        if (sourceStart && sourceStart.dataset.danmuSourceStartDirty === "true") {
+            return "";
+        }
+        return value(existingSelection,
+            "SourceStartEpisodeId", "sourceStartEpisodeId", "");
+    }
+
+    function hasOrdinaryServerCompositeMapping(season) {
+        var eligibleIds = eligibleCompositeItemIds(season);
+        var plan = compositePlan(season);
+        if (compositeArray(plan, "Mappings", "mappings").some(function (mapping) {
+            var localId = String(value(mapping,
+                "LocalEpisodeItemId", "localEpisodeItemId", "") || "");
+            var source = value(mapping, "Source", "source", null);
+            return Boolean(eligibleIds[localId]) && source &&
+                !isDirectCompositeOrigin(value(mapping, "Origin", "origin", ""));
+        })) return true;
+        return compositeArray(season, "CompositeGroups", "compositeGroups").some(function (group) {
+            return !value(group, "IsTemporary", "isTemporary", false) &&
+                !isDirectCompositeOrigin(value(group, "MatchOrigin", "matchOrigin", "")) &&
+                value(group, "Site", "site", "") && value(group, "CandidateId", "candidateId", "") &&
+                compositeArray(group, "Episodes", "episodes").some(function (episode) {
+                    var id = String(value(episode, "ItemId", "itemId", "") || "");
+                    return Boolean(eligibleIds[id]) ||
+                        (!plan && isEligibleCompositeEpisode(season, episode));
+                });
+        });
+    }
+
+    function canonicalCompositeSelectionState(season) {
+        if (!hasCurrentMappingContract(season)) return { valid: false, selections: [] };
+        var plan = compositePlan(season);
+        var groups = compositeArray(season, "CompositeGroups", "compositeGroups");
+        var compositeResult = Boolean(plan) || groups.length > 0 ||
+            Boolean(value(season, "RequiresCompositeMapping", "requiresCompositeMapping", false));
+        if (!compositeResult) return { valid: true, selections: [] };
+
+        var hasPascal = season && Object.prototype.hasOwnProperty.call(season, "CompositeSelections");
+        var hasCamel = season && Object.prototype.hasOwnProperty.call(season, "compositeSelections");
+        if (hasPascal === hasCamel) return { valid: false, selections: [] };
+        var raw = hasPascal ? season.CompositeSelections : season.compositeSelections;
+        if (!Array.isArray(raw)) return { valid: false, selections: [] };
+
+        var generation = seasonPlanGeneration(season);
+        var seenStarts = {};
+        var selections = [];
+        var selectionFields = [
+            ["LocalStartEpisodeItemId", "localStartEpisodeItemId"],
+            ["RequestedEpisodeCount", "requestedEpisodeCount"],
+            ["Site", "site"], ["CandidateId", "candidateId"],
+            ["SourceStartEpisodeId", "sourceStartEpisodeId"],
+            ["SourceStartEpisodeNumber", "sourceStartEpisodeNumber"],
+            ["MatchOrigin", "matchOrigin"],
+            ["SelectionEvidenceToken", "selectionEvidenceToken"],
+            ["AlignmentIntent", "alignmentIntent"],
+            ["MappingProtocolVersion", "mappingProtocolVersion"],
+            ["PlanGeneration", "planGeneration"]
+        ];
+        var allowedSelectionFields = {};
+        selectionFields.forEach(function (names) {
+            allowedSelectionFields[names[0]] = true;
+            allowedSelectionFields[names[1]] = true;
+        });
+        for (var index = 0; index < raw.length; index++) {
+            var selection = raw[index];
+            if (!selection || typeof selection !== "object" || Array.isArray(selection)) {
+                return { valid: false, selections: [] };
+            }
+            if (Object.keys(selection).some(function (key) { return !allowedSelectionFields[key]; }) ||
+                selectionFields.some(function (names) {
+                    var pascal = Object.prototype.hasOwnProperty.call(selection, names[0]);
+                    var camel = Object.prototype.hasOwnProperty.call(selection, names[1]);
+                    return pascal === camel;
+                })) return { valid: false, selections: [] };
+            var localStart = value(selection,
+                "LocalStartEpisodeItemId", "localStartEpisodeItemId", null);
+            var requested = value(selection, "RequestedEpisodeCount", "requestedEpisodeCount", null);
+            var site = value(selection, "Site", "site", null);
+            var candidateId = value(selection, "CandidateId", "candidateId", null);
+            var sourceStartId = value(selection,
+                "SourceStartEpisodeId", "sourceStartEpisodeId", null);
+            var sourceStartNumber = value(selection,
+                "SourceStartEpisodeNumber", "sourceStartEpisodeNumber", null);
+            var matchOrigin = value(selection, "MatchOrigin", "matchOrigin", null);
+            var evidence = value(selection,
+                "SelectionEvidenceToken", "selectionEvidenceToken", null);
+            var alignmentIntent = value(selection, "AlignmentIntent", "alignmentIntent", null);
+            var protocol = value(selection,
+                "MappingProtocolVersion", "mappingProtocolVersion", null);
+            var planGeneration = value(selection, "PlanGeneration", "planGeneration", null);
+            if (typeof localStart !== "string" || !localStart || seenStarts[localStart] ||
+                typeof requested !== "number" || !Number.isSafeInteger(requested) || requested < 0 ||
+                typeof site !== "string" || !site || typeof candidateId !== "string" || !candidateId ||
+                typeof sourceStartId !== "string" || typeof sourceStartNumber !== "number" ||
+                !Number.isSafeInteger(sourceStartNumber) || sourceStartNumber < 0 ||
+                typeof matchOrigin !== "string" || !matchOrigin || typeof evidence !== "string" ||
+                !closedAlignmentIntent(alignmentIntent) || protocol !== MAPPING_PROTOCOL_VERSION ||
+                typeof planGeneration !== "number" || planGeneration !== generation) {
+                return { valid: false, selections: [] };
+            }
+            seenStarts[localStart] = true;
+            selections.push({
+                LocalStartEpisodeItemId: localStart,
+                RequestedEpisodeCount: requested,
+                Site: site,
+                CandidateId: candidateId,
+                SourceStartEpisodeId: sourceStartId,
+                SourceStartEpisodeNumber: sourceStartNumber,
+                MatchOrigin: matchOrigin,
+                SelectionEvidenceToken: evidence,
+                AlignmentIntent: alignmentIntent,
+                MappingProtocolVersion: protocol,
+                PlanGeneration: planGeneration
+            });
+        }
+        if (!selections.length && hasOrdinaryServerCompositeMapping(season)) {
+            return { valid: false, selections: [] };
+        }
+        return { valid: true, selections: selections };
+    }
+
+    function serverCompositeAlignmentIntentsAreClosed(season) {
+        return canonicalCompositeSelectionState(season).valid;
+    }
+
+    function manualCompositeAlignmentIntentsAreClosed(selections, season) {
+        return compositeSelectionStore(selections || {}, season, false).every(function (selection) {
+            return Boolean(closedAlignmentIntent(value(
+                selection, "AlignmentIntent", "alignmentIntent", "")));
+        });
+    }
+
     function compactCompositeSelection(localStart, requestedCount, site, candidateId,
-        sourceStartEpisodeId, sourceStartEpisodeNumber, matchOrigin, selectionEvidenceToken, planGeneration) {
+        sourceStartEpisodeId, sourceStartEpisodeNumber, matchOrigin, selectionEvidenceToken,
+        alignmentIntent, planGeneration) {
+        var closedIntent = closedAlignmentIntent(alignmentIntent);
+        if (!closedIntent) return null;
         return {
             LocalStartEpisodeItemId: localStart || "",
             RequestedEpisodeCount: Number(requestedCount) || 0,
@@ -1572,90 +1911,24 @@
                 ? 0 : Number(sourceStartEpisodeNumber) || 0,
             MatchOrigin: matchOrigin || "manual",
             SelectionEvidenceToken: selectionEvidenceToken || "",
+            AlignmentIntent: closedIntent,
             MappingProtocolVersion: MAPPING_PROTOCOL_VERSION,
             PlanGeneration: planGeneration
         };
     }
 
     function serverCompositeRequestSelections(season) {
-        if (!hasCurrentMappingContract(season)) return [];
-        var previewGroups = compositeArray(season, "CompositeGroups", "compositeGroups");
-        var eligibleIds = eligibleCompositeItemIds(season);
-        if (previewGroups.length) {
-            return previewGroups.filter(function (group) {
-                var episodes = compositeArray(group, "Episodes", "episodes");
-                return !value(group, "IsTemporary", "isTemporary", false) &&
-                    !isDirectCompositeOrigin(value(group, "MatchOrigin", "matchOrigin", "")) &&
-                    episodes.length > 0 && episodes.every(function (episode) {
-                        var id = String(value(episode, "ItemId", "itemId", "") || "");
-                        return Boolean(eligibleIds[id]) ||
-                            (!compositePlan(season) && isEligibleCompositeEpisode(season, episode));
-                    }) &&
-                    value(group, "Site", "site", "") && value(group, "CandidateId", "candidateId", "");
-            }).map(function (group) {
-                var episodes = compositeArray(group, "Episodes", "episodes");
-                return compactCompositeSelection(
-                    value(episodes[0], "ItemId", "itemId", ""),
-                    episodes.length,
-                    value(group, "Site", "site", ""),
-                    value(group, "CandidateId", "candidateId", ""),
-                    value(group, "SourceStartEpisodeId", "sourceStartEpisodeId", ""),
-                    value(episodes[0], "SourceEpisodeNumber", "sourceEpisodeNumber", null),
-                    value(group, "MatchOrigin", "matchOrigin", ""),
-                    value(group, "SelectionEvidenceToken", "selectionEvidenceToken", ""),
-                    seasonPlanGeneration(season)
-                );
-            });
-        }
-
-        var plan = compositePlan(season);
-        var ordered = eligibleCompositeEpisodes(season, orderedCompositeEpisodes(plan));
-        var byLocalId = {};
-        compositeArray(plan, "Mappings", "mappings").forEach(function (mapping) {
-            byLocalId[value(mapping, "LocalEpisodeItemId", "localEpisodeItemId", "")] = mapping;
-        });
-        var groups = [];
-        var current = null;
-        ordered.forEach(function (episode, index) {
-            var mapping = byLocalId[value(episode, "ItemId", "itemId", "")];
-            var origin = value(mapping, "Origin", "origin", "");
-            var source = value(mapping, "Source", "source", null);
-            if (!mapping || !source || isDirectCompositeOrigin(origin)) {
-                current = null;
-                return;
-            }
-            var key = sourceKey(source) + "\u001f" + normalizeDecisionCode(origin);
-            if (!current || current.key !== key || current.lastIndex + 1 !== index) {
-                current = { key: key, lastIndex: index, mappings: [] };
-                groups.push(current);
-            }
-            current.lastIndex = index;
-            current.mappings.push(mapping);
-        });
-        return groups.filter(function (group) {
-            var first = group.mappings[0] || {};
-            var source = value(first, "Source", "source", {});
-            return value(first, "LocalEpisodeItemId", "localEpisodeItemId", "") &&
-                value(source, "ProviderId", "providerId", "") && value(source, "MediaId", "mediaId", "");
-        }).map(function (group) {
-            var first = group.mappings[0];
-            var source = value(first, "Source", "source", {});
-            return compactCompositeSelection(
-                value(first, "LocalEpisodeItemId", "localEpisodeItemId", ""),
-                group.mappings.length,
-                value(source, "ProviderId", "providerId", ""),
-                value(source, "MediaId", "mediaId", ""),
-                value(first, "SourceEpisodeId", "sourceEpisodeId", ""),
-                value(first, "SourceEpisodeNumber", "sourceEpisodeNumber", null),
-                value(first, "Origin", "origin", ""),
-                value(first, "SelectionEvidenceToken", "selectionEvidenceToken", ""),
-                seasonPlanGeneration(season)
-            );
-        });
+        var state = canonicalCompositeSelectionState(season);
+        return state.valid ? state.selections : [];
     }
 
     function compositeRequestSelections(selections, season) {
         if (!hasCurrentMappingContract(season)) return [];
+        if (!serverCompositeAlignmentIntentsAreClosed(season) ||
+            !manualCompositeAlignmentIntentsAreClosed(selections, season)) {
+            clearCompositeSelectionStore(selections, season);
+            return [];
+        }
         // Only submit choices still attached to an unmatched run in the current
         // server plan. A refreshed preview can turn an old local range into an
         // exact mapping; keeping that stale browser choice would make the
@@ -1672,10 +1945,20 @@
                 value(selection, "SourceStartEpisodeNumber", "sourceStartEpisodeNumber", null),
                 "manual",
                 value(selection, "SelectionEvidenceToken", "selectionEvidenceToken", ""),
+                value(selection, "AlignmentIntent", "alignmentIntent", ""),
                 seasonPlanGeneration(season)
             );
-        });
+        }).filter(Boolean);
         return verified.concat(manual);
+    }
+
+    function authoritativeCompositeFailureMessage(confirmed) {
+        var fallback = "服务器没有返回权威复合季映射";
+        if (!confirmed) return fallback;
+        var message = boundedText(value(confirmed, "Message", "message", ""));
+        if (message) return message;
+        var reason = boundedText(value(confirmed, "DecisionReason", "decisionReason", ""));
+        return reason ? boundedText("服务器拒绝复合季映射：" + reason) : fallback;
     }
 
     async function requestAuthoritativeCompositePlan(dialog, item, season, compactSelections) {
@@ -1691,7 +1974,7 @@
         if (!preview) throw new Error("逐集映射验证已取消或失败");
         var confirmed = (value(preview, "Seasons", "seasons", []) || [])[0];
         if (!confirmed || !compositePlan(confirmed)) {
-            throw new Error("服务器没有返回权威复合季映射");
+            throw new Error(authoritativeCompositeFailureMessage(confirmed));
         }
         return confirmed;
     }
@@ -1756,6 +2039,7 @@
     }
 
     function selectedCandidate(season) {
+        if (isManualKeyword(season)) return null;
         var selectedId = value(season, "SelectedId", "selectedId", "");
         var selectedSite = value(season, "SelectedSite", "selectedSite", "");
         if (!selectedId || !selectedSite) return null;
@@ -1829,11 +2113,15 @@
         background.className = "danmuSmartButton";
         background.textContent = "后台下载";
         background.disabled = true;
+        var replay = document.createElement("button");
+        replay.className = "danmuSmartButton";
+        replay.textContent = "忽略跳过再次下载";
+        replay.style.display = "none";
         var stop = document.createElement("button");
         stop.className = "danmuSmartButton danger";
         stop.textContent = "强制停止全部下载";
         stop.disabled = true;
-        dialog.footer.append(background, stop);
+        dialog.footer.append(replay, background, stop);
 
         var detached = false;
         var stopRequested = false;
@@ -1845,6 +2133,49 @@
             return status === "completed" || status === "completed_with_warnings" ||
                 status === "completed_with_errors" ||
                 status === "failed" || status === "cancelled" || status === "not_found";
+        }
+
+        function isReplayTerminal(task) {
+            var status = value(task, "Status", "status", "");
+            return status === "completed" || status === "completed_with_warnings" ||
+                status === "completed_with_errors";
+        }
+
+        function replayEligibleCount(task) {
+            return nonNegativeCount(value(task, "SevenDayReplayEligibleCount", "sevenDayReplayEligibleCount",
+                value(task, "ReplayEligibleCount", "replayEligibleCount",
+                    value(task, "SevenDaySkippedReplayEligibleCount", "sevenDaySkippedReplayEligibleCount", 0))));
+        }
+
+        function serverAdvertisesSevenDayReplay(task) {
+            var eligible = value(task, "CanReplaySevenDaySkipped", "canReplaySevenDaySkipped",
+                value(task, "SevenDayReplayEligible", "sevenDayReplayEligible",
+                    value(task, "ReplayEligible", "replayEligible", false)));
+            return (eligible === true || String(eligible).toLowerCase() === "true") && replayEligibleCount(task) > 0;
+        }
+
+        function replayableEntries() {
+            if (!taskEntries.length || !taskEntries.every(function (entry) {
+                return isReplayTerminal(entry.task);
+            })) return [];
+            return taskEntries.filter(function (entry) {
+                return !entry.replaySubmitted && entry.taskId === entry.originTaskId &&
+                    serverAdvertisesSevenDayReplay(entry.task);
+            });
+        }
+
+        function updateReplayButton() {
+            var entries = replayableEntries();
+            if (!entries.length) {
+                replay.style.display = "none";
+                return;
+            }
+            var count = entries.reduce(function (total, entry) {
+                return total + replayEligibleCount(entry.task);
+            }, 0);
+            replay.style.display = "";
+            replay.disabled = false;
+            replay.textContent = "忽略跳过再次下载（" + count + " 集）";
         }
 
         function updateView(season, task, entry) {
@@ -1905,6 +2236,7 @@
                         if (!isTerminal(value(entry.task, "Status", "status", ""))) {
                             await monitorTasks();
                         } else {
+                            updateReplayButton();
                             notify(value(entry.task, "Message", "message", "未能启动单集重试"), true);
                         }
                     } catch (error) {
@@ -1945,6 +2277,50 @@
             }
         });
 
+        replay.addEventListener("click", async function () {
+            if (replay.disabled) return;
+            var entries = replayableEntries();
+            if (!entries.length) {
+                updateReplayButton();
+                return;
+            }
+            replay.disabled = true;
+            replay.textContent = "正在提交再次下载…";
+            var accepted = 0;
+            var failures = [];
+            for (var entryIndex = 0; entryIndex < entries.length; entryIndex++) {
+                var entry = entries[entryIndex];
+                try {
+                    var child = await api("all", "ReplaySevenDaySkipped", { taskId: entry.originTaskId });
+                    var childTaskId = value(child, "TaskId", "taskId", "");
+                    var childOriginTaskId = value(child, "ReplayOriginTaskId", "replayOriginTaskId", "");
+                    if (!childTaskId || childTaskId === entry.originTaskId ||
+                        childOriginTaskId !== entry.originTaskId ||
+                        value(child, "Status", "status", "") === "failed") {
+                        throw new Error(value(child, "Message", "message", "未能创建再次下载任务"));
+                    }
+                    entry.taskId = childTaskId;
+                    entry.task = child;
+                    entry.pollErrors = 0;
+                    entry.replaySubmitted = true;
+                    updateView(entry.season, child, entry);
+                    accepted++;
+                } catch (error) {
+                    failures.push(publicErrorMessage(error));
+                }
+            }
+            if (!accepted) {
+                updateReplayButton();
+                notify("忽略跳过再次下载提交失败：" + (failures[0] || "服务器未接受请求"), true);
+                return;
+            }
+            replay.style.display = "none";
+            notify(failures.length
+                ? "已提交 " + accepted + " 个再次下载任务，" + failures.length + " 个提交失败。"
+                : "已提交 " + accepted + " 个再次下载任务。", failures.length > 0);
+            await monitorTasks();
+        });
+
         for (var index = 0; index < seasons.length; index++) {
             var season = seasons[index];
             var key = seasonSelectionKey(season);
@@ -1974,7 +2350,14 @@
                 if (!taskId || value(task, "Status", "status", "") === "failed") {
                     throw new Error(value(task, "Message", "message", "无法启动本季下载任务"));
                 }
-                var entry = { season: season, taskId: taskId, task: task, pollErrors: 0 };
+                var entry = {
+                    season: season,
+                    taskId: taskId,
+                    originTaskId: taskId,
+                    task: task,
+                    pollErrors: 0,
+                    replaySubmitted: false
+                };
                 taskEntries.push(entry);
                 updateView(season, task, entry);
             } catch (error) {
@@ -2082,6 +2465,7 @@
             background.style.display = "none";
             stop.style.display = "none";
             dialog.closable = true;
+            updateReplayButton();
         }
 
         await monitorTasks();
@@ -2122,12 +2506,20 @@
         container.className = "danmuCompositeSeason";
         var header = document.createElement("div");
         header.className = "danmuCompositeHeader";
-        header.textContent = value(season, "SeasonName", "seasonName", "未命名季度") + "（库内 " +
-            value(season, "EpisodeCount", "episodeCount", 0) + " 集）";
-        var hint = document.createElement("div");
-        hint.className = "danmuCompositeHint";
-        hint.textContent = "该季包含多个来源或存在未识别区间；下列卡片仅用于本次下载映射，不会改变 Emby 的季归属。";
-        container.append(header, hint);
+        header.textContent = seasonLibraryContextLine(season);
+        container.appendChild(header);
+        if (!serverCompositeAlignmentIntentsAreClosed(season)) {
+            var staleIntent = document.createElement("div");
+            staleIntent.className = "danmuAlignmentIntentStale";
+            staleIntent.textContent = "映射对齐信息已过期，请重新预览后再下载。";
+            container.appendChild(staleIntent);
+        }
+        if (value(season, "HasVerifiedSourceEpisodeSurplus", "hasVerifiedSourceEpisodeSurplus", false) === true) {
+            var shortfall = document.createElement("div");
+            shortfall.className = "danmuEpisodeShortfallNotice";
+            shortfall.textContent = "库内集数少于来源集数";
+            container.appendChild(shortfall);
+        }
         var scopeLine = scopeSummaryLine(season);
         if (scopeLine) {
             var scope = document.createElement("div");
@@ -2211,6 +2603,11 @@
                 detail.textContent = "手动匹配 · " + providerDisplayName(manualSource);
             } else {
                 detail.textContent = "精确集映射 · " + providerDisplayName(group.source);
+            }
+            var sourceMetadataLabel = sourceMetadataPublicLabel(group.sourceMetadata ||
+                value(group.selection, "SourceMetadata", "sourceMetadata", null));
+            if (sourceMetadataLabel && group.kind !== "unmatched") {
+                detail.textContent += " · 来源标题：" + sourceMetadataLabel;
             }
             var groupScore = group.kind === "mapped" ? matchScoreLine(group) :
                 (group.kind === "manual" ? matchScoreLine(group.selection) : "");
@@ -2306,6 +2703,16 @@
         dialog.body.appendChild(container);
     }
 
+    function appendCompositeMappingHint(container, seasons) {
+        if (!(seasons || []).some(function (season) {
+            return !parentTitleRematchAvailable(season) && hasCompositePlan(season);
+        })) return;
+        var hint = document.createElement("div");
+        hint.className = "danmuCompositeHint";
+        hint.textContent = "下列卡片仅用于本次下载映射，不会改变Emby 的季归属。";
+        container.appendChild(hint);
+    }
+
     function renderCompositeGroupPicker(dialog, item, season, seasonIndex, seasons, selections, keywords, group, options) {
         options = options || {};
         var automaticRangeSearch = !options.skipAutomaticRangeSearch;
@@ -2345,9 +2752,16 @@
         startLabel.textContent = "来源起始集";
         var sourceStart = document.createElement("input");
         sourceStart.type = "number";
+        sourceStart.className = "danmuCompositeSourceStart";
         sourceStart.min = "1";
         sourceStart.value = String(Math.max(1,
             Number(value(existingSelection, "SourceStartEpisodeNumber", "sourceStartEpisodeNumber", 1)) || 1));
+        sourceStart.dataset.danmuSourceStartDirty = "false";
+        function markSourceStartDirty() {
+            sourceStart.dataset.danmuSourceStartDirty = "true";
+        }
+        sourceStart.addEventListener("input", markSourceStartDirty);
+        sourceStart.addEventListener("change", markSourceStartDirty);
         startLabel.appendChild(sourceStart);
         inputs.append(countLabel, startLabel);
         dialog.body.appendChild(inputs);
@@ -2374,12 +2788,25 @@
             rangeState.candidates = [];
             rangeState.message = "";
             rangeState.candidateGeneration = "";
+            rangeState.matchIntent = "";
+            rangeState.searchCompletionDiagnostics = [];
         }
         var candidates = rangeState.candidates || [];
+        var manualKeyword = rangeState.matchIntent === "manual-keyword";
         var detailGeneration = beginCandidateDetailGeneration(dialog,
             value(season, "SeasonId", "seasonId", item.Id) + "::" + temporaryRangeStateKey(season, group),
             candidates, rangeState.candidateGeneration);
         var list = document.createElement("div");
+        var diagnosticsText = searchDiagnosticsLine({
+            MatchIntent: rangeState.matchIntent,
+            SearchCompletionDiagnostics: rangeState.searchCompletionDiagnostics || []
+        });
+        if (diagnosticsText) {
+            var diagnostics = document.createElement("div");
+            diagnostics.className = "danmuCandidateReason";
+            diagnostics.textContent = diagnosticsText;
+            dialog.body.appendChild(diagnostics);
+        }
         if (!candidates.length) {
             var empty = document.createElement("p");
             empty.className = "danmuMuted";
@@ -2400,7 +2827,7 @@
             title.textContent = candidateLine(candidate);
             var reason = document.createElement("div");
             reason.className = "danmuCandidateReason";
-            reason.textContent = backendDecisionLine(candidate);
+            reason.textContent = manualKeyword ? candidateReasonLine(candidate) : backendDecisionLine(candidate);
             main.append(title, reason);
             appendCandidateDetailControl(dialog, main,
                 value(season, "SeasonId", "seasonId", item.Id), candidate, detailGeneration);
@@ -2410,14 +2837,16 @@
         dialog.body.appendChild(list);
 
         async function searchCurrentGroup(isAutomatic) {
-            var keyword = input.value.trim();
-            if (!keyword) {
+            var keyword = String(input.value || "");
+            if (!keyword.trim()) {
                 notify("请输入临时季的搜索关键词。", true);
                 return;
             }
+            rangeState.matchIntent = "";
+            rangeState.searchCompletionDiagnostics = [];
             try {
                 var parameters = temporaryRangeSearchParameters(
-                    dialog, item, season, group, selections, keyword);
+                    dialog, item, season, group, selections, keyword, input);
                 var refreshed = await runDialogSearch(
                     dialog, parameters.seriesId || item.Id, "provider-search", parameters,
                     "正在搜索临时季候选…", function (status, error) {
@@ -2439,7 +2868,11 @@
                 rangeState.message = value(refreshedSeason, "Message", "message", "");
                 rangeState.candidateGeneration = value(refreshedSeason,
                     "CandidateGeneration", "candidateGeneration", "");
-                keywords[key] = keyword;
+                rangeState.matchIntent = value(refreshedSeason, "MatchIntent", "matchIntent", "");
+                rangeState.searchCompletionDiagnostics = value(refreshedSeason,
+                    "SearchCompletionDiagnostics", "searchCompletionDiagnostics", []) || [];
+                if (input.dataset.danmuExplicitKeyword === "true") keywords[key] = keyword;
+                else delete keywords[key];
                 renderCompositeGroupPicker(dialog, item, season, seasonIndex, seasons, selections, keywords, group,
                     { skipAutomaticRangeSearch: true, rematchDraft: rematchDraft });
             } catch (error) {
@@ -2472,11 +2905,23 @@
             var selectionsForSeason = compositeSelectionStore(selections, season, true);
             var previousSelections = selectionsForSeason.slice();
             var localStart = value(group.episodes[0], "ItemId", "itemId", "");
+            var alignmentIntent = sourceStartAlignmentIntent(
+                sourceStart, season, group, existingSelection);
+            if (!alignmentIntent) {
+                clearCompositeSelectionStore(selections, season);
+                dialog.restorePendingCompositeRematch = null;
+                renderSeriesPicker(dialog, item, seasons, selections, keywords);
+                notify("旧映射缺少有效的对齐信息，请重新预览后再选择。", true);
+                return;
+            }
             var replacement = {
                 LocalStartEpisodeItemId: localStart,
                 RequestedEpisodeCount: requested,
                 Source: { ProviderId: value(candidate, "Site", "site", ""), MediaId: value(candidate, "Id", "id", "") },
+                SourceStartEpisodeId: sourceStartEpisodeIdForSubmission(
+                    sourceStart, existingSelection),
                 SourceStartEpisodeNumber: sourceNumber,
+                AlignmentIntent: alignmentIntent,
                 Origin: "manual",
                 SelectionEvidenceToken: value(candidate, "SelectionEvidenceToken", "selectionEvidenceToken", "")
             };
@@ -2522,22 +2967,36 @@
             }
         }
         discardIncompatibleSeasonDrafts(dialog, seasons, selections);
-        if (dialog.title) dialog.title.textContent = "整部剧弹幕智能匹配";
+        if (dialog.title) {
+            dialog.title.textContent = item.Type === "Series"
+                ? "整部剧弹幕智能匹配"
+                : "本季弹幕智能匹配";
+        }
         dialog.body.replaceChildren();
         dialog.footer.replaceChildren();
 
         seasons.forEach(function (season) {
             var key = seasonSelectionKey(season);
-            if (!selections[key] && hasBackendMatch(season)) {
+            if (parentTitleRematchAvailable(season)) {
+                delete selections[key];
+                clearCompositeSelectionStore(selections, season);
+                delete keywords[key];
+                return;
+            }
+            if (!isManualKeyword(season) && !selections[key] && hasBackendMatch(season)) {
                 var current = selectedCandidate(season);
                 if (current) selections[key] = current;
             }
         });
-        var message = document.createElement("p");
-        message.textContent = "匹配状态、来源和决策原因均由服务器返回。需要修改时可查看服务器返回的全部候选；浏览器不会重新评分或调整候选顺序。";
-        dialog.body.appendChild(message);
+        if (item.Type === "Series") {
+            var seriesContext = document.createElement("p");
+            seriesContext.textContent = seriesLibraryContextLine(seasons);
+            dialog.body.appendChild(seriesContext);
+        }
+        appendCompositeMappingHint(dialog.body, seasons);
 
         seasons.forEach(function (season, seasonIndex) {
+            var parentRematch = parentTitleRematchAvailable(season);
             var diagnosticsText = searchDiagnosticsLine(season);
             if (diagnosticsText) {
                 var diagnostics = document.createElement("div");
@@ -2545,36 +3004,79 @@
                 diagnostics.textContent = diagnosticsText;
                 dialog.body.appendChild(diagnostics);
             }
-            if (hasCompositePlan(season)) {
+            if (!parentRematch && hasCompositePlan(season)) {
                 renderCompositeSeasonSummary(dialog, item, season, seasonIndex, seasons, selections, keywords);
                 return;
             }
             var selectionKey = seasonSelectionKey(season);
-            var selection = selections[selectionKey];
+            var manualKeyword = isManualKeyword(season);
+            var selection = manualKeyword || parentRematch ? null : selections[selectionKey];
             var block = document.createElement("div");
             block.className = "danmuSeasonSummary " + (selection ? "matched" : "unmatched");
             var main = document.createElement("div");
             var title = document.createElement("div");
             title.className = "danmuSeasonSummaryTitle";
-            title.textContent = value(season, "SeasonName", "seasonName", "未命名季度") + "（" +
-                (value(season, "Year", "year", null) || "年份未知") + "，库内 " +
-                value(season, "EpisodeCount", "episodeCount", 0) + " 集）";
-            var matched = hasBackendMatch(season);
+            title.textContent = seasonLibraryContextLine(season);
+            var matched = !manualKeyword && !parentRematch && hasBackendMatch(season);
             var state = document.createElement("div");
             state.className = "danmuSeasonSummaryState";
-            state.textContent = matched ? "✓ 匹配成功" : "✕ 匹配失败";
+            state.textContent = manualKeyword ? "等待人工选择" : (matched ? "✓ 匹配成功" : "✕ 匹配失败");
             var detail = document.createElement("div");
             detail.className = "danmuSeasonSummaryDetail";
-            detail.textContent = backendDecisionLine(season) ||
-                value(season, "Message", "message", "服务器未返回决策说明");
-            if (selection) detail.textContent += (detail.textContent ? "　" : "") + candidateLine(selection);
+            detail.textContent = manualKeyword
+                ? value(season, "Message", "message", "请选择一个候选结果。")
+                : (parentRematch
+                    ? "未找到可靠匹配，可使用父剧标题重新匹配。"
+                    : backendDecisionLine(season) ||
+                        value(season, "Message", "message", "服务器未返回决策说明"));
+            if (!manualKeyword && !parentRematch && selection) {
+                detail.textContent += (detail.textContent ? "　" : "") + candidateLine(selection);
+            }
             var scopeLine = scopeSummaryLine(season);
             if (scopeLine) detail.textContent += (detail.textContent ? "　" : "") + scopeLine;
             main.append(title, state, detail);
             var manual = document.createElement("button");
             manual.className = "danmuSmartButton";
-            manual.textContent = isProviderIdMatch(season) ? "重新智能匹配" : "查看候选";
+            manual.textContent = parentRematch
+                ? "重新匹配"
+                : (isProviderIdMatch(season) ? "重新智能匹配" : "查看候选");
             manual.addEventListener("click", async function () {
+                if (parentRematch) {
+                    try {
+                        var parentParameters = parentTitleRematchParameters(season);
+                        var parentRefreshed = await runDialogSearch(
+                            dialog, parentParameters.seriesId || item.Id, "provider-search", parentParameters,
+                            "正在使用父剧标题重新匹配本季候选…", function (status, error) {
+                                renderSeriesPicker(dialog, item, seasons, selections, keywords);
+                                notify(status === "cancelled" ? "已取消父剧标题重新匹配。" :
+                                    "父剧标题重新匹配失败：" + publicErrorMessage(error), true);
+                            });
+                        if (!parentRefreshed) return;
+                        var parentRefreshedSeason = (value(parentRefreshed, "Seasons", "seasons", []) || [])[0];
+                        if (!parentRefreshedSeason) throw new Error("服务器没有返回本季候选");
+                        var parentOldKey = selectionKey;
+                        var parentNewKey = seasonSelectionKey(parentRefreshedSeason);
+                        delete selections[parentOldKey];
+                        delete selections[parentNewKey];
+                        clearCompositeSelectionStore(selections, season);
+                        clearCompositeSelectionStore(selections, parentRefreshedSeason);
+                        delete keywords[parentOldKey];
+                        delete keywords[parentNewKey];
+                        seasons[seasonIndex] = parentRefreshedSeason;
+                        discardIncompatibleSeasonDrafts(dialog, [parentRefreshedSeason], selections);
+                        if (item.Type === "Season") {
+                            renderCandidatePicker(dialog, item, parentRefreshedSeason, "");
+                        } else if (parentTitleRematchAvailable(parentRefreshedSeason)) {
+                            renderSeriesPicker(dialog, item, seasons, selections, keywords);
+                        } else {
+                            renderSeriesSeasonPicker(dialog, item, seasons, seasonIndex, selections, keywords);
+                        }
+                    } catch (error) {
+                        renderSeriesPicker(dialog, item, seasons, selections, keywords);
+                        notify("父剧标题重新匹配失败：" + publicErrorMessage(error), true);
+                    }
+                    return;
+                }
                 if (!isProviderIdMatch(season)) {
                     renderSeriesSeasonPicker(dialog, item, seasons, seasonIndex, selections, keywords);
                     return;
@@ -2607,7 +3109,8 @@
         var ok = document.createElement("button");
         ok.className = "danmuSmartButton primary";
         var matchedSeasons = seasons.filter(function (season) {
-            return hasCompositePlan(season) && compositeHasDownloadableMappings(season, selections);
+            return !parentTitleRematchAvailable(season) && hasCompositePlan(season) &&
+                compositeHasDownloadableMappings(season, selections);
         });
         var compositeTotals = matchedSeasons.filter(hasCompositePlan).reduce(function (totals, season) {
             var coverage = compositeCoverage(season, selections);
@@ -2637,10 +3140,11 @@
         var season = seasons[seasonIndex];
         var selectionKey = seasonSelectionKey(season);
         var candidates = seasonCandidates(season);
+        var manualKeyword = isManualKeyword(season);
         var detailGeneration = beginCandidateDetailGeneration(dialog,
             value(season, "SeasonId", "seasonId", item.Id), candidates,
             value(season, "CandidateGeneration", "candidateGeneration", ""));
-        var current = selections[selectionKey] || selectedCandidate(season);
+        var current = manualKeyword ? null : (selections[selectionKey] || selectedCandidate(season));
         if (dialog.title) {
             dialog.title.textContent = "手动匹配：" + value(season, "SeasonName", "seasonName", "本季");
         }
@@ -2648,13 +3152,17 @@
         dialog.footer.replaceChildren();
 
         var summary = document.createElement("p");
-        summary.textContent = "库内信息：" + value(season, "SeriesName", "seriesName", "") + " / " +
-            value(season, "SeasonName", "seasonName", "") + "，" +
-            (value(season, "Year", "year", null) || "年份未知") + "，" +
-            value(season, "EpisodeCount", "episodeCount", 0) + " 集。" +
-            (isProviderIdMatch(season) && hasBackendMatch(season) ? "　✓ 匹配成功" : "") +
-            (backendDecisionLine(season) ? "　" + backendDecisionLine(season) : "");
+        summary.textContent = seasonLibraryContextLine(season) + "。" +
+            (!manualKeyword && isProviderIdMatch(season) && hasBackendMatch(season) ? "　✓ 匹配成功" : "") +
+            (!manualKeyword && backendDecisionLine(season) ? "　" + backendDecisionLine(season) : "");
         dialog.body.appendChild(summary);
+        var diagnosticsText = searchDiagnosticsLine(season);
+        if (diagnosticsText) {
+            var diagnostics = document.createElement("div");
+            diagnostics.className = "danmuCandidateReason";
+            diagnostics.textContent = diagnosticsText;
+            dialog.body.appendChild(diagnostics);
+        }
 
         var search = document.createElement("div");
         search.className = "danmuSmartSearch";
@@ -2702,7 +3210,7 @@
             if (score) meta.textContent += "　" + score;
             var reason = document.createElement("div");
             reason.className = "danmuCandidateReason";
-            reason.textContent = backendDecisionLine(candidate);
+            reason.textContent = manualKeyword ? candidateReasonLine(candidate) : backendDecisionLine(candidate);
             main.append(candidateTitle, meta, reason);
             appendCandidateDetailControl(dialog, main, value(season, "SeasonId", "seasonId", item.Id), candidate, detailGeneration);
             row.append(radio, main);
@@ -2711,8 +3219,8 @@
         dialog.body.appendChild(list);
 
         async function searchCurrentSeason() {
-            var keyword = input.value.trim();
-            if (!keyword) {
+            var keyword = String(input.value || "");
+            if (!keyword.trim()) {
                 notify("请输入本季搜索关键词。", true);
                 return;
             }
@@ -2738,6 +3246,7 @@
                     selections[newKey] = selections[oldKey];
                     delete selections[oldKey];
                 }
+                if (isManualKeyword(refreshedSeason)) delete selections[newKey];
                 if (explicitKeyword) keywords[newKey] = keyword;
                 else delete keywords[newKey];
                 renderSeriesSeasonPicker(dialog, item, seasons, seasonIndex, selections, keywords);
@@ -2792,6 +3301,17 @@
     }
 
     function renderCandidatePicker(dialog, item, season, keyword) {
+        if (parentTitleRematchAvailable(season)) {
+            var parentState = dialog.parentTitleRematchState;
+            var parentSeasonId = String(value(season, "SeasonId", "seasonId", item.Id) || "");
+            if (!parentState || parentState.seasonId !== parentSeasonId) {
+                parentState = dialog.parentTitleRematchState = {
+                    seasonId: parentSeasonId, selections: {}, keywords: {}
+                };
+            }
+            renderSeriesPicker(dialog, item, [season], parentState.selections, parentState.keywords);
+            return;
+        }
         if (hasCompositePlan(season)) {
             renderCompositeTargetPicker(dialog, item, season);
             return;
@@ -2800,11 +3320,12 @@
         dialog.androidBackLocked = false;
         dialog.body.replaceChildren();
         dialog.footer.replaceChildren();
+        var manualKeyword = isManualKeyword(season);
 
         var summary = document.createElement("p");
-        summary.textContent = "库内信息：" + value(season, "SeriesName", "seriesName", "") + " / " + value(season, "SeasonName", "seasonName", "") + "，" + (value(season, "Year", "year", null) || "年份未知") + "，" + value(season, "EpisodeCount", "episodeCount", 0) + " 集。请选择正确项目；服务器会先解析逐集映射并显示未匹配区间。" +
-            (isProviderIdMatch(season) && hasBackendMatch(season) ? "　✓ 匹配成功" : "") +
-            (backendDecisionLine(season) ? "　" + backendDecisionLine(season) : "") +
+        summary.textContent = seasonLibraryContextLine(season) + "。请选择正确项目；服务器会先解析逐集映射并显示未匹配区间。" +
+            (!manualKeyword && isProviderIdMatch(season) && hasBackendMatch(season) ? "　✓ 匹配成功" : "") +
+            (!manualKeyword && backendDecisionLine(season) ? "　" + backendDecisionLine(season) : "") +
             (scopeSummaryLine(season) ? "　" + scopeSummaryLine(season) : "");
         dialog.body.appendChild(summary);
         var diagnosticsText = searchDiagnosticsLine(season);
@@ -2832,7 +3353,7 @@
         var detailGeneration = beginCandidateDetailGeneration(dialog,
             value(season, "SeasonId", "seasonId", item.Id), candidates,
             value(season, "CandidateGeneration", "candidateGeneration", ""));
-        var currentCandidate = selectedCandidate(season);
+        var currentCandidate = manualKeyword ? null : selectedCandidate(season);
         if (!candidates.length) {
             var empty = document.createElement("p");
             empty.className = "danmuMuted";
@@ -2863,7 +3384,7 @@
             if (score) meta.textContent += "　" + score;
             var reason = document.createElement("div");
             reason.className = "danmuCandidateReason";
-            reason.textContent = backendDecisionLine(candidate);
+            reason.textContent = manualKeyword ? candidateReasonLine(candidate) : backendDecisionLine(candidate);
             main.append(title, meta, reason);
             appendCandidateDetailControl(dialog, main, value(season, "SeasonId", "seasonId", item.Id), candidate, detailGeneration);
             row.append(radio, main);
@@ -2880,8 +3401,8 @@
         dialog.footer.appendChild(bind);
 
         searchButton.addEventListener("click", async function () {
-            var newKeyword = input.value.trim();
-            if (!newKeyword) {
+            var newKeyword = String(input.value || "");
+            if (!newKeyword.trim()) {
                 notify("请输入搜索关键词。", true);
                 return;
             }
@@ -2952,6 +3473,7 @@
     }
 
     function itemSelectedCandidate(target) {
+        if (isManualKeyword(target)) return null;
         var selectedId = value(target, "SelectedId", "selectedId", "");
         var selectedSite = value(target, "SelectedSite", "selectedSite", "");
         var authoritative = value(target, "SelectedCandidate", "selectedCandidate", null);
@@ -2984,7 +3506,8 @@
         dialog.setBackHandler(function () { renderItemCandidatePicker(dialog, item, target, keyword); });
 
         var summary = document.createElement("p");
-        summary.textContent = itemEpisodeSummary(item, target) + "。" + candidateLine(candidate) +
+        summary.textContent = itemEpisodeSummary(item, target) + "。" +
+            (isManualKeyword(target) ? manualKeywordCandidateLine(candidate) : candidateLine(candidate)) +
             "。请选择要绑定到本地第 " + (value(target, "EpisodeNumber", "episodeNumber", "?") || "?") + " 集的来源剧集。";
         dialog.body.appendChild(summary);
 
@@ -3038,7 +3561,8 @@
         var detail = await runDialogSearch(
             dialog, item.Id, "detail-resolution", {
                 site: value(candidate, "Site", "site", ""),
-                candidateId: value(candidate, "Id", "id", "")
+                candidateId: value(candidate, "Id", "id", ""),
+                selectionEvidenceToken: value(candidate, "SelectionEvidenceToken", "selectionEvidenceToken", "")
             }, "正在解析所选候选的来源剧集…", function (status, error) {
                 renderItemCandidatePicker(dialog, item, target, keyword);
                 notify(status === "cancelled" ? "已取消来源剧集解析。" :
@@ -3056,18 +3580,107 @@
         return detail;
     }
 
+    function moviePartChoices(detail) {
+        return (value(detail, "MovieParts", "movieParts", []) || []).filter(function (part) {
+            return Boolean(String(value(part, "Token", "token", "") || "").trim());
+        });
+    }
+
+    function renderMoviePartPicker(dialog, item, target, candidate, detail, keyword, manual) {
+        var parts = moviePartChoices(detail);
+        dialog.androidBackLocked = false;
+        dialog.body.replaceChildren();
+        dialog.footer.replaceChildren();
+        dialog.setBackHandler(function () { renderItemCandidatePicker(dialog, item, target, keyword); });
+
+        var summary = document.createElement("p");
+        summary.textContent = movieCandidateHeading(candidate, detail,
+            value(detail, "PartTitle", "partTitle", ""));
+        dialog.body.appendChild(summary);
+
+        var list = document.createElement("div");
+        parts.forEach(function (part, index) {
+            var row = document.createElement("label");
+            row.className = "danmuCandidate danmuMoviePartChoice";
+            var radio = document.createElement("input");
+            radio.type = "radio";
+            radio.name = "danmuMoviePartChoice";
+            radio.value = String(index);
+            radio.checked = Boolean(value(part, "Selected", "selected", false)) || index === 0;
+            var main = document.createElement("div");
+            main.className = "danmuCandidateMain";
+            var title = document.createElement("div");
+            title.className = "danmuCandidateTitle";
+            title.textContent = value(part, "PartTitle", "partTitle", "正片版本 " + (index + 1));
+            main.appendChild(title);
+            row.append(radio, main);
+            list.appendChild(row);
+        });
+        dialog.body.appendChild(list);
+
+        var back = document.createElement("button");
+        back.className = "danmuSmartButton";
+        back.textContent = "返回候选列表";
+        back.addEventListener("click", function () { renderItemCandidatePicker(dialog, item, target, keyword); });
+        var start = document.createElement("button");
+        start.className = "danmuSmartButton primary";
+        start.textContent = "绑定并下载所选正片弹幕";
+        start.addEventListener("click", function () {
+            var checked = list.querySelector('input[name="danmuMoviePartChoice"]:checked');
+            if (!checked) {
+                notify("请选择一个正片版本。", true);
+                return;
+            }
+            var part = parts[Number(checked.value)];
+            dialog.preDownloadRecovery = function () {
+                renderMoviePartPicker(dialog, item, target, candidate, detail, keyword, manual);
+            };
+            renderSingleTargetProgress(dialog, item, target, candidate, null, null, manual,
+                value(part, "Token", "token", ""));
+        });
+        appendPreDownloadFooter(dialog);
+        dialog.footer.append(back, start);
+    }
+
+    async function resolveSelectedMovieParts(dialog, item, target, candidate, keyword, manual) {
+        var detail = await runDialogSearch(
+            dialog, item.Id, "detail-resolution", {
+                site: value(candidate, "Site", "site", ""),
+                candidateId: value(candidate, "Id", "id", ""),
+                selectionEvidenceToken: value(candidate, "SelectionEvidenceToken", "selectionEvidenceToken", "")
+            }, "正在验证电影正片版本…", function (status, error) {
+                renderItemCandidatePicker(dialog, item, target, keyword);
+                notify(status === "cancelled" ? "已取消正片版本解析。" :
+                    "正片版本解析失败：" + publicErrorMessage(error), true);
+            }, "GetSelectedCandidatePreview");
+        if (!detail) return;
+        if (String(value(detail, "Status", "status", "")).toLowerCase() !== "ready") {
+            renderItemCandidatePicker(dialog, item, target, keyword);
+            notify(value(detail, "Message", "message", "电影候选无法验证。"), true);
+            return;
+        }
+        var parts = moviePartChoices(detail);
+        if (parts.length <= 1) {
+            var defaultToken = parts.length ? value(parts[0], "Token", "token", "") : "";
+            renderSingleTargetProgress(dialog, item, target, candidate, null, null, manual, defaultToken);
+            return;
+        }
+        renderMoviePartPicker(dialog, item, target, candidate, detail, keyword, manual);
+    }
+
     function renderItemCandidatePicker(dialog, item, target, keyword) {
         dialog.setBackHandler(null);
         dialog.androidBackLocked = false;
         dialog.body.replaceChildren();
         dialog.footer.replaceChildren();
         var isEpisode = item.Type === "Episode";
+        var manualKeyword = isManualKeyword(target);
         var candidates = itemCandidates(target);
         var detailGeneration = beginCandidateDetailGeneration(dialog, item.Id, candidates,
             value(target, "CandidateGeneration", "candidateGeneration", ""));
         var showEpisodeCandidateDetails = isEpisode &&
-            Boolean(target.__danmuManualCandidates || value(target, "ManualRematch", "manualRematch", false));
-        var selected = itemSelectedCandidate(target);
+            Boolean(manualKeyword || target.__danmuManualCandidates || value(target, "ManualRematch", "manualRematch", false));
+        var selected = manualKeyword ? null : itemSelectedCandidate(target);
         var summary = document.createElement("p");
         if (isEpisode) {
             summary.textContent = itemEpisodeSummary(item, target) + "。请选择季度候选，再解析该候选的来源剧集。";
@@ -3076,8 +3689,15 @@
                 "，" + (value(target, "Year", "year", null) || "年份未知") + "。请选择正确电影。";
         }
         if (isEpisode && isProviderIdMatch(target) && hasBackendMatch(target)) summary.textContent += "　✓ 已通过本地标识符精确匹配";
-        else if (backendDecisionLine(target)) summary.textContent += "　" + backendDecisionLine(target);
+        else if (!manualKeyword && backendDecisionLine(target)) summary.textContent += "　" + backendDecisionLine(target);
         dialog.body.appendChild(summary);
+        var diagnosticsText = searchDiagnosticsLine(target);
+        if (diagnosticsText) {
+            var diagnostics = document.createElement("div");
+            diagnostics.className = "danmuCandidateReason";
+            diagnostics.textContent = diagnosticsText;
+            dialog.body.appendChild(diagnostics);
+        }
 
         var search = document.createElement("div");
         search.className = "danmuSmartSearch";
@@ -3112,8 +3732,10 @@
             main.className = "danmuCandidateMain";
             var title = document.createElement("div");
             title.className = "danmuCandidateTitle";
-            title.textContent = value(candidate, "SiteName", "siteName", value(candidate, "Site", "site", "未知网站")) +
-                " · " + value(candidate, "Name", "name", "未命名项目");
+            title.textContent = isEpisode
+                ? value(candidate, "SiteName", "siteName", value(candidate, "Site", "site", "未知网站")) +
+                    " · " + value(candidate, "Name", "name", "未命名项目")
+                : (manualKeyword ? manualKeywordMovieCandidateHeading(candidate) : movieCandidateHeading(candidate, null, ""));
             var meta = document.createElement("div");
             meta.className = "danmuCandidateMeta";
             meta.textContent = "年份：" + (value(candidate, "Year", "year", null) || "未知") +
@@ -3123,7 +3745,8 @@
             if (score) meta.textContent += "　" + score;
             var reason = document.createElement("div");
             reason.className = "danmuCandidateReason";
-            reason.textContent = isEpisode ? "" : backendDecisionLine(candidate);
+            reason.textContent = manualKeyword ? candidateReasonLine(candidate) :
+                (isEpisode ? "" : backendDecisionLine(candidate));
             main.append(title, meta, reason);
             if (showEpisodeCandidateDetails) {
                 appendCandidateDetailControl(dialog, main, item.Id, candidate, detailGeneration);
@@ -3135,8 +3758,8 @@
         appendPreDownloadFooter(dialog);
 
         searchButton.addEventListener("click", async function () {
-            var newKeyword = input.value.trim();
-            if (!newKeyword) {
+            var newKeyword = String(input.value || "");
+            if (!newKeyword.trim()) {
                 notify("请输入搜索关键词。", true);
                 return;
             }
@@ -3189,13 +3812,13 @@
                 };
                 resolveSelectedCandidateDetail(dialog, item, target, candidate, keyword, manual);
             } else {
-                renderSingleTargetProgress(dialog, item, target, candidate, null, null, manual);
+                resolveSelectedMovieParts(dialog, item, target, candidate, keyword, manual);
             }
         });
         dialog.footer.appendChild(start);
     }
 
-    async function renderSingleTargetProgress(dialog, item, target, candidate, sourceEpisodeNumber, sourceEpisodeId, manual) {
+    async function renderSingleTargetProgress(dialog, item, target, candidate, sourceEpisodeNumber, sourceEpisodeId, manual, moviePartToken) {
         if (item.Type === "Episode" && !String(sourceEpisodeId || "").trim()) {
             notify("请选择有效的来源剧集后再下载。", true);
             return;
@@ -3207,11 +3830,13 @@
         var parameters = {
             site: value(candidate, "Site", "site", ""),
             candidateId: value(candidate, "Id", "id", ""),
+            selectionEvidenceToken: value(candidate, "SelectionEvidenceToken", "selectionEvidenceToken", ""),
             manual: manual ? "true" : "false",
             forceRefresh: executionForceRefresh ? "true" : "false"
         };
         if (sourceEpisodeNumber) parameters.sourceEpisodeNumber = sourceEpisodeNumber;
         if (sourceEpisodeId) parameters.sourceEpisodeId = sourceEpisodeId;
+        if (moviePartToken) parameters.moviePartToken = moviePartToken;
         var task;
         try {
             task = await api(item.Id, "StartTrackedDownload", parameters);
@@ -3277,7 +3902,9 @@
                             (status === "cancelled" ? "已停止" :
                                 (status === "completed_with_warnings" ? "完成（部分缺失）" : "完成（有失败）")))));
             summary.textContent = value(current, "Message", "message", "");
-            meta.textContent = candidateLine(candidate) +
+            meta.textContent = (isManualKeyword(target) ? manualKeywordCandidateLine(candidate) : candidateLine(candidate)) +
+                (value(current, "PartTitle", "partTitle", "") ?
+                    "　正片版本：" + value(current, "PartTitle", "partTitle", "") : "") +
                 (sourceEpisodeNumber ? "　来源第 " + sourceEpisodeNumber + " 集" : "") +
                 "　成功 " + succeeded + " / 部分缺失 " + partial +
                 " / 重复已跳过 " + skipped + " / 失败 " + failed;
@@ -3396,7 +4023,14 @@
         if (status !== "cancelled") notify(message.textContent, true);
     }
 
-    async function runSmartDownload(item, dialog) {
+    function emptySeriesPreviewError(preview) {
+        var message = value(preview, "Message", "message", "");
+        var safeMessage = typeof message === "string" ? boundedText(message) : "";
+        return new Error(safeMessage || "服务器没有返回可匹配季度，请重试。");
+    }
+
+    async function runSmartDownload(item, dialog, allowEmptySeriesRetry) {
+        var retryEmptySeriesOnce = allowEmptySeriesRetry !== false;
         var preview = await runDialogSearch(
             dialog, item.Id, "provider-search", {},
             item.Type === "Series" ? "正在逐季请求服务器匹配结果，请稍候…" : "正在请求服务器匹配结果，请稍候…",
@@ -3405,6 +4039,13 @@
         var seasons = value(preview, "Seasons", "seasons", []) || [];
 
         if (item.Type === "Series") {
+            if (seasons.length === 0) {
+                if (retryEmptySeriesOnce) {
+                    return runSmartDownload(item, dialog, false);
+                }
+                renderInitialSearchFailure(dialog, item, "error", emptySeriesPreviewError(preview));
+                return;
+            }
             renderSeriesPicker(dialog, item, seasons, {}, {});
             return;
         }
@@ -3580,8 +4221,12 @@
         resolveMenuContextId: resolveMenuContextId,
         rematchParameters: rematchParameters,
         initializeKeywordIntent: initializeKeywordIntent,
+        manualKeywordParameters: manualKeywordParameters,
         keywordRematchParameters: keywordRematchParameters,
+        isManualKeyword: isManualKeyword,
+        parentTitleRematchAvailable: parentTitleRematchAvailable,
         seasonRequestParameters: seasonRequestParameters,
+        parentTitleRematchParameters: parentTitleRematchParameters,
         seasonPlanGeneration: seasonPlanGeneration,
         hasCurrentMappingContract: hasCurrentMappingContract,
         targetSeasonNumber: targetSeasonNumber,
@@ -3592,9 +4237,19 @@
         decodeApiResult: decodeApiResult,
         normalizeRejectedApiError: normalizeRejectedApiError,
         publicErrorMessage: publicErrorMessage,
+        authoritativeCompositeFailureMessage: authoritativeCompositeFailureMessage,
         providerDisplayName: providerDisplayName,
+        sourceMetadataPublicLabel: sourceMetadataPublicLabel,
         localEpisodeLabel: localEpisodeLabel,
         sourceEpisodePublicLabel: sourceEpisodePublicLabel,
+        closedAlignmentIntent: closedAlignmentIntent,
+        defaultAlignmentIntentForLocalStart: defaultAlignmentIntentForLocalStart,
+        sourceStartAlignmentIntent: sourceStartAlignmentIntent,
+        sourceStartEpisodeIdForSubmission: sourceStartEpisodeIdForSubmission,
+        canonicalCompositeSelectionState: canonicalCompositeSelectionState,
+        serverCompositeRequestSelections: serverCompositeRequestSelections,
+        serverCompositeAlignmentIntentsAreClosed: serverCompositeAlignmentIntentsAreClosed,
+        manualCompositeAlignmentIntentsAreClosed: manualCompositeAlignmentIntentsAreClosed,
         compactCompositeSelection: compactCompositeSelection,
         isForbiddenBatchOrigin: isForbiddenBatchOrigin,
         normalizeDecisionCode: normalizeDecisionCode,
@@ -3602,6 +4257,9 @@
         decisionReasonLabel: decisionReasonLabel,
         backendDecisionLine: backendDecisionLine,
         matchScoreLine: matchScoreLine,
+        manualKeywordCandidateLine: manualKeywordCandidateLine,
+        movieCandidateHeading: movieCandidateHeading,
+        moviePartChoices: moviePartChoices,
         searchDiagnosticsLine: searchDiagnosticsLine,
         hasBackendMatch: hasBackendMatch,
         hasCompositePlan: hasCompositePlan,
@@ -3642,6 +4300,8 @@
         renderCompositeGroupPicker: renderCompositeGroupPicker,
         renderItemCandidatePicker: renderItemCandidatePicker,
         resolveSelectedCandidateDetail: resolveSelectedCandidateDetail,
+        resolveSelectedMovieParts: resolveSelectedMovieParts,
+        renderMoviePartPicker: renderMoviePartPicker,
         renderEpisodeSourcePicker: renderEpisodeSourcePicker,
         renderSingleTargetProgress: renderSingleTargetProgress,
         setButtonWorkflow: function (workflow) {

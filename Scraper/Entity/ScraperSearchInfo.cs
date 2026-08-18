@@ -1,3 +1,6 @@
+using System.Collections.Generic;
+using Emby.Plugin.Danmu.Model;
+
 namespace Emby.Plugin.Danmu.Scraper.Entity
 {
     public class ScraperSearchInfo
@@ -7,5 +10,8 @@ namespace Emby.Plugin.Danmu.Scraper.Entity
         public string Category { get; set; } = string.Empty;
         public int? Year { get; set; }
         public int EpisodeSize { get; set; }
+        public List<string> Aliases { get; set; } = new List<string>();
+        public string SearchAlias { get; set; } = string.Empty;
+        public SourceMetadata SourceMetadata { get; set; }
     }
 }

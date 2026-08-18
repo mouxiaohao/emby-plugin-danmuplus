@@ -1,14 +1,17 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Emby.Plugin.Danmu.Core.Extensions;
+using Emby.Plugin.Danmu.Model;
 using Emby.Plugin.Danmu.Scraper.Entity;
 using MediaBrowser.Common.Net;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.TV;
 using MediaBrowser.Model.Logging;
 using MediaBrowser.Model.Serialization;
+using DandanEpisode = Emby.Plugin.Danmu.Scraper.Dandan.Entity.Episode;
 
 namespace Emby.Plugin.Danmu.Scraper.Dandan
 {
@@ -160,11 +163,68 @@ namespace Emby.Plugin.Danmu.Scraper.Dandan
             return media;
         }
 
+        internal static List<ScraperMoviePart> BuildMovieParts(
+            long parentId,
+            IEnumerable<DandanEpisode> episodes)
+        {
+            var parts = new List<ScraperMoviePart>();
+            var seen = new HashSet<long>();
+            var index = 0;
+            foreach (var episode in episodes ?? Enumerable.Empty<DandanEpisode>())
+            {
+                var episodeId = episode?.EpisodeId ?? 0;
+                if (episodeId <= 0 || !seen.Add(episodeId) ||
+                    !DandanEpisodeId.TryGetAnimeId(episodeId.ToString(), out var verifiedParentId) ||
+                    verifiedParentId != parentId)
+                {
+                    continue;
+                }
+
+                index++;
+                var title = (episode.EpisodeTitle ?? string.Empty).Trim();
+                parts.Add(new ScraperMoviePart
+                {
+                    Id = episodeId.ToString(),
+                    Title = title,
+                    Index = index,
+                    IsDownloadable = true,
+                    IsExplicitNonMain = EpisodeContentClassifier.IsExplicitNonMain(title),
+                });
+            }
+            return parts;
+        }
+
+        public override async Task<List<ScraperMoviePart>> GetMovieParts(
+            BaseItem item,
+            string parentId,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!(item is MediaBrowser.Controller.Entities.Movies.Movie) ||
+                !long.TryParse(parentId, out var animeId) || animeId <= 0)
+            {
+                return new List<ScraperMoviePart>();
+            }
+
+            var anime = await _api.GetAnimeAsync(animeId, cancellationToken, includeNonMainEpisodes: true)
+                .ConfigureAwait(false);
+            return BuildMovieParts(animeId, anime?.Episodes);
+        }
+
         public override async Task<ScraperEpisode?> GetMediaEpisode(BaseItem item, string id)
         {
             var isMovieItemType = item is MediaBrowser.Controller.Entities.Movies.Movie;
             if (isMovieItemType)
             {
+                if (DandanEpisodeId.TryGetAnimeId(id, out var selectedAnimeId))
+                {
+                    var selectedAnime = await _api.GetAnimeAsync(
+                        selectedAnimeId,
+                        CancellationToken.None,
+                        includeNonMainEpisodes: true).ConfigureAwait(false);
+                    return DandanEpisodeId.CreateVerifiedEpisode(id, selectedAnime?.Episodes);
+                }
+
                 // id是animeId
                 var anime = await _api.GetAnimeAsync(id.ToLong(), CancellationToken.None).ConfigureAwait(false);
                 if (anime == null || anime.Episodes == null || anime.Episodes.Count <= 0)
@@ -197,7 +257,17 @@ namespace Emby.Plugin.Danmu.Scraper.Dandan
                     animeId,
                     CancellationToken.None,
                     includeNonMainEpisodes: true).ConfigureAwait(false);
-                return DandanEpisodeId.CreateVerifiedEpisode(id, anime?.Episodes);
+                var verified = DandanEpisodeId.CreateVerifiedEpisode(id, anime?.Episodes);
+                if (verified != null && anime != null)
+                {
+                    verified.SourceMetadata = new SourceMetadata
+                    {
+                        Title = anime.AnimeTitle ?? string.Empty,
+                        Year = anime.Year,
+                        Category = anime.TypeDescription ?? string.Empty,
+                    };
+                }
+                return verified;
             }
         }
 

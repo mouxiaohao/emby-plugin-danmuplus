@@ -220,6 +220,37 @@ namespace Emby.Plugin.Danmu.Scraper
                 return null;
             }
 
+            var sourceMetadata = sourceEpisode.SourceMetadata?.Clone();
+            // Some providers expose parent metadata only through a collection
+            // detail endpoint. A saved parent ProviderId is still exact evidence;
+            // this is deliberately not a title/discovery fallback.
+            if (sourceMetadata?.HasValue != true)
+            {
+                Season season = null;
+                try
+                {
+                    season = episode.Season;
+                }
+                catch
+                {
+                    // Detached/test Episodes may not have a resolvable parent.
+                }
+                if (season?.ProviderIds != null &&
+                    season.ProviderIds.TryGetValue(scraper.ProviderId, out var parentProviderId) &&
+                    !string.IsNullOrWhiteSpace(parentProviderId))
+                {
+                    try
+                    {
+                        var parentMedia = await scraper.GetMedia(season, parentProviderId).ConfigureAwait(false);
+                        sourceMetadata = ToSourceMetadata(parentMedia);
+                    }
+                    catch
+                    {
+                        // Parent metadata is optional; exact episode download remains usable.
+                    }
+                }
+            }
+
             return new ScraperMedia
             {
                 // The lookup token remains the saved Episode ProviderId. When
@@ -229,7 +260,10 @@ namespace Emby.Plugin.Danmu.Scraper
                     ? sourceEpisode.ParentMediaId
                     : providerId,
                 ProviderId = scraper.ProviderId,
-                Title = sourceEpisode.Title ?? string.Empty,
+                Title = sourceMetadata?.Title ?? string.Empty,
+                Year = sourceMetadata?.Year,
+                Category = sourceMetadata?.Category ?? string.Empty,
+                SourceMetadata = sourceMetadata,
                 EpisodeCount = 1,
                 Episodes = new List<ScraperEpisode>
                 {
@@ -276,6 +310,20 @@ namespace Emby.Plugin.Danmu.Scraper
             candidate.Category = media.Category ?? string.Empty;
             candidate.Year = media.Year;
             candidate.EpisodeSize = declaredCount > 0 ? declaredCount : usableEpisodeCount;
+            candidate.SourceMetadata = ToSourceMetadata(media);
+        }
+
+        private static SourceMetadata ToSourceMetadata(ScraperMedia media)
+        {
+            if (media == null) return null;
+            if (media.SourceMetadata?.HasValue == true) return media.SourceMetadata.Clone();
+            var metadata = new SourceMetadata
+            {
+                Title = media.Title ?? string.Empty,
+                Year = media.Year,
+                Category = media.Category ?? string.Empty,
+            };
+            return metadata.HasValue ? metadata : null;
         }
 
         private static string GetScopeType(BaseItem scope)

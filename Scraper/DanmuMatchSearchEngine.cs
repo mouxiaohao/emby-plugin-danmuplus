@@ -8,6 +8,8 @@ using Emby.Plugin.Danmu.Core;
 using Emby.Plugin.Danmu.Core.Extensions;
 using Emby.Plugin.Danmu.Model;
 using Emby.Plugin.Danmu.Scraper.Entity;
+using Emby.Plugin.Danmu.Scraper.Tmdb;
+using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.Movies;
 using MediaBrowser.Model.Logging;
 
@@ -27,22 +29,25 @@ namespace Emby.Plugin.Danmu.Scraper
             int? expectedYear,
             int expectedEpisodes,
             string keywordOverride,
-            ILogger logger)
+            ILogger logger,
+            IEnumerable<string> localSeriesTitleAliases = null,
+            IEnumerable<string> localSeasonTitleAliases = null,
+            BaseItem contextItem = null)
         {
-            using (var automaticDeadline = new CancellationTokenSource(
-                BoundedSearchPolicy.Shared.Options.AutomaticOperationTimeout))
-            {
-                return await SearchSeasonAsync(
-                    scraperSource,
-                    seriesName,
-                    seasonName,
-                    expectedYear,
-                    expectedEpisodes,
-                    keywordOverride,
-                    logger,
-                    BoundedSearchPolicy.Shared,
-                    automaticDeadline.Token).ConfigureAwait(false);
-            }
+            return await SearchSeasonAsync(
+                scraperSource,
+                seriesName,
+                seasonName,
+                expectedYear,
+                expectedEpisodes,
+                keywordOverride,
+                logger,
+                BoundedSearchPolicy.Shared,
+                CancellationToken.None,
+                CancellationToken.None,
+                localSeriesTitleAliases,
+                localSeasonTitleAliases,
+                contextItem).ConfigureAwait(false);
         }
 
         public static async Task<DanmuMatchSearchResult> SearchSeasonAsync(
@@ -70,9 +75,9 @@ namespace Emby.Plugin.Danmu.Scraper
         }
 
         /// <summary>
-        /// Separates the bounded child execution token from the parent/user
-        /// cancellation token.  Child budget exhaustion remains an actionable
-        /// partial result; parent cancellation invalidates the whole result.
+        /// Separates the explicitly cancellable search operation from its
+        /// parent request. Cancellation of either token invalidates provisional
+        /// results; shared search owns no elapsed-time budget.
         /// </summary>
         public static async Task<DanmuMatchSearchResult> SearchSeasonAsync(
             IEnumerable<AbstractScraper> scraperSource,
@@ -84,9 +89,64 @@ namespace Emby.Plugin.Danmu.Scraper
             ILogger logger,
             BoundedSearchPolicy policy,
             CancellationToken executionCancellationToken,
-            CancellationToken parentCancellationToken)
+            CancellationToken parentCancellationToken,
+            IEnumerable<string> localSeriesTitleAliases = null,
+            IEnumerable<string> localSeasonTitleAliases = null,
+            BaseItem contextItem = null,
+            bool manualKeywordDiscovery = false)
+        {
+            if (manualKeywordDiscovery && string.IsNullOrWhiteSpace(keywordOverride))
+            {
+                return InvalidManualKeywordResult();
+            }
+
+            var cancellationToken = CombineCancellationTokens(
+                executionCancellationToken,
+                parentCancellationToken,
+                out var linkedCancellation);
+            try
+            {
+                return await SearchSeasonCoreAsync(
+                    scraperSource,
+                    seriesName,
+                    seasonName,
+                    expectedYear,
+                    expectedEpisodes,
+                    keywordOverride,
+                    logger,
+                    policy,
+                    cancellationToken,
+                    localSeriesTitleAliases,
+                    localSeasonTitleAliases,
+                    contextItem,
+                    manualKeywordDiscovery).ConfigureAwait(false);
+            }
+            finally
+            {
+                linkedCancellation?.Dispose();
+            }
+        }
+
+        private static async Task<DanmuMatchSearchResult> SearchSeasonCoreAsync(
+            IEnumerable<AbstractScraper> scraperSource,
+            string seriesName,
+            string seasonName,
+            int? expectedYear,
+            int expectedEpisodes,
+            string keywordOverride,
+            ILogger logger,
+            BoundedSearchPolicy policy,
+            CancellationToken cancellationToken,
+            IEnumerable<string> localSeriesTitleAliases,
+            IEnumerable<string> localSeasonTitleAliases,
+            BaseItem contextItem,
+            bool manualKeywordDiscovery)
         {
             var scrapers = (scraperSource ?? Enumerable.Empty<AbstractScraper>()).ToList();
+            // Prefer the authoritative Emby Season ordinal. Display names are
+            // only a compatibility fallback for callers without an item.
+            var targetSeasonNumber = contextItem?.IndexNumber ??
+                                     DanmuMatchScorer.ParseExplicitSeasonNumber(seasonName);
             var keywords = DanmuMatchScorer.BuildSearchKeywords(seriesName, seasonName, keywordOverride)
                 .Take(string.IsNullOrWhiteSpace(keywordOverride) ? 2 : 1)
                 .Where(keyword => !string.IsNullOrWhiteSpace(keyword))
@@ -95,14 +155,16 @@ namespace Emby.Plugin.Danmu.Scraper
             var outcomes = await ExecutePlannedCallsAsync(
                 scrapers,
                 keywords,
-                (scraper, keyword, cancellationToken) => scraper.SearchForApi(keyword, cancellationToken),
+                (scraper, keyword, cancellationToken) =>
+                    scraper.SearchForApiWithDiagnostics(keyword, cancellationToken),
                 searchInfo => DanmuMatchScorer.IsEligibleSeasonCandidate(
-                    searchInfo, seriesName, seasonName, keywordOverride),
+                    searchInfo, seriesName, seasonName, keywordOverride,
+                    localSeriesTitleAliases, localSeasonTitleAliases),
                 policy,
-                executionCancellationToken,
+                cancellationToken,
                 logger,
                 "season").ConfigureAwait(false);
-            var result = ToResult(outcomes, parentCancellationToken);
+            var result = ToResult(outcomes, cancellationToken.IsCancellationRequested);
             if (keywords.Count == 0)
             {
                 result.IsComplete = false;
@@ -120,9 +182,35 @@ namespace Emby.Plugin.Danmu.Scraper
                 seriesName,
                 seasonName,
                 expectedYear,
-                expectedEpisodes);
+                expectedEpisodes,
+                localSeriesTitleAliases,
+                localSeasonTitleAliases,
+                string.IsNullOrWhiteSpace(keywordOverride),
+                targetSeasonNumber);
             result.Candidates = OrderCandidates(result.CanonicalCandidates);
-            ClassifyResult(result);
+            var tmdbAliasPlanExhausted = false;
+            if (!manualKeywordDiscovery && string.IsNullOrWhiteSpace(keywordOverride))
+            {
+                tmdbAliasPlanExhausted = await TryApplyTmdbAliasesAsync(
+                    result, scrapers, contextItem, seriesName, seasonName,
+                    expectedYear, expectedEpisodes, false, targetSeasonNumber, logger,
+                    cancellationToken, localSeriesTitleAliases,
+                    localSeasonTitleAliases).ConfigureAwait(false);
+            }
+            MarkCancellationIfRequested(result, cancellationToken);
+            if (!manualKeywordDiscovery)
+            {
+                ClassifyResult(result);
+                result.ParentTitleRematchAvailable = tmdbAliasPlanExhausted &&
+                    result.SelectedCandidate == null &&
+                    !result.WasCancelled &&
+                    !string.Equals(result.Decision, "retryable-incomplete", StringComparison.OrdinalIgnoreCase);
+            }
+            else if (result.WasCancelled)
+            {
+                result.CanonicalCandidates.Clear();
+                result.Candidates.Clear();
+            }
             return result;
         }
 
@@ -132,17 +220,13 @@ namespace Emby.Plugin.Danmu.Scraper
             string keywordOverride,
             ILogger logger)
         {
-            using (var automaticDeadline = new CancellationTokenSource(
-                BoundedSearchPolicy.Shared.Options.AutomaticOperationTimeout))
-            {
-                return await SearchMovieAsync(
-                    scraperSource,
-                    movie,
-                    keywordOverride,
-                    logger,
-                    BoundedSearchPolicy.Shared,
-                    automaticDeadline.Token).ConfigureAwait(false);
-            }
+            return await SearchMovieAsync(
+                scraperSource,
+                movie,
+                keywordOverride,
+                logger,
+                BoundedSearchPolicy.Shared,
+                CancellationToken.None).ConfigureAwait(false);
         }
 
         public static async Task<DanmuMatchSearchResult> SearchMovieAsync(
@@ -151,8 +235,16 @@ namespace Emby.Plugin.Danmu.Scraper
             string keywordOverride,
             ILogger logger,
             BoundedSearchPolicy policy,
-            CancellationToken cancellationToken)
+            CancellationToken cancellationToken,
+            BaseItem contextItem = null,
+            bool retainZeroScoreCandidates = false,
+            bool manualKeywordDiscovery = false)
         {
+            if (manualKeywordDiscovery && string.IsNullOrWhiteSpace(keywordOverride))
+            {
+                return InvalidManualKeywordResult();
+            }
+
             var scrapers = (scraperSource ?? Enumerable.Empty<AbstractScraper>()).ToList();
             var movieName = string.IsNullOrWhiteSpace(keywordOverride) ? movie?.Name : keywordOverride.Trim();
             var expectedYear = movie?.ProductionYear;
@@ -163,11 +255,11 @@ namespace Emby.Plugin.Danmu.Scraper
             var outcomes = await ExecutePlannedCallsAsync(
                 scrapers,
                 keywords,
-                (scraper, keyword, cancellationToken) => scraper.Search(new Movie
-                {
-                    Name = keyword.Trim(),
-                    ProductionYear = expectedYear,
-                }, cancellationToken),
+                (scraper, keyword, cancellationToken) => scraper.SearchWithDiagnostics(new Movie
+                    {
+                        Name = keyword.Trim(),
+                        ProductionYear = expectedYear,
+                    }, cancellationToken),
                 searchInfo => searchInfo != null &&
                               !string.IsNullOrWhiteSpace(searchInfo.Id) &&
                               !string.IsNullOrWhiteSpace(searchInfo.Name) &&
@@ -176,17 +268,363 @@ namespace Emby.Plugin.Danmu.Scraper
                 cancellationToken,
                 logger,
                 "movie").ConfigureAwait(false);
-            var result = ToResult(outcomes, cancellationToken);
-            result.CanonicalCandidates = ScoreMovieCandidates(MergeSources(outcomes), scrapers, movieName, expectedYear);
+            var result = ToResult(outcomes, cancellationToken.IsCancellationRequested);
+            var localAliases = string.IsNullOrWhiteSpace(keywordOverride) ||
+                               string.Equals(keywordOverride?.Trim(), movie?.Name, StringComparison.OrdinalIgnoreCase)
+                ? new[] { movie?.OriginalTitle }
+                : Enumerable.Empty<string>();
+            result.CanonicalCandidates = ScoreMovieCandidates(
+                MergeSources(outcomes), scrapers, movieName, expectedYear, localAliases,
+                retainZeroScoreCandidates);
             result.Candidates = OrderCandidates(result.CanonicalCandidates);
-            ClassifyResult(result);
+            if (!manualKeywordDiscovery && string.IsNullOrWhiteSpace(keywordOverride))
+            {
+                await TryApplyTmdbAliasesAsync(result, scrapers, contextItem ?? movie, movieName, string.Empty,
+                    expectedYear, 0, true, null, logger,
+                    cancellationToken).ConfigureAwait(false);
+            }
+            MarkCancellationIfRequested(result, cancellationToken);
+            if (!manualKeywordDiscovery)
+            {
+                ClassifyResult(result);
+            }
+            else if (result.WasCancelled)
+            {
+                result.CanonicalCandidates.Clear();
+                result.Candidates.Clear();
+            }
             return result;
+        }
+
+        private static CancellationToken CombineCancellationTokens(
+            CancellationToken executionCancellationToken,
+            CancellationToken parentCancellationToken,
+            out CancellationTokenSource linkedCancellation)
+        {
+            linkedCancellation = null;
+            if (!executionCancellationToken.CanBeCanceled)
+            {
+                return parentCancellationToken;
+            }
+
+            if (!parentCancellationToken.CanBeCanceled ||
+                executionCancellationToken.Equals(parentCancellationToken))
+            {
+                return executionCancellationToken;
+            }
+
+            linkedCancellation = CancellationTokenSource.CreateLinkedTokenSource(
+                executionCancellationToken,
+                parentCancellationToken);
+            return linkedCancellation.Token;
+        }
+
+        private static void MarkCancellationIfRequested(
+            DanmuMatchSearchResult result,
+            CancellationToken cancellationToken)
+        {
+            if (result == null || !cancellationToken.IsCancellationRequested)
+            {
+                return;
+            }
+
+            result.IsComplete = false;
+            result.WasCancelled = true;
+            result.SelectedCandidate = null;
+        }
+
+        private static DanmuMatchSearchResult InvalidManualKeywordResult()
+        {
+            var result = new DanmuMatchSearchResult
+            {
+                IsComplete = false,
+            };
+            result.SearchErrors.Add("A manual search keyword is required.");
+            result.CompletionDiagnostics.Add(new DanmuSearchCompletionDiagnostic
+            {
+                Status = "invalid_request",
+                Message = "A manual search keyword is required.",
+            });
+            return result;
+        }
+
+        private static bool IsAnimationContext(BaseItem item)
+        {
+            return TmdbAliasClient.IsAnimated(item);
+        }
+
+        private static async Task<bool> TryApplyTmdbAliasesAsync(
+            DanmuMatchSearchResult result,
+            IList<AbstractScraper> scrapers,
+            BaseItem contextItem,
+            string seriesOrMovieName,
+            string seasonName,
+            int? expectedYear,
+            int expectedEpisodes,
+            bool isMovie,
+            int? targetSeasonNumber,
+            ILogger logger,
+            CancellationToken executionCancellationToken,
+            IEnumerable<string> localSeriesTitleAliases = null,
+            IEnumerable<string> localSeasonTitleAliases = null)
+        {
+            var dandan = scrapers.FirstOrDefault(x =>
+                string.Equals(x.ProviderId, Dandan.Dandan.ScraperProviderId, StringComparison.OrdinalIgnoreCase));
+            if (dandan == null || contextItem == null)
+            {
+                return false;
+            }
+
+            var baseline = result.Candidates
+                .Where(x => string.Equals(x.Site, dandan.ProviderId, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            if (baseline.Any(x => x.Score >= 0.80))
+            {
+                return false;
+            }
+
+            var option = Plugin.Instance?.Configuration?.Tmdb;
+            var aliases = await TmdbAliasClient.GetAliasesAsync(
+                contextItem, option, logger, executionCancellationToken).ConfigureAwait(false);
+            if (MarkAliasSearchCancellationIfRequested(result, executionCancellationToken))
+            {
+                return false;
+            }
+
+            var aliasCandidates = new List<DanmuMatchCandidate>();
+            var sourceOrder = scrapers.IndexOf(dandan);
+            var attemptedTerms = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var reachedThreshold = false;
+            foreach (var alias in aliases?.BuildSearchPlan(seriesOrMovieName) ?? Enumerable.Empty<TmdbAliasTitle>())
+            {
+                reachedThreshold = await SearchTmdbTermAsync(
+                    result, dandan, alias?.Title, aliasCandidates, attemptedTerms, sourceOrder,
+                    seriesOrMovieName, seasonName, targetSeasonNumber, expectedYear,
+                    expectedEpisodes, isMovie, logger, executionCancellationToken,
+                    localSeriesTitleAliases, localSeasonTitleAliases).ConfigureAwait(false);
+                if (MarkAliasSearchCancellationIfRequested(result, executionCancellationToken))
+                {
+                    return false;
+                }
+
+                if (reachedThreshold)
+                {
+                    break;
+                }
+            }
+
+            // Detail documents are deliberately lazy. A successful Chinese term makes
+            // neither primary-title request, while a failed alias endpoint still leaves
+            // the baseline and these independent fallback rounds available.
+            var englishDetails = default(TmdbMediaDetails);
+            if (!reachedThreshold)
+            {
+                englishDetails = await TmdbAliasClient.GetDetailsAsync(
+                    contextItem, option, "en-US", logger, executionCancellationToken).ConfigureAwait(false);
+                if (MarkAliasSearchCancellationIfRequested(result, executionCancellationToken))
+                {
+                    return false;
+                }
+
+                reachedThreshold = await SearchTmdbTermAsync(
+                    result, dandan,
+                    TmdbAliasClient.GetLocalizedPrimaryTitle(englishDetails, isMovie),
+                    aliasCandidates, attemptedTerms, sourceOrder, seriesOrMovieName, seasonName,
+                    targetSeasonNumber, expectedYear, expectedEpisodes, isMovie, logger,
+                    executionCancellationToken, localSeriesTitleAliases,
+                    localSeasonTitleAliases).ConfigureAwait(false);
+                if (MarkAliasSearchCancellationIfRequested(result, executionCancellationToken))
+                {
+                    return false;
+                }
+            }
+
+            if (!reachedThreshold)
+            {
+                var japaneseTitle = string.Equals(englishDetails?.OriginalLanguage, "ja",
+                    StringComparison.OrdinalIgnoreCase)
+                    ? TmdbAliasClient.GetJapaneseOriginalPrimaryTitle(englishDetails, isMovie)
+                    : string.Empty;
+                if (string.IsNullOrWhiteSpace(japaneseTitle))
+                {
+                    var japaneseDetails = await TmdbAliasClient.GetDetailsAsync(
+                        contextItem, option, "ja-JP", logger, executionCancellationToken).ConfigureAwait(false);
+                    if (MarkAliasSearchCancellationIfRequested(result, executionCancellationToken))
+                    {
+                        return false;
+                    }
+
+                    japaneseTitle = TmdbAliasClient.GetLocalizedPrimaryTitle(japaneseDetails, isMovie);
+                }
+
+                reachedThreshold = await SearchTmdbTermAsync(
+                    result, dandan, japaneseTitle, aliasCandidates, attemptedTerms, sourceOrder,
+                    seriesOrMovieName, seasonName, targetSeasonNumber, expectedYear,
+                    expectedEpisodes, isMovie, logger, executionCancellationToken,
+                    localSeriesTitleAliases, localSeasonTitleAliases).ConfigureAwait(false);
+                if (MarkAliasSearchCancellationIfRequested(result, executionCancellationToken))
+                {
+                    return false;
+                }
+            }
+
+            if (MarkAliasSearchCancellationIfRequested(result, executionCancellationToken))
+            {
+                return false;
+            }
+
+            return CompleteTmdbAliasPlan(
+                result, aliasCandidates, attemptedTerms.Count, reachedThreshold, isMovie);
+        }
+
+        internal static bool CompleteTmdbAliasPlan(
+            DanmuMatchSearchResult result,
+            IEnumerable<DanmuMatchCandidate> aliasCandidates,
+            int attemptedTermCount,
+            bool reachedThreshold,
+            bool isMovie)
+        {
+            // Movie alias behavior predates l6 and remains unchanged. For Seasons,
+            // provisional low-confidence alias rows stay server-local; only a term
+            // that reaches the established 0.80 alias threshold may replace the
+            // ordinary canonical set.
+            if (isMovie || reachedThreshold)
+            {
+                ApplyTmdbAliasCandidates(result, aliasCandidates);
+                return false;
+            }
+
+            return attemptedTermCount > 0;
+        }
+
+        private static async Task<bool> SearchTmdbTermAsync(
+            DanmuMatchSearchResult result,
+            AbstractScraper dandan,
+            string term,
+            List<DanmuMatchCandidate> aliasCandidates,
+            ISet<string> attemptedTerms,
+            int sourceOrder,
+            string seriesOrMovieName,
+            string seasonName,
+            int? targetSeasonNumber,
+            int? expectedYear,
+            int expectedEpisodes,
+            bool isMovie,
+            ILogger logger,
+            CancellationToken cancellationToken,
+            IEnumerable<string> localSeriesTitleAliases,
+            IEnumerable<string> localSeasonTitleAliases)
+        {
+            var normalized = DanmuMatchScorer.Normalize(term);
+            if (normalized.Length == 0 || !attemptedTerms.Add(normalized))
+            {
+                return aliasCandidates.Any(x => x.Score >= 0.80);
+            }
+
+            try
+            {
+                List<ScraperSearchInfo> searchResults;
+                if (isMovie)
+                {
+                    searchResults = await dandan.Search(new Movie
+                    {
+                        Name = term,
+                        ProductionYear = expectedYear,
+                    }, cancellationToken).ConfigureAwait(false);
+                }
+                else
+                {
+                    searchResults = await dandan.SearchForApi(term, cancellationToken).ConfigureAwait(false);
+                }
+                RegisterCompletedProvider(result, dandan);
+
+                var sources = (searchResults ?? new List<ScraperSearchInfo>())
+                    .Where(source => source != null && !string.IsNullOrWhiteSpace(source.Id) &&
+                                     !string.IsNullOrWhiteSpace(source.Name) &&
+                                     (!isMovie || !DanmuMatchScorer.IsIdentifiableNonMovie(source.Category)))
+                    .ToList();
+                foreach (var source in sources)
+                {
+                    source.SearchAlias = term;
+                }
+
+                aliasCandidates.AddRange(isMovie
+                    ? sources.Select(source => DanmuMatchScorer.ScoreMovie(
+                        source, dandan.ProviderId, dandan.ProviderName, sourceOrder, term, expectedYear))
+                    : sources.Select(source => DanmuMatchScorer.Score(
+                        source, dandan.ProviderId, dandan.ProviderName, sourceOrder, term,
+                        BuildAliasSeasonName(term, seriesOrMovieName, seasonName), expectedYear,
+                        expectedEpisodes,
+                        new[] { seriesOrMovieName }
+                            .Concat(localSeriesTitleAliases ?? Enumerable.Empty<string>()),
+                        new[] { seasonName }
+                            .Concat(localSeasonTitleAliases ?? Enumerable.Empty<string>()),
+                        true, targetSeasonNumber, true)));
+            }
+            catch (OperationCanceledException)
+            {
+                return false;
+            }
+            catch (Exception ex)
+            {
+                logger?.LogError(ex, "[弹弹play] TMDB primary-title search failed for one term");
+            }
+
+            return aliasCandidates.Any(x => x.Score >= 0.80);
+        }
+
+        internal static void ApplyTmdbAliasCandidates(
+            DanmuMatchSearchResult result,
+            IEnumerable<DanmuMatchCandidate> aliasCandidates)
+        {
+            var canonicalCandidates = OrderCanonicalCandidates(
+                (aliasCandidates ?? Enumerable.Empty<DanmuMatchCandidate>()).Where(x => x.Score > 0));
+            if (canonicalCandidates.Count == 0)
+            {
+                return;
+            }
+
+            result.CanonicalCandidates = canonicalCandidates;
+            result.Candidates = OrderCandidates(canonicalCandidates);
+            result.UsedTmdbAlias = true;
+        }
+
+        private static void MarkAliasSearchCancellation(DanmuMatchSearchResult result)
+        {
+            result.IsComplete = false;
+            result.WasCancelled = true;
+            result.CompletionDiagnostics.Add(new DanmuSearchCompletionDiagnostic
+            {
+                Provider = Dandan.Dandan.ScraperProviderId,
+                Status = "cancelled",
+                Message = "TMDB alias search was explicitly cancelled.",
+                Cancelled = true,
+            });
+        }
+
+        private static bool MarkAliasSearchCancellationIfRequested(
+            DanmuMatchSearchResult result,
+            CancellationToken cancellationToken)
+        {
+            if (!cancellationToken.IsCancellationRequested)
+            {
+                return false;
+            }
+
+            MarkAliasSearchCancellation(result);
+            return true;
+        }
+
+        private static string BuildAliasSeasonName(string alias, string originalSeriesName, string originalSeasonName)
+        {
+            var keyword = DanmuMatchScorer.ExtractSeasonKeyword(originalSeriesName, originalSeasonName);
+            return string.IsNullOrWhiteSpace(keyword) ? alias : alias + " " + keyword;
         }
 
         private static async Task<List<ProviderSearchOutcome>> ExecutePlannedCallsAsync(
             IList<AbstractScraper> scrapers,
             IList<string> keywords,
-            Func<AbstractScraper, string, CancellationToken, Task<List<ScraperSearchInfo>>> search,
+            Func<AbstractScraper, string, CancellationToken, Task<ScraperSearchResult>> search,
             Func<ScraperSearchInfo, bool> include,
             BoundedSearchPolicy policy,
             CancellationToken cancellationToken,
@@ -219,7 +657,7 @@ namespace Emby.Plugin.Danmu.Scraper
             AbstractScraper scraper,
             int sourceOrder,
             IEnumerable<string> keywords,
-            Func<AbstractScraper, string, CancellationToken, Task<List<ScraperSearchInfo>>> search,
+            Func<AbstractScraper, string, CancellationToken, Task<ScraperSearchResult>> search,
             Func<ScraperSearchInfo, bool> include,
             BoundedSearchPolicy policy,
             CancellationToken cancellationToken,
@@ -238,10 +676,10 @@ namespace Emby.Plugin.Danmu.Scraper
                 return outcome;
             }
 
-            // One provider's terms intentionally execute in order. A timed-out
-            // non-cooperative term retains that provider's gate until it ends,
-            // so later planned terms are cancelled by the enclosing deadline
-            // rather than running concurrently against the same site.
+            // One provider's terms intentionally execute in order. After an
+            // explicit cancellation, a non-cooperative term retains that
+            // provider's gate until it ends; later planned terms cannot run
+            // concurrently against the same site.
             foreach (var keyword in plannedKeywords)
             {
                 var stopwatch = Stopwatch.StartNew();
@@ -254,7 +692,9 @@ namespace Emby.Plugin.Danmu.Scraper
                 switch (execution.Status)
                 {
                     case BoundedSearchExecutionStatus.Completed:
-                        foreach (var searchInfo in execution.Result ?? new List<ScraperSearchInfo>())
+                        var providerResult = execution.Result ?? new ScraperSearchResult();
+                        outcome.HasCompletedCall = true;
+                        foreach (var searchInfo in providerResult.Candidates)
                         {
                             if (include(searchInfo))
                             {
@@ -262,12 +702,18 @@ namespace Emby.Plugin.Danmu.Scraper
                             }
                         }
 
-                        outcome.AddDiagnostic("completed", keyword, stopwatch.ElapsedMilliseconds, string.Empty, false, false);
-                        break;
+                        foreach (var diagnostic in providerResult.Diagnostics)
+                        {
+                            outcome.AddDiagnostic(
+                                diagnostic.Status,
+                                keyword,
+                                stopwatch.ElapsedMilliseconds,
+                                diagnostic.Message,
+                                diagnostic.TimedOut,
+                                diagnostic.Cancelled);
+                        }
 
-                    case BoundedSearchExecutionStatus.ProviderTimedOut:
-                        outcome.AddDiagnostic("timed_out", keyword, stopwatch.ElapsedMilliseconds,
-                            "Provider call exceeded the bounded deadline.", true, false);
+                        outcome.AddDiagnostic("completed", keyword, stopwatch.ElapsedMilliseconds, string.Empty, false, false);
                         break;
 
                     case BoundedSearchExecutionStatus.Cancelled:
@@ -275,7 +721,7 @@ namespace Emby.Plugin.Danmu.Scraper
                             keyword,
                             stopwatch.ElapsedMilliseconds,
                             cancellationToken.IsCancellationRequested
-                                ? "Search operation deadline or cancellation occurred before this call completed."
+                                ? "Search operation was explicitly cancelled before this call completed."
                                 : "Provider call was cancelled.",
                             false,
                             true);
@@ -298,19 +744,28 @@ namespace Emby.Plugin.Danmu.Scraper
 
         private static DanmuMatchSearchResult ToResult(
             IEnumerable<ProviderSearchOutcome> outcomes,
-            CancellationToken cancellationToken)
+            bool parentOrUserCancelled)
         {
             var result = new DanmuMatchSearchResult
             {
-                WasCancelled = cancellationToken.IsCancellationRequested,
+                WasCancelled = parentOrUserCancelled,
             };
             foreach (var outcome in outcomes ?? Enumerable.Empty<ProviderSearchOutcome>())
             {
                 result.CompletionDiagnostics.AddRange(outcome.Diagnostics);
+                if (outcome.HasCompletedCall)
+                {
+                    RegisterCompletedProvider(result, outcome.Scraper);
+                }
                 if (outcome.Diagnostics.Any(diagnostic =>
                     !string.Equals(diagnostic.Status, "completed", StringComparison.OrdinalIgnoreCase)))
                 {
                     result.IsComplete = false;
+                }
+                if (outcome.Diagnostics.Any(diagnostic => IsProviderLocalFault(
+                    diagnostic, result.WasCancelled)))
+                {
+                    result.HasProviderLocalFaults = true;
                 }
 
                 foreach (var diagnostic in outcome.Diagnostics.Where(diagnostic =>
@@ -341,11 +796,48 @@ namespace Emby.Plugin.Danmu.Scraper
             return sources;
         }
 
+        internal static void RegisterCompletedProvider(
+            DanmuMatchSearchResult result,
+            AbstractScraper scraper)
+        {
+            var providerId = scraper?.ProviderId;
+            if (result == null || string.IsNullOrWhiteSpace(providerId) ||
+                result.CompletedProviderIds.Any(id =>
+                    string.Equals(id, providerId, StringComparison.OrdinalIgnoreCase)))
+            {
+                return;
+            }
+
+            result.CompletedProviderIds.Add(providerId);
+            result.CompletedProviderCount++;
+        }
+
+        private static bool IsProviderLocalFault(
+            DanmuSearchCompletionDiagnostic diagnostic,
+            bool parentOrUserCancelled)
+        {
+            if (diagnostic == null ||
+                string.Equals(diagnostic.Status, "completed", StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            if (parentOrUserCancelled && (diagnostic.Cancelled ||
+                string.Equals(diagnostic.Status, "unstarted", StringComparison.OrdinalIgnoreCase)))
+            {
+                return false;
+            }
+
+            return !string.Equals(diagnostic.Status, "unstarted", StringComparison.OrdinalIgnoreCase);
+        }
+
         private static List<DanmuMatchCandidate> ScoreMovieCandidates(
             Dictionary<string, DiscoveredSearchInfo> sources,
             IList<AbstractScraper> scrapers,
             string movieName,
-            int? expectedYear)
+            int? expectedYear,
+            IEnumerable<string> localTitleAliases,
+            bool retainZeroScore = false)
         {
             var candidates = new List<DanmuMatchCandidate>();
             for (var sourceOrder = 0; sourceOrder < scrapers.Count; sourceOrder++)
@@ -365,10 +857,12 @@ namespace Emby.Plugin.Danmu.Scraper
                         scraper.ProviderName,
                         sourceOrder,
                         movieName,
-                        expectedYear)));
+                        expectedYear,
+                        localTitleAliases)));
             }
 
-            return OrderCanonicalCandidates(candidates.Where(candidate => candidate.Score > 0));
+            return OrderCanonicalCandidates(candidates.Where(candidate =>
+                retainZeroScore || candidate.Score > 0));
         }
 
         private static List<DanmuMatchCandidate> ScoreCandidates(
@@ -377,7 +871,11 @@ namespace Emby.Plugin.Danmu.Scraper
             string seriesName,
             string seasonName,
             int? expectedYear,
-            int expectedEpisodes)
+            int expectedEpisodes,
+            IEnumerable<string> localSeriesTitleAliases,
+            IEnumerable<string> localSeasonTitleAliases,
+            bool applyContradictionCap,
+            int? expectedSeasonNumber)
         {
             var candidates = new List<DanmuMatchCandidate>();
             for (var sourceOrder = 0; sourceOrder < scrapers.Count; sourceOrder++)
@@ -399,7 +897,11 @@ namespace Emby.Plugin.Danmu.Scraper
                         seriesName,
                         seasonName,
                         expectedYear,
-                        expectedEpisodes)));
+                        expectedEpisodes,
+                        localSeriesTitleAliases,
+                        localSeasonTitleAliases,
+                        applyContradictionCap,
+                        expectedSeasonNumber)));
             }
 
             return OrderCanonicalCandidates(candidates);
@@ -479,7 +981,7 @@ namespace Emby.Plugin.Danmu.Scraper
             }
 
             var selected = DanmuMatchScorer.SelectAutoCandidate(result.CanonicalCandidates);
-            if (result.IsComplete)
+            if (result.HasCompletedProviders)
             {
                 result.Decision = selected != null
                     ? "confident"
@@ -488,15 +990,15 @@ namespace Emby.Plugin.Danmu.Scraper
                 return;
             }
 
-            if (result.CanonicalCandidates.Count == 0)
+            if (!result.IsComplete)
             {
                 result.Decision = "retryable-incomplete";
                 result.SelectedCandidate = null;
                 return;
             }
 
-            result.Decision = selected != null ? "partial-confident" : "partial-manual";
-            result.SelectedCandidate = selected;
+            result.Decision = "no_match";
+            result.SelectedCandidate = null;
         }
 
         private static string BuildKey(string providerId, string id)
@@ -530,6 +1032,7 @@ namespace Emby.Plugin.Danmu.Scraper
                 new Dictionary<string, DiscoveredSearchInfo>(StringComparer.OrdinalIgnoreCase);
             public List<DanmuSearchCompletionDiagnostic> Diagnostics { get; } =
                 new List<DanmuSearchCompletionDiagnostic>();
+            public bool HasCompletedCall { get; set; }
 
             public void AddDiagnostic(
                 string status,
@@ -555,6 +1058,7 @@ namespace Emby.Plugin.Danmu.Scraper
         {
             public ScraperSearchInfo Info { get; set; }
         }
+
     }
 
     public sealed class DanmuMatchSearchResult
@@ -566,7 +1070,13 @@ namespace Emby.Plugin.Danmu.Scraper
         public List<string> SearchErrors { get; set; } = new List<string>();
         public List<DanmuSearchCompletionDiagnostic> CompletionDiagnostics { get; set; } =
             new List<DanmuSearchCompletionDiagnostic>();
+        public int CompletedProviderCount { get; set; }
+        public List<string> CompletedProviderIds { get; set; } = new List<string>();
+        public bool HasCompletedProviders => CompletedProviderCount > 0;
+        public bool HasProviderLocalFaults { get; set; }
         public bool IsComplete { get; set; } = true;
         public bool WasCancelled { get; set; }
+        public bool UsedTmdbAlias { get; set; }
+        public bool ParentTitleRematchAvailable { get; set; }
     }
 }

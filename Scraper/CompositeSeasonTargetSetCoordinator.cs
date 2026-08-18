@@ -35,17 +35,14 @@ namespace Emby.Plugin.Danmu.Scraper
             foreach (var target in ordered)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                using (var child = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
-                {
-                    child.CancelAfter(BoundedSearchPolicy.Shared.Options.InteractiveOperationTimeout);
-                    var result = await target.BuildPreviewAsync(child.Token, cancellationToken).ConfigureAwait(false);
+                var result = await target.BuildPreviewAsync(cancellationToken, cancellationToken)
+                    .ConfigureAwait(false);
                 if (result == null || !string.Equals(result.SeasonId, target.SeasonId,
                         StringComparison.OrdinalIgnoreCase))
                 {
                     throw new InvalidOperationException("A Season target returned a mismatched preview.");
                 }
                 results.Add(result);
-                }
             }
             return results;
         }

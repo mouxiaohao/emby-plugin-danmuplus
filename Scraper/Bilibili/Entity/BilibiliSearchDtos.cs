@@ -41,4 +41,22 @@ namespace Emby.Plugin.Danmu.Scraper.Bilibili.Entity
         [JsonPropertyName("data")]
         public List<Media> Data { get; set; } // Media class is in the same namespace Emby.Plugin.Danmu.Scraper.Bilibili.Entity
     }
+
+    public class BiliSearchTypeData
+    {
+        [JsonPropertyName("page")]
+        public int Page { get; set; }
+
+        [JsonPropertyName("pagesize")]
+        public int PageSize { get; set; }
+
+        [JsonPropertyName("numResults")]
+        public int NumResults { get; set; }
+
+        [JsonPropertyName("numPages")]
+        public int NumPages { get; set; }
+
+        [JsonPropertyName("result")]
+        public List<Media> Result { get; set; }
+    }
 }

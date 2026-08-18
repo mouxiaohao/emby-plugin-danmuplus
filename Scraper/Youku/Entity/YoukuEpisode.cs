@@ -40,6 +40,12 @@ namespace Emby.Plugin.Danmu.Scraper.Youku.Entity
         [DataMember(Name="category")]
         public string Category { get; set; }
 
+        [DataMember(Name="show_id")]
+        public string ShowId { get; set; }
+
+        [DataMember(Name="show_title")]
+        public string ShowTitle { get; set; }
+
 
         public int TotalMat
         {

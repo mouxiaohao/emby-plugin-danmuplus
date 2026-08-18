@@ -5,6 +5,7 @@ using System.Linq;
 using System.Reflection;
 using System.Runtime.Serialization;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using Emby.Plugin.Danmu.Core;
 using Emby.Plugin.Danmu.Core.Controllers;
@@ -22,6 +23,15 @@ namespace Emby.Plugin.Danmu.RegressionTests
     {
         public static void Run()
         {
+            AlignsSparseAndGappedSegmentsByExplicitNumbers();
+            PreservesExplicitAnchorsAndRequestedLocalRows();
+            FallsBackPositionallyForEveryUnreliableNumberShape();
+            ResolvesOnlyAuthoritativeSourceAnchorsAndFailsClosedOnOverflow();
+            PreservesSourceNumberProvenanceAndOrdinalOrder();
+            AdvancesContinuationBySegmentWindowFrontiers();
+            ContinuesOwningWindowsWithForwardOnlyIndependentModes();
+            FingerprintsConsideredUnmappedGapRowsAndRejectsLegacyEntryPoints();
+            RoundTripsAuthoritativeCompactSelectionsWithoutLeakingServerEvidence();
             PreservesExplicitEvidenceAndBuildsRemainingRuns();
             SupportsSourceStartsAndPartialCoverage();
             MapsFrierenThirtyEightEpisodesAcrossTwoUpstreamSeasons();
@@ -35,6 +45,7 @@ namespace Emby.Plugin.Danmu.RegressionTests
             DoesNotClassifySingleSourcePartialCoverageAsComposite();
             MapsTwentyFiveEpisodePartSourcesWithBindingSafety();
             CoordinatesSingletonAndSeriesTargetSetsIdentically();
+            CoordinatesWithoutChildDeadlineAndPropagatesExplicitCancellation();
             MapsMultipleSpecialRunsWithoutChangingLocalSeasonMembership();
             SeparatesCanonicalMediaIdentityFromLookupToken();
             RejectsOverlapsAndUnverifiedMappings();
@@ -51,8 +62,810 @@ namespace Emby.Plugin.Danmu.RegressionTests
             RejectsForeignAndStaleTemporaryRangesWithoutMutatingThePlan();
             VerifiesControllerParityMetadataAndDialogResetContracts();
             PreservesServerCandidateScoreAcrossOwningPlansAndGroups();
+            PreservesSourceMetadataAcrossEveryBindingEntryPoint();
             ProjectsBoundedSourceEpisodeNamesWithoutChangingPlanAuthority();
             PreservesExactBindingScoreIntoSelectedCandidate();
+            DerivesSourceSurplusOnlyFromAppliedAuthoritativeDetails();
+        }
+
+        private static void AlignsSparseAndGappedSegmentsByExplicitNumbers()
+        {
+            var sparseNumbers = Enumerable.Range(1, 6).Concat(Enumerable.Range(10, 4)).ToArray();
+            var sparse = sparseNumbers.Select(number => new CompositeSeasonLocalEpisode
+            {
+                ItemId = "spy-" + number, EpisodeNumber = number, SortOrder = number,
+            }).ToList();
+            var request = Segment("spy-1", "DandanID", "spy-s3", "source-1",
+                Enumerable.Range(1, 13).Select(number => Source("source-" + number, "comment-" + number, number)));
+            request.AlignmentIntent = CompositeSeasonAlignmentIntent.DefaultZeroOffset;
+            Assert(CompositeSeasonPlanner.TryResolveSegment(sparse, request, out var resolved, out var error), error);
+            Assert(resolved.Mode == CompositeSeasonAlignmentMode.NumberAware &&
+                   resolved.ConsideredLocalEpisodes.Count == 10 && resolved.Mappings.Count == 10 &&
+                   resolved.Mappings.Single(mapping => mapping.LocalEpisodeItemId == "spy-10").SourceEpisodeId == "source-10" &&
+                   !resolved.Mappings.Any(mapping => mapping.SourceEpisodeId == "source-7" ||
+                                                    mapping.SourceEpisodeId == "source-8" ||
+                                                    mapping.SourceEpisodeId == "source-9"),
+                "Spy Family S3 sparse local inventory must preserve E1-E6/E10-E13 coordinates");
+
+            var sourceGap = Segment("local-29", "DandanID", "gap-source", "gap-1", new[]
+            {
+                Source("gap-1", "gap-comment-1", 1), Source("gap-3", "gap-comment-3", 3),
+            });
+            sourceGap.AlignmentIntent = CompositeSeasonAlignmentIntent.ExplicitAnchor;
+            Assert(CompositeSeasonPlanner.TryResolveSegment(LocalEpisodes(29, 31), sourceGap,
+                out resolved, out error), error);
+            Assert(resolved.Mappings.Select(mapping => mapping.LocalEpisodeItemId + ":" + mapping.SourceEpisodeId)
+                       .SequenceEqual(new[] { "local-29:gap-1", "local-31:gap-3" }),
+                "a missing source coordinate must leave only the corresponding local row unmatched");
+
+            var startsAtTen = Segment("local-10", "DandanID", "start-ten", "ten-1",
+                Enumerable.Range(1, 12).Select(number => Source("ten-" + number, "ten-comment-" + number, number)));
+            startsAtTen.AlignmentIntent = CompositeSeasonAlignmentIntent.DefaultZeroOffset;
+            Assert(CompositeSeasonPlanner.TryResolveSegment(LocalEpisodes(10, 12), startsAtTen,
+                out resolved, out error), error);
+            Assert(resolved.Mappings.Select(mapping => mapping.SourceEpisodeNumber)
+                       .SequenceEqual(new int?[] { 10, 11, 12 }),
+                "an inventory beginning at local E10 must still use zero-offset source E10");
+
+            var scopedLocals = LocalEpisodes(1, 2);
+            scopedLocals.Add(new CompositeSeasonLocalEpisode
+            {
+                ItemId = "excluded-foreign", EpisodeNumber = null, SortOrder = 3,
+            });
+            var excludedMapping = Mapping("excluded-foreign", "DandanID", "foreign",
+                "foreign-source", "foreign-comment");
+            Assert(CompositeSeasonPlanner.TryCreatePlan(scopedLocals, new[] { excludedMapping },
+                out var scopedPlan, out error), error);
+            var scopedRequest = Segment("local-1", "DandanID", "eligible", "eligible-1", new[]
+            {
+                Source("eligible-1", "eligible-comment-1", 1),
+                Source("eligible-2", "eligible-comment-2", 2),
+            });
+            scopedRequest.AlignmentIntent = CompositeSeasonAlignmentIntent.DefaultZeroOffset;
+            Assert(CompositeSeasonPlanner.TryApplySegmentResolved(scopedPlan, scopedRequest,
+                    out _, out resolved, out error) && resolved.Mode == CompositeSeasonAlignmentMode.NumberAware,
+                "already excluded or mapped out-of-range rows must not change eligible segment reliability: " + error);
+        }
+
+        private static void PreservesExplicitAnchorsAndRequestedLocalRows()
+        {
+            var frieren = new[]
+            {
+                new CompositeSeasonLocalEpisode { ItemId = "frieren-29", EpisodeNumber = 29, SortOrder = 29 },
+                new CompositeSeasonLocalEpisode { ItemId = "frieren-31", EpisodeNumber = 31, SortOrder = 31 },
+            };
+            var request = Segment("frieren-29", "DandanID", "frieren-s2", "frieren-source-1",
+                Enumerable.Range(1, 3).Select(number => Source("frieren-source-" + number,
+                    "frieren-comment-" + number, number)));
+            request.AlignmentIntent = CompositeSeasonAlignmentIntent.ExplicitAnchor;
+            Assert(CompositeSeasonPlanner.TryResolveSegment(frieren, request, out var resolved, out var error), error);
+            Assert(resolved.Mappings.Select(mapping => mapping.LocalEpisodeItemId + ":" + mapping.SourceEpisodeNumber)
+                       .SequenceEqual(new[] { "frieren-29:1", "frieren-31:3" }),
+                "Frieren local E29->source E1 must retain its affine delta across missing local E30");
+
+            var shifted = Segment("local-1", "DandanID", "shifted", "shifted-5",
+                Enumerable.Range(1, 8).Select(number => Source("shifted-" + number,
+                    "shifted-comment-" + number, number)), 2);
+            shifted.AlignmentIntent = CompositeSeasonAlignmentIntent.ExplicitAnchor;
+            Assert(CompositeSeasonPlanner.TryResolveSegment(LocalEpisodes(1, 4), shifted,
+                out resolved, out error), error);
+            Assert(resolved.ConsideredLocalEpisodes.Count == 2 && resolved.Mappings.Count == 2 &&
+                   resolved.Mappings[0].SourceEpisodeNumber == 5 && resolved.Mappings[1].SourceEpisodeNumber == 6,
+                "an explicit first-segment E1->source E5 anchor must override zero offset and count local rows");
+
+            var gappedSources = new[]
+            {
+                Source("continued-1", "continued-comment-1", 1),
+                Source("continued-3", "continued-comment-3", 3),
+            };
+            var continuedSource = new CompositeSeasonSourceIdentity
+            {
+                ProviderId = "DandanID", MediaId = "continued",
+            };
+            Assert(CompositeSeasonPlanner.TryCreatePlan(LocalEpisodes(29, 31), null,
+                out var continuedPlan, out error), error);
+            Assert(CompositeSeasonPlanner.TryApplyRemainingSourceEpisodes(
+                continuedPlan, continuedSource, gappedSources, "manual",
+                out continuedPlan, out error), error);
+            Assert(continuedPlan.Mappings.Select(mapping => mapping.LocalEpisodeItemId + ":" + mapping.SourceEpisodeId)
+                       .SequenceEqual(new[] { "local-29:continued-1", "local-31:continued-3" }) &&
+                   RunIds(continuedPlan.UnmatchedRuns.Single()) == "local-30",
+                "a numeric gap must be considered once and must not be re-anchored from applied-count progress");
+
+            var existing = Mapping("local-29", "DandanID", "continued", "continued-1", "continued-comment-1");
+            existing.SourceEpisodeNumber = 1;
+            Assert(CompositeSeasonPlanner.TryCreatePlan(LocalEpisodes(29, 31), new[] { existing },
+                out var reconstructed, out error), error);
+            Assert(CompositeSeasonMatchService.TryNormalizeAndContinueSource(
+                reconstructed, continuedSource, gappedSources, "reconstructed",
+                out reconstructed, out _, out error), error);
+            Assert(reconstructed.Mappings.Single(mapping => mapping.LocalEpisodeItemId == "local-31").SourceEpisodeId ==
+                   "continued-3" && RunIds(reconstructed.UnmatchedRuns.Single()) == "local-30",
+                "an existing local E29->source E1 mapping must establish the same affine anchor for E31->source E3");
+
+            var conflicting = new[]
+            {
+                Mapping("local-29", "DandanID", "continued", "continued-1", "continued-comment-1"),
+                Mapping("local-30", "DandanID", "continued", "continued-3", "continued-comment-3"),
+            };
+            conflicting[0].SourceEpisodeNumber = 1;
+            conflicting[1].SourceEpisodeNumber = 3;
+            Assert(CompositeSeasonPlanner.TryCreatePlan(LocalEpisodes(29, 31), conflicting,
+                out var conflictingPlan, out error), error);
+            Assert(!CompositeSeasonMatchService.TryNormalizeAndContinueSource(
+                    conflictingPlan, continuedSource, gappedSources, "reconstructed",
+                    out _, out _, out error) && error.Contains("conflict",
+                    StringComparison.OrdinalIgnoreCase),
+                "conflicting existing offsets inside one window must fail closed instead of re-anchoring");
+        }
+
+        private static void FallsBackPositionallyForEveryUnreliableNumberShape()
+        {
+            var invalidLocalNumbers = new int?[] { null, 0, -1 };
+            foreach (var invalid in invalidLocalNumbers)
+            {
+                var locals = LocalEpisodes(1, 2);
+                locals[1].EpisodeNumber = invalid;
+                AssertFallback(locals, new[]
+                {
+                    Source("source-1", "comment-1", 1), Source("source-2", "comment-2", 2),
+                }, "unreliable local " + (invalid?.ToString() ?? "null"));
+            }
+            var duplicateLocals = LocalEpisodes(1, 2);
+            duplicateLocals[1].EpisodeNumber = 1;
+            AssertFallback(duplicateLocals, new[]
+            {
+                Source("source-1", "comment-1", 1), Source("source-2", "comment-2", 2),
+            }, "duplicate local");
+
+            foreach (var invalid in new int?[] { null, 0, -1 })
+            {
+                AssertFallback(LocalEpisodes(1, 2), new[]
+                {
+                    SourceNullable("source-1", "comment-1", 1, 1),
+                    SourceNullable("source-2", "comment-2", invalid, 2),
+                }, "unreliable source " + (invalid?.ToString() ?? "null"));
+            }
+            AssertFallback(LocalEpisodes(1, 2), new[]
+            {
+                Source("source-1", "comment-1", 1), Source("source-2", "comment-2", 1),
+            }, "duplicate source");
+
+            void AssertFallback(IEnumerable<CompositeSeasonLocalEpisode> locals,
+                IEnumerable<CompositeSeasonSourceEpisode> sources, string fixture)
+            {
+                var sourceList = sources.ToList();
+                var fallback = Segment(locals.First().ItemId, "DandanID", fixture,
+                    sourceList[0].EpisodeId, sourceList);
+                fallback.AlignmentIntent = CompositeSeasonAlignmentIntent.DefaultZeroOffset;
+                Assert(CompositeSeasonPlanner.TryResolveSegment(locals, fallback,
+                    out var resolution, out var error), fixture + ": " + error);
+                Assert(resolution.Mode == CompositeSeasonAlignmentMode.PositionalFallback &&
+                       resolution.Diagnostic == "positional-fallback: unreliable local or source numbering" &&
+                       resolution.Mappings.Count == 2,
+                    fixture + " must choose one stable positional mode for the whole segment");
+            }
+        }
+
+        private static void ResolvesOnlyAuthoritativeSourceAnchorsAndFailsClosedOnOverflow()
+        {
+            var sources = Enumerable.Range(1, 3)
+                .Select(number => Source("anchor-" + number, "anchor-comment-" + number, number)).ToList();
+            var numberOnly = Segment("local-1", "DandanID", "number-only", string.Empty, sources);
+            numberOnly.SourceStartEpisodeNumber = 2;
+            numberOnly.AlignmentIntent = CompositeSeasonAlignmentIntent.ExplicitAnchor;
+            Assert(CompositeSeasonPlanner.TryResolveSegment(LocalEpisodes(1, 2), numberOnly,
+                out var resolved, out var error) && resolved.Mappings[0].SourceEpisodeId == "anchor-2", error);
+
+            numberOnly.SourceStartEpisodeId = "anchor-3";
+            numberOnly.SourceStartEpisodeNumber = 1;
+            Assert(CompositeSeasonPlanner.TryResolveSegment(LocalEpisodes(1, 1), numberOnly,
+                out resolved, out error) && resolved.Mappings[0].SourceEpisodeId == "anchor-3",
+                "an exact SourceStartEpisodeId must override a conflicting number-only hint");
+
+            var unreliable = new[]
+            {
+                SourceNullable("anchor-1", "comment-1", 1, 1),
+                SourceNullable("anchor-null", "comment-null", null, 2),
+            };
+            var rejected = Segment("local-1", "DandanID", "unreliable-number-only", string.Empty, unreliable);
+            rejected.SourceStartEpisodeNumber = 1;
+            Assert(!CompositeSeasonPlanner.TryResolveSegment(LocalEpisodes(1, 1), rejected,
+                    out _, out error) && error.Contains("number-only", StringComparison.OrdinalIgnoreCase),
+                "a unique requested number inside an otherwise unreliable source scope must fail closed");
+
+            var overflowLocals = new[]
+            {
+                new CompositeSeasonLocalEpisode { ItemId = "overflow-1", EpisodeNumber = 1 },
+                new CompositeSeasonLocalEpisode { ItemId = "overflow-max", EpisodeNumber = int.MaxValue },
+            };
+            var overflow = Segment("overflow-1", "DandanID", "overflow", "overflow-source-2", new[]
+            {
+                Source("overflow-source-1", "overflow-comment-1", 1),
+                Source("overflow-source-2", "overflow-comment-2", 2),
+            });
+            overflow.AlignmentIntent = CompositeSeasonAlignmentIntent.ExplicitAnchor;
+            Assert(!CompositeSeasonPlanner.TryResolveSegment(overflowLocals, overflow,
+                    out _, out error) && error.Contains("overflow", StringComparison.OrdinalIgnoreCase),
+                "checked explicit-anchor arithmetic must fail before producing partial mappings");
+        }
+
+        private static void PreservesSourceNumberProvenanceAndOrdinalOrder()
+        {
+            var media = new ScraperMedia
+            {
+                Episodes = new List<ScraperEpisode>
+                {
+                    new ScraperEpisode { Id = "ordinal-a", CommentId = "comment-a", EpisodeNumber = null },
+                    new ScraperEpisode { Id = "ordinal-b", CommentId = "comment-b", EpisodeNumber = 0 },
+                    new ScraperEpisode { Id = "ordinal-c", CommentId = "comment-c", EpisodeNumber = -1 },
+                },
+            };
+            var projected = CompositeSeasonMatchService.GetSourceEpisodes(media);
+            Assert(projected.Select(source => source.EpisodeNumber).SequenceEqual(new int?[] { null, 0, -1 }) &&
+                   projected.Select(source => source.SourceOrdinal).SequenceEqual(new[] { 1, 2, 3 }),
+                "source projection must preserve nullable provider numbers separately from stable ordinals");
+
+            var reordered = new[]
+            {
+                SourceNullable("ordinal-c", "comment-c", null, 30),
+                SourceNullable("ordinal-a", "comment-a", null, 10),
+                SourceNullable("ordinal-b", "comment-b", null, 20),
+            };
+            var request = Segment("local-1", "DandanID", "ordinal", "ordinal-a", reordered);
+            Assert(CompositeSeasonPlanner.TryResolveSegment(LocalEpisodes(1, 3), request,
+                out var resolved, out var error), error);
+            Assert(resolved.Mappings.Select(mapping => mapping.SourceEpisodeId)
+                       .SequenceEqual(new[] { "ordinal-a", "ordinal-b", "ordinal-c" }),
+                "positional fallback must use stable SourceOrdinal rather than incidental list order");
+
+            foreach (var invalidSources in new[]
+            {
+                new[] { Source("", "comment", 1) },
+                new[] { Source("duplicate", "comment-1", 1), Source("duplicate", "comment-2", 2) },
+                new[] { Source("blank-comment", "", 1) },
+            })
+            {
+                var invalid = Segment("local-1", "DandanID", "invalid", invalidSources[0].EpisodeId, invalidSources);
+                Assert(!CompositeSeasonPlanner.TryResolveSegment(LocalEpisodes(1, 1), invalid,
+                    out _, out _), "blank/duplicate source identity and blank CommentId must remain structural failures");
+            }
+        }
+
+        private static void AdvancesContinuationBySegmentWindowFrontiers()
+        {
+            var continuing = new CompositeSeasonSourceIdentity
+            {
+                ProviderId = "DandanID", MediaId = "window-source",
+            };
+            var foreign = Mapping("local-32", "DandanID", "foreign-boundary",
+                "foreign-1", "foreign-comment-1");
+            Assert(CompositeSeasonPlanner.TryCreatePlan(LocalEpisodes(29, 35), new[] { foreign },
+                out var plan, out var error), error);
+            var gapped = new[]
+            {
+                SourceNullable("window-1", "window-comment-1", 1, 1),
+                SourceNullable("window-3", "window-comment-3", 3, 2),
+                SourceNullable("window-4", "window-comment-4", 4, 3),
+                SourceNullable("window-5", "window-comment-5", 5, 4),
+            };
+            Assert(CompositeSeasonMatchService.TryNormalizeAndContinueSource(
+                plan, continuing, gapped, "window", out plan, out var exhausted, out error), error);
+            Assert(exhausted &&
+                   plan.Mappings.Single(mapping => mapping.LocalEpisodeItemId == "local-29").SourceEpisodeId == "window-1" &&
+                   plan.Mappings.Single(mapping => mapping.LocalEpisodeItemId == "local-31").SourceEpisodeId == "window-3" &&
+                   plan.Mappings.Single(mapping => mapping.LocalEpisodeItemId == "local-33").SourceEpisodeId == "window-4" &&
+                   plan.Mappings.Single(mapping => mapping.LocalEpisodeItemId == "local-34").SourceEpisodeId == "window-5" &&
+                   plan.UnmatchedRuns.SelectMany(run => run.Episodes).Select(local => local.ItemId)
+                       .OrderBy(id => id, StringComparer.Ordinal).SequenceEqual(new[] { "local-30", "local-35" }),
+                "numeric gaps must advance the frontier; a foreign boundary consumes no source and later windows must not back-pick");
+
+            var differentOffsets = new[]
+            {
+                Mapping("local-29", "DandanID", "window-source", "offset-1", "offset-comment-1"),
+                Mapping("local-31", "DandanID", "foreign-boundary", "foreign-2", "foreign-comment-2"),
+                Mapping("local-32", "DandanID", "window-source", "offset-3", "offset-comment-3"),
+            };
+            differentOffsets[0].SourceEpisodeNumber = 1;
+            differentOffsets[2].SourceEpisodeNumber = 3;
+            var offsetSources = Enumerable.Range(1, 4)
+                .Select(number => SourceNullable("offset-" + number, "offset-comment-" + number,
+                    number, number)).ToList();
+            Assert(CompositeSeasonPlanner.TryCreatePlan(LocalEpisodes(29, 33), differentOffsets,
+                out plan, out error), error);
+            Assert(CompositeSeasonMatchService.TryNormalizeAndContinueSource(
+                plan, continuing, offsetSources, "window", out plan, out exhausted, out error), error);
+            Assert(exhausted &&
+                   plan.Mappings.Single(mapping => mapping.LocalEpisodeItemId == "local-30").SourceEpisodeId == "offset-2" &&
+                   plan.Mappings.Single(mapping => mapping.LocalEpisodeItemId == "local-33").SourceEpisodeId == "offset-4",
+                "same-source exact mappings may establish different affine offsets after a foreign-source boundary");
+
+            var positionalLocals = Enumerable.Range(1, 5).Select(number => new CompositeSeasonLocalEpisode
+            {
+                ItemId = "positional-local-" + number,
+                EpisodeNumber = null,
+                SortOrder = number,
+            }).ToList();
+            var positionalForeign = Mapping("positional-local-3", "DandanID", "foreign-boundary",
+                "positional-foreign", "positional-foreign-comment");
+            var positionalSources = Enumerable.Range(1, 4).Select(number =>
+                SourceNullable("positional-source-" + number, "positional-comment-" + number,
+                    null, number)).ToList();
+            Assert(CompositeSeasonPlanner.TryCreatePlan(positionalLocals, new[] { positionalForeign },
+                out plan, out error), error);
+            Assert(CompositeSeasonMatchService.TryNormalizeAndContinueSource(
+                plan, continuing, positionalSources, "window", out plan, out exhausted, out error), error);
+            Assert(exhausted &&
+                   plan.Mappings.Single(mapping => mapping.LocalEpisodeItemId == "positional-local-1").SourceEpisodeId == "positional-source-1" &&
+                   plan.Mappings.Single(mapping => mapping.LocalEpisodeItemId == "positional-local-2").SourceEpisodeId == "positional-source-2" &&
+                   plan.Mappings.Single(mapping => mapping.LocalEpisodeItemId == "positional-local-4").SourceEpisodeId == "positional-source-3" &&
+                   plan.Mappings.Single(mapping => mapping.LocalEpisodeItemId == "positional-local-5").SourceEpisodeId == "positional-source-4",
+                "positional windows must resume at the next frontier without charging the foreign boundary");
+
+            var sparseFrontierLocals = new[]
+            {
+                new CompositeSeasonLocalEpisode { ItemId = "frontier-29", EpisodeNumber = 29, SortOrder = 1 },
+                new CompositeSeasonLocalEpisode { ItemId = "frontier-31", EpisodeNumber = 31, SortOrder = 2 },
+                new CompositeSeasonLocalEpisode { ItemId = "frontier-boundary", EpisodeNumber = 32, SortOrder = 3 },
+            };
+            var frontierBoundary = Mapping("frontier-boundary", "DandanID", "foreign-boundary",
+                "frontier-foreign", "frontier-foreign-comment");
+            var frontierSources = Enumerable.Range(1, 3).Select(number =>
+                SourceNullable("frontier-source-" + number, "frontier-comment-" + number,
+                    number, number)).ToList();
+            Assert(CompositeSeasonPlanner.TryCreatePlan(sparseFrontierLocals, new[] { frontierBoundary },
+                out plan, out error), error);
+            Assert(CompositeSeasonMatchService.TryNormalizeAndContinueSource(
+                plan, continuing, frontierSources, "window", out plan, out exhausted, out error), error);
+            Assert(exhausted && plan.Mappings.Any(mapping => mapping.SourceEpisodeId == "frontier-source-1") &&
+                   plan.Mappings.Any(mapping => mapping.SourceEpisodeId == "frontier-source-3") &&
+                   !plan.Mappings.Any(mapping => mapping.SourceEpisodeId == "frontier-source-2"),
+                "frontier exhaustion must remain true after advancing past an unused source coordinate");
+        }
+
+        private static void FingerprintsConsideredUnmappedGapRowsAndRejectsLegacyEntryPoints()
+        {
+            var local = LocalEpisodes(1, 3);
+            var source = new CompositeSeasonSourceIdentity
+            {
+                ProviderId = "DandanID", MediaId = "fingerprint-gap", MediaLookupId = "fingerprint-gap",
+            };
+            var sourceEpisodes = new List<CompositeSeasonSourceEpisode>
+            {
+                SourceNullable("fingerprint-source-1", "fingerprint-comment-1", 1, 1),
+                SourceNullable("fingerprint-source-3", "fingerprint-comment-3", 3, 2),
+            };
+            Assert(CompositeSeasonPlanner.TryCreatePlan(local, null, out var plan, out var error), error);
+            var request = new CompositeSeasonSegmentRequest
+            {
+                LocalStartEpisodeItemId = "local-1",
+                RequestedEpisodeCount = 3,
+                Source = source,
+                SourceEpisodes = sourceEpisodes,
+                SourceStartEpisodeId = "fingerprint-source-1",
+                AlignmentIntent = CompositeSeasonAlignmentIntent.DefaultZeroOffset,
+            };
+            Assert(CompositeSeasonPlanner.TryApplySegmentResolved(
+                plan, request, out plan, out var resolution, out error), error);
+            Assert(resolution.ConsideredLocalEpisodes.Count == 3 && plan.Mappings.Count == 2 &&
+                   !plan.Mappings.Any(mapping => mapping.LocalEpisodeItemId == "local-2"),
+                "the fingerprint fixture must contain one considered local row left unmapped by a source coordinate gap");
+
+            var context = new SeasonPlanningContext
+            {
+                SeriesId = "fingerprint-series",
+                SeasonId = "fingerprint-season",
+                TargetSeasonNumber = 1,
+                StructureFingerprint = "fingerprint-structure",
+            };
+            var selection = new DanmuCompositeSeasonSelection
+            {
+                MappingProtocolVersion = DanmuMappingProtocol.CurrentVersion,
+                AlignmentIntent = DanmuCompositeAlignmentIntentWire.DefaultZeroOffset,
+                ServerResolvedAlignmentMode = resolution.Mode,
+                Site = source.ProviderId,
+                CandidateId = source.MediaLookupId,
+                LocalStartEpisodeItemId = "local-1",
+                RequestedEpisodeCount = 3,
+                SourceStartEpisodeId = "fingerprint-source-1",
+                MatchOrigin = "manual",
+                SelectionEvidenceToken = "fingerprint-evidence",
+                ServerSourceEpisodes = sourceEpisodes,
+                ServerConsideredLocalEpisodeItemIds = new List<string> { "local-1", "local-3" },
+            };
+            var withoutGap = SeasonPlanningContextBuilder.CreatePlanFingerprint(
+                context, new[] { selection }, plan);
+            selection.ServerConsideredLocalEpisodeItemIds = new List<string>
+            {
+                "local-1", "local-2", "local-3",
+            };
+            var withGap = SeasonPlanningContextBuilder.CreatePlanFingerprint(
+                context, new[] { selection }, plan);
+            Assert(!string.Equals(withoutGap, withGap, StringComparison.Ordinal) &&
+                   plan.Mappings.Count == 2,
+                "adding a considered but source-gap-unmapped local ItemId must stale the digest even when final exact mappings are unchanged");
+
+            var repositoryRoot = Path.GetFullPath(Path.Combine(
+                AppContext.BaseDirectory, "..", "..", "..", ".."));
+            var controller = File.ReadAllText(Path.Combine(
+                repositoryRoot, "Core", "Controllers", "DanmuController.cs")).Replace("\r\n", "\n");
+            var controllerBuild = SliceSource(controller,
+                "private async Task<CompositePlanBuild> BuildCompositePlanAsync(",
+                "private static bool ShouldReportVerifiedSourceEpisodeSurplus(");
+            var library = File.ReadAllText(Path.Combine(
+                repositoryRoot, "LibraryManagerEventsHelper.cs")).Replace("\r\n", "\n");
+            var automaticBuild = SliceSource(library,
+                "private async Task<bool> DownloadAutomaticSeasonWithCompositePlan(",
+                "private static DanmuCompositeSeasonSelection CreateAutomaticSelection(");
+            var automaticRebuild = SliceSource(library,
+                "private async Task<AutomaticSeasonPlanSnapshot> RebuildAutomaticPlanAsync(",
+                "internal static bool CanUseAutomaticSearch(");
+            foreach (var productionPath in new[] { controllerBuild, automaticBuild, automaticRebuild })
+            {
+                Assert(!productionPath.Contains("TryContinueSourceAcrossSegmentWindows(", StringComparison.Ordinal) &&
+                       !productionPath.Contains("TryNormalizeAndContinueSource(", StringComparison.Ordinal) &&
+                       !productionPath.Contains("TryApplyRemainingSourceEpisodes(", StringComparison.Ordinal),
+                    "submitted controller and automatic build/rebuild paths must use the authoritative submitted-segment resolver, never legacy continuation helpers");
+            }
+        }
+
+        private static void ContinuesOwningWindowsWithForwardOnlyIndependentModes()
+        {
+            var source = new CompositeSeasonSourceIdentity
+            {
+                ProviderId = "DandanID", MediaId = "owning-windows", MediaLookupId = "owning-windows",
+            };
+            var positionalRows = new List<CompositeSeasonLocalEpisode>
+            {
+                new CompositeSeasonLocalEpisode
+                {
+                    ItemId = "pos-owning-a", EpisodeNumber = null, SortOrder = 1,
+                    ParentSeasonNumber = 1, Ownership = CompositeSeasonOwnershipKind.Owning,
+                },
+                new CompositeSeasonLocalEpisode
+                {
+                    ItemId = "pos-boundary", EpisodeNumber = 50, SortOrder = 2,
+                    ParentSeasonNumber = 0, Ownership = CompositeSeasonOwnershipKind.Supplemental,
+                },
+                new CompositeSeasonLocalEpisode
+                {
+                    ItemId = "pos-owning-b", EpisodeNumber = null, SortOrder = 3,
+                    ParentSeasonNumber = 1, Ownership = CompositeSeasonOwnershipKind.Owning,
+                },
+            };
+            var positionalSources = new[]
+            {
+                SourceNullable("pos-source-1", "pos-comment-1", null, 1),
+                SourceNullable("pos-source-2", "pos-comment-2", null, 2),
+            };
+            Assert(CompositeSeasonPlanner.TryCreatePlan(
+                positionalRows, null, out var positionalPlan, out var error), error);
+            Assert(CompositeSeasonPlanner.TryApplyRemainingOwningSourceEpisodes(
+                    positionalPlan, source, positionalSources, "automatic-primary",
+                    out positionalPlan, out error), error);
+            Assert(positionalPlan.Mappings.Count == 2 &&
+                   positionalPlan.Mappings.Single(mapping =>
+                       mapping.LocalEpisodeItemId == "pos-owning-a").SourceEpisodeId == "pos-source-1" &&
+                   positionalPlan.Mappings.Single(mapping =>
+                       mapping.LocalEpisodeItemId == "pos-owning-b").SourceEpisodeId == "pos-source-2" &&
+                   !positionalPlan.Mappings.Any(mapping => mapping.LocalEpisodeItemId == "pos-boundary"),
+                "multiple positional owning windows must carry a forward-only ordinal and treat non-owning rows as zero-consumption boundaries");
+
+            var switchingRows = new List<CompositeSeasonLocalEpisode>
+            {
+                new CompositeSeasonLocalEpisode
+                {
+                    ItemId = "switch-positional", EpisodeNumber = null, SortOrder = 1,
+                    ParentSeasonNumber = 1, Ownership = CompositeSeasonOwnershipKind.Owning,
+                },
+                new CompositeSeasonLocalEpisode
+                {
+                    ItemId = "switch-boundary", EpisodeNumber = 99, SortOrder = 2,
+                    ParentSeasonNumber = 0, Ownership = CompositeSeasonOwnershipKind.Supplemental,
+                },
+                new CompositeSeasonLocalEpisode
+                {
+                    ItemId = "switch-numeric-10", EpisodeNumber = 10, SortOrder = 3,
+                    ParentSeasonNumber = 1, Ownership = CompositeSeasonOwnershipKind.Owning,
+                },
+                new CompositeSeasonLocalEpisode
+                {
+                    ItemId = "switch-numeric-11", EpisodeNumber = 11, SortOrder = 4,
+                    ParentSeasonNumber = 1, Ownership = CompositeSeasonOwnershipKind.Owning,
+                },
+            };
+            var switchingSources = new[]
+            {
+                SourceNullable("switch-source-1", "switch-comment-1", 1, 1),
+                SourceNullable("switch-source-10", "switch-comment-10", 10, 2),
+                SourceNullable("switch-source-11", "switch-comment-11", 11, 3),
+            };
+            Assert(CompositeSeasonPlanner.TryCreatePlan(
+                switchingRows, null, out var switchingPlan, out error), error);
+            Assert(CompositeSeasonPlanner.TryApplyRemainingOwningSourceEpisodes(
+                    switchingPlan, source, switchingSources, "automatic-primary",
+                    out switchingPlan, out error), error);
+            Assert(switchingPlan.Mappings.Count == 3 &&
+                   switchingPlan.Mappings.Single(mapping =>
+                       mapping.LocalEpisodeItemId == "switch-positional").SourceEpisodeId == "switch-source-1" &&
+                   switchingPlan.Mappings.Single(mapping =>
+                       mapping.LocalEpisodeItemId == "switch-numeric-10").SourceEpisodeId == "switch-source-10" &&
+                   switchingPlan.Mappings.Single(mapping =>
+                       mapping.LocalEpisodeItemId == "switch-numeric-11").SourceEpisodeId == "switch-source-11",
+                "a later owning window must independently switch from positional fallback to number-aware alignment without reusing the first source Episode");
+        }
+
+        private static void RoundTripsAuthoritativeCompactSelectionsWithoutLeakingServerEvidence()
+        {
+            var local = new List<CompositeSeasonLocalEpisode>
+            {
+                new CompositeSeasonLocalEpisode
+                {
+                    ItemId = "roundtrip-local-10", EpisodeNumber = 10, SortOrder = 1,
+                    ParentSeasonNumber = 3, Ownership = CompositeSeasonOwnershipKind.Owning,
+                },
+                new CompositeSeasonLocalEpisode
+                {
+                    ItemId = "roundtrip-local-12", EpisodeNumber = 12, SortOrder = 2,
+                    ParentSeasonNumber = 3, Ownership = CompositeSeasonOwnershipKind.Owning,
+                },
+            };
+            var source = new CompositeSeasonSourceIdentity
+            {
+                ProviderId = "DandanID", MediaId = "roundtrip-media", MediaLookupId = "roundtrip-candidate",
+            };
+            var sourceEpisodes = new List<CompositeSeasonSourceEpisode>
+            {
+                SourceNullable("roundtrip-source-10", "private-comment-10", 10, 1),
+                SourceNullable("roundtrip-source-12", "private-comment-12", 12, 2),
+            };
+            Assert(CompositeSeasonPlanner.TryCreatePlan(local, null, out var plan, out var error), error);
+            var request = new CompositeSeasonSegmentRequest
+            {
+                LocalStartEpisodeItemId = "roundtrip-local-10",
+                RequestedEpisodeCount = 0,
+                Source = source,
+                SourceEpisodes = sourceEpisodes,
+                SourceStartEpisodeId = "roundtrip-source-10",
+                SourceStartEpisodeNumber = 10,
+                AlignmentIntent = CompositeSeasonAlignmentIntent.DefaultZeroOffset,
+                Origin = "manual",
+                SelectionEvidenceToken = "roundtrip-evidence",
+            };
+            Assert(CompositeSeasonPlanner.TryApplySegmentResolved(
+                plan, request, out plan, out var resolution, out error), error);
+            var authoritative = new DanmuCompositeSeasonSelection
+            {
+                MappingProtocolVersion = DanmuMappingProtocol.CurrentVersion,
+                AlignmentIntent = DanmuCompositeAlignmentIntentWire.DefaultZeroOffset,
+                PlanGeneration = 73,
+                LocalStartEpisodeItemId = "roundtrip-local-10",
+                RequestedEpisodeCount = 0,
+                Site = source.ProviderId,
+                CandidateId = source.MediaLookupId,
+                SourceStartEpisodeId = "roundtrip-source-10",
+                SourceStartEpisodeNumber = 10,
+                MatchOrigin = "manual",
+                SelectionEvidenceToken = "roundtrip-evidence",
+                ServerResolvedAlignmentMode = resolution.Mode,
+                ServerSourceEpisodes = sourceEpisodes,
+                ServerConsideredLocalEpisodeItemIds = resolution.ConsideredLocalEpisodes
+                    .Select(episode => episode.ItemId).ToList(),
+            };
+            var context = new SeasonPlanningContext
+            {
+                SeriesId = "roundtrip-series",
+                SeasonId = "roundtrip-season",
+                TargetSeasonNumber = 3,
+                StructureFingerprint = "roundtrip-structure",
+            };
+            var expectedFingerprint = SeasonPlanningContextBuilder.CreatePlanFingerprint(
+                context, new[] { authoritative }, plan);
+
+            var projection = typeof(DanmuController).GetMethod(
+                "ToResponseCompositeSelections", BindingFlags.NonPublic | BindingFlags.Static);
+            Assert(projection != null, "authoritative previews must expose one compact selection projection");
+            var compact = (List<DanmuCompositeSeasonSelection>)projection.Invoke(
+                null, new object[] { new[] { authoritative } });
+            var json = JsonSerializer.Serialize(compact);
+            Assert(json.Contains("\"RequestedEpisodeCount\":0", StringComparison.Ordinal) &&
+                   json.Contains("\"LocalStartEpisodeItemId\":\"roundtrip-local-10\"", StringComparison.Ordinal) &&
+                   !json.Contains("ServerSource", StringComparison.Ordinal) &&
+                   !json.Contains("ServerResolvedAlignmentMode", StringComparison.Ordinal) &&
+                   !json.Contains("ServerConsideredLocalEpisodeItemIds", StringComparison.Ordinal) &&
+                   !json.Contains("CommentId", StringComparison.Ordinal) &&
+                   !json.Contains("CompositeSeasonEpisodeMapping", StringComparison.Ordinal),
+                "the response compact selection must preserve count/start intent without exposing exact mappings, CommentIds, resolved mode, or server provenance");
+            Assert(DanmuCompositeSeasonSelectionJson.TryParse(json, out var parsed, out error), error);
+            Assert(parsed.Count == 1 && parsed[0].RequestedEpisodeCount == 0 &&
+                   parsed[0].LocalStartEpisodeItemId == "roundtrip-local-10" &&
+                   parsed[0].SourceStartEpisodeId == "roundtrip-source-10",
+                "the compact response must roundtrip through the strict browser submission parser without inferring fields from presentation groups");
+
+            Assert(CompositeSeasonPlanner.TryCreatePlan(local, null, out var rebuiltPlan, out error), error);
+            var rebuiltRequest = new CompositeSeasonSegmentRequest
+            {
+                LocalStartEpisodeItemId = parsed[0].LocalStartEpisodeItemId,
+                RequestedEpisodeCount = parsed[0].RequestedEpisodeCount,
+                Source = source,
+                SourceEpisodes = sourceEpisodes,
+                SourceStartEpisodeId = parsed[0].SourceStartEpisodeId,
+                SourceStartEpisodeNumber = parsed[0].SourceStartEpisodeNumber,
+                AlignmentIntent = CompositeSeasonAlignmentIntent.DefaultZeroOffset,
+                Origin = parsed[0].MatchOrigin,
+                SelectionEvidenceToken = parsed[0].SelectionEvidenceToken,
+            };
+            Assert(CompositeSeasonPlanner.TryApplySegmentResolved(
+                rebuiltPlan, rebuiltRequest, out rebuiltPlan, out var rebuiltResolution, out error), error);
+            parsed[0].ServerResolvedAlignmentMode = rebuiltResolution.Mode;
+            parsed[0].ServerSourceEpisodes = sourceEpisodes;
+            parsed[0].ServerConsideredLocalEpisodeItemIds = rebuiltResolution.ConsideredLocalEpisodes
+                .Select(episode => episode.ItemId).ToList();
+            var rebuiltFingerprint = SeasonPlanningContextBuilder.CreatePlanFingerprint(
+                context, parsed, rebuiltPlan);
+            Assert(string.Equals(expectedFingerprint, rebuiltFingerprint, StringComparison.Ordinal),
+                "compact serialization, strict parse, and authoritative sparse-gap rebuild must reproduce the original fingerprint exactly");
+
+            parsed[0].CandidateId = "changed-candidate";
+            var changedFingerprint = SeasonPlanningContextBuilder.CreatePlanFingerprint(
+                context, parsed, rebuiltPlan);
+            Assert(!string.Equals(expectedFingerprint, changedFingerprint, StringComparison.Ordinal),
+                "changing a compact candidate identity must stale authoritative fingerprint validation");
+
+            DanmuCompositeSeasonSelection FreshFingerprintSelection()
+            {
+                return new DanmuCompositeSeasonSelection
+                {
+                    MappingProtocolVersion = authoritative.MappingProtocolVersion,
+                    AlignmentIntent = authoritative.AlignmentIntent,
+                    PlanGeneration = authoritative.PlanGeneration,
+                    LocalStartEpisodeItemId = authoritative.LocalStartEpisodeItemId,
+                    RequestedEpisodeCount = authoritative.RequestedEpisodeCount,
+                    Site = authoritative.Site,
+                    CandidateId = authoritative.CandidateId,
+                    SourceStartEpisodeId = authoritative.SourceStartEpisodeId,
+                    SourceStartEpisodeNumber = authoritative.SourceStartEpisodeNumber,
+                    MatchOrigin = authoritative.MatchOrigin,
+                    SelectionEvidenceToken = authoritative.SelectionEvidenceToken,
+                    ServerResolvedAlignmentMode = authoritative.ServerResolvedAlignmentMode,
+                    ServerSourceEpisodes = sourceEpisodes,
+                    ServerConsideredLocalEpisodeItemIds = authoritative.ServerConsideredLocalEpisodeItemIds.ToList(),
+                };
+            }
+
+            var fingerprintedMutations = new Action<DanmuCompositeSeasonSelection>[]
+            {
+                selection => selection.MappingProtocolVersion--,
+                selection => selection.AlignmentIntent = DanmuCompositeAlignmentIntentWire.ExplicitAnchor,
+                selection => selection.LocalStartEpisodeItemId = "roundtrip-local-12",
+                selection => selection.RequestedEpisodeCount = 1,
+                selection => selection.Site = "ChangedSite",
+                selection => selection.CandidateId = "changed-candidate",
+                selection => selection.SourceStartEpisodeId = "roundtrip-source-12",
+                selection => selection.SourceStartEpisodeNumber = 12,
+                selection => selection.MatchOrigin = "scored",
+                selection => selection.SelectionEvidenceToken = "changed-evidence",
+            };
+            foreach (var mutate in fingerprintedMutations)
+            {
+                var changed = FreshFingerprintSelection();
+                mutate(changed);
+                Assert(!string.Equals(expectedFingerprint,
+                        SeasonPlanningContextBuilder.CreatePlanFingerprint(
+                            context, new[] { changed }, plan), StringComparison.Ordinal),
+                    "every compact planning field other than separately fenced generation must participate in fingerprint staleness");
+            }
+            var generationCoordinator = new SeasonPlanGenerationCoordinator();
+            var compactGeneration = generationCoordinator.Begin(context.SeasonId);
+            Assert(generationCoordinator.IsCurrent(context.SeasonId, compactGeneration),
+                "the compact selection generation must initially be current");
+            generationCoordinator.Begin(context.SeasonId);
+            Assert(!generationCoordinator.IsCurrent(context.SeasonId, compactGeneration),
+                "PlanGeneration changes are fenced by the generation authority independently of the fingerprint digest");
+
+            var unnumberedLocal = new List<CompositeSeasonLocalEpisode>
+            {
+                new CompositeSeasonLocalEpisode
+                {
+                    ItemId = "unnumbered-local-10", EpisodeNumber = 10, SortOrder = 1,
+                    ParentSeasonNumber = 3, Ownership = CompositeSeasonOwnershipKind.Owning,
+                },
+            };
+            var unnumberedSourceEpisodes = new List<CompositeSeasonSourceEpisode>
+            {
+                SourceNullable("unnumbered-exact-id", "private-unnumbered-comment", null, 1),
+            };
+            Assert(CompositeSeasonPlanner.TryCreatePlan(
+                unnumberedLocal, null, out var unnumberedPlan, out error), error);
+            var unnumberedRequest = new CompositeSeasonSegmentRequest
+            {
+                LocalStartEpisodeItemId = "unnumbered-local-10",
+                RequestedEpisodeCount = 0,
+                Source = source,
+                SourceEpisodes = unnumberedSourceEpisodes,
+                SourceStartEpisodeId = "unnumbered-exact-id",
+                SourceStartEpisodeNumber = 0,
+                AlignmentIntent = CompositeSeasonAlignmentIntent.DefaultZeroOffset,
+                Origin = "manual",
+                SelectionEvidenceToken = "unnumbered-evidence",
+            };
+            Assert(CompositeSeasonPlanner.TryApplySegmentResolved(
+                    unnumberedPlan, unnumberedRequest, out unnumberedPlan,
+                    out var unnumberedResolution, out error), error);
+            Assert(unnumberedResolution.Mode == CompositeSeasonAlignmentMode.PositionalFallback &&
+                   unnumberedPlan.Mappings.Single().SourceEpisodeId == "unnumbered-exact-id",
+                "an unnumbered provider source must resolve by its exact EpisodeId and must not reinterpret wire number zero as an ordinal");
+            var unnumberedSelection = new DanmuCompositeSeasonSelection
+            {
+                MappingProtocolVersion = DanmuMappingProtocol.CurrentVersion,
+                AlignmentIntent = DanmuCompositeAlignmentIntentWire.DefaultZeroOffset,
+                PlanGeneration = 74,
+                LocalStartEpisodeItemId = "unnumbered-local-10",
+                RequestedEpisodeCount = 0,
+                Site = source.ProviderId,
+                CandidateId = source.MediaLookupId,
+                SourceStartEpisodeId = "unnumbered-exact-id",
+                SourceStartEpisodeNumber = 0,
+                MatchOrigin = "manual",
+                SelectionEvidenceToken = "unnumbered-evidence",
+                ServerResolvedAlignmentMode = unnumberedResolution.Mode,
+                ServerSourceEpisodes = unnumberedSourceEpisodes,
+                ServerConsideredLocalEpisodeItemIds = unnumberedResolution.ConsideredLocalEpisodes
+                    .Select(episode => episode.ItemId).ToList(),
+            };
+            var unnumberedFingerprint = SeasonPlanningContextBuilder.CreatePlanFingerprint(
+                context, new[] { unnumberedSelection }, unnumberedPlan);
+            var compactUnnumbered = (List<DanmuCompositeSeasonSelection>)projection.Invoke(
+                null, new object[] { new[] { unnumberedSelection } });
+            var unnumberedJson = JsonSerializer.Serialize(compactUnnumbered);
+            Assert(unnumberedJson.Contains("\"SourceStartEpisodeNumber\":0", StringComparison.Ordinal),
+                "the server-created V28 selection must freeze an observed missing provider number as wire zero");
+            Assert(DanmuCompositeSeasonSelectionJson.TryParse(
+                unnumberedJson, out var parsedUnnumbered, out error), error);
+            Assert(parsedUnnumbered.Single().SourceStartEpisodeNumber == 0 &&
+                   parsedUnnumbered.Single().SourceStartEpisodeId == "unnumbered-exact-id",
+                "the browser-equivalent compact roundtrip must retain wire zero beside the authoritative exact EpisodeId");
+            Assert(CompositeSeasonPlanner.TryCreatePlan(
+                unnumberedLocal, null, out var rebuiltUnnumberedPlan, out error), error);
+            var parsedUnnumberedRequest = new CompositeSeasonSegmentRequest
+            {
+                LocalStartEpisodeItemId = parsedUnnumbered[0].LocalStartEpisodeItemId,
+                RequestedEpisodeCount = parsedUnnumbered[0].RequestedEpisodeCount,
+                Source = source,
+                SourceEpisodes = unnumberedSourceEpisodes,
+                SourceStartEpisodeId = parsedUnnumbered[0].SourceStartEpisodeId,
+                SourceStartEpisodeNumber = parsedUnnumbered[0].SourceStartEpisodeNumber,
+                AlignmentIntent = CompositeSeasonAlignmentIntent.DefaultZeroOffset,
+                Origin = parsedUnnumbered[0].MatchOrigin,
+                SelectionEvidenceToken = parsedUnnumbered[0].SelectionEvidenceToken,
+            };
+            Assert(CompositeSeasonPlanner.TryApplySegmentResolved(
+                    rebuiltUnnumberedPlan, parsedUnnumberedRequest, out rebuiltUnnumberedPlan,
+                    out var rebuiltUnnumberedResolution, out error), error);
+            parsedUnnumbered[0].ServerResolvedAlignmentMode = rebuiltUnnumberedResolution.Mode;
+            parsedUnnumbered[0].ServerSourceEpisodes = unnumberedSourceEpisodes;
+            parsedUnnumbered[0].ServerConsideredLocalEpisodeItemIds = rebuiltUnnumberedResolution
+                .ConsideredLocalEpisodes.Select(episode => episode.ItemId).ToList();
+            Assert(rebuiltUnnumberedPlan.Mappings.Single().SourceEpisodeId == "unnumbered-exact-id" &&
+                   string.Equals(unnumberedFingerprint,
+                       SeasonPlanningContextBuilder.CreatePlanFingerprint(
+                           context, parsedUnnumbered, rebuiltUnnumberedPlan), StringComparison.Ordinal),
+                "wire zero plus exact EpisodeId must rebuild the same source mapping and fingerprint");
+            parsedUnnumbered[0].SourceStartEpisodeNumber = 1;
+            Assert(!string.Equals(unnumberedFingerprint,
+                    SeasonPlanningContextBuilder.CreatePlanFingerprint(
+                        context, parsedUnnumbered, rebuiltUnnumberedPlan), StringComparison.Ordinal),
+                "mutating the frozen unnumbered wire value must stale the plan fingerprint");
+
+            var repositoryRoot = Path.GetFullPath(Path.Combine(
+                AppContext.BaseDirectory, "..", "..", "..", ".."));
+            var controller = File.ReadAllText(Path.Combine(
+                repositoryRoot, "Core", "Controllers", "DanmuController.cs")).Replace("\r\n", "\n");
+            Assert(Count(controller, "CompositeSelections = ToResponseCompositeSelections(") == 3,
+                "direct, initial candidate, and composite revalidation preview paths must all return the exact ordered compact selections used by their fingerprint");
+            Assert(controller.Contains(
+                    "SourceStartEpisodeNumber = sourceEpisodes[0].EpisodeNumber ?? 0", StringComparison.Ordinal),
+                "the controller-created initial authoritative selection must freeze nullable provider numbering before BuildCompositePlanAsync and fingerprinting");
         }
 
         private static void PreservesExplicitEvidenceAndBuildsRemainingRuns()
@@ -390,6 +1203,85 @@ namespace Emby.Plugin.Danmu.RegressionTests
                 "single-Season and whole-Series entry points must use the same stable target-set coordinator contract");
         }
 
+        private static void CoordinatesWithoutChildDeadlineAndPropagatesExplicitCancellation()
+        {
+            var started = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var release = new TaskCompletionSource<DanmuSeasonMatchResult>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            var observedExecutionToken = default(CancellationToken);
+            var observedParentToken = default(CancellationToken);
+            using (var cancellation = new CancellationTokenSource())
+            {
+                var build = CompositeSeasonTargetSetCoordinator.BuildAsync(new[]
+                {
+                    new CompositeSeasonTargetRequest
+                    {
+                        SeasonId = "season-no-deadline",
+                        BuildPreviewAsync = (executionToken, parentToken) =>
+                        {
+                            observedExecutionToken = executionToken;
+                            observedParentToken = parentToken;
+                            started.TrySetResult(true);
+                            return release.Task;
+                        },
+                    },
+                }, cancellation.Token);
+                AwaitWithWatchdog(started.Task, "the composite target must start");
+                Assert(!build.IsCompleted && observedExecutionToken == cancellation.Token &&
+                       observedParentToken == cancellation.Token,
+                    "the coordinator must forward its caller token directly without creating a child deadline");
+                release.SetResult(new DanmuSeasonMatchResult
+                {
+                    SeasonId = "season-no-deadline",
+                    Status = "matched",
+                });
+                var result = AwaitWithWatchdog(build, "the released composite target must settle");
+                Assert(result.Count == 1 && result[0].SeasonId == "season-no-deadline",
+                    "a long-running target must complete normally when its provider settles");
+            }
+
+            var cancelledStarted = new TaskCompletionSource<bool>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            using (var cancellation = new CancellationTokenSource())
+            {
+                var build = CompositeSeasonTargetSetCoordinator.BuildAsync(new[]
+                {
+                    new CompositeSeasonTargetRequest
+                    {
+                        SeasonId = "season-explicit-cancel",
+                        BuildPreviewAsync = (executionToken, parentToken) =>
+                        {
+                            cancelledStarted.TrySetResult(true);
+                            return AwaitExplicitCancellationAsync(executionToken);
+                        },
+                    },
+                }, cancellation.Token);
+                AwaitWithWatchdog(cancelledStarted.Task, "the cancellable composite target must start");
+                cancellation.Cancel();
+                Assert(Task.WhenAny(build, Task.Delay(TimeSpan.FromSeconds(5))).GetAwaiter().GetResult() == build,
+                    "explicit parent cancellation must reach the active target promptly");
+                var cancelled = false;
+                try
+                {
+                    build.GetAwaiter().GetResult();
+                }
+                catch (OperationCanceledException)
+                {
+                    cancelled = true;
+                }
+
+                Assert(cancelled,
+                    "the coordinator must preserve explicit parent cancellation rather than converting it to a timeout");
+            }
+        }
+
+        private static async Task<DanmuSeasonMatchResult> AwaitExplicitCancellationAsync(
+            CancellationToken cancellationToken)
+        {
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken).ConfigureAwait(false);
+            throw new InvalidOperationException("An infinite cancellation wait completed without cancellation.");
+        }
+
         private static void MapsMultipleSpecialRunsWithoutChangingLocalSeasonMembership()
         {
             var direct = new[]
@@ -639,10 +1531,10 @@ namespace Emby.Plugin.Danmu.RegressionTests
         private static void RejectsIncompleteAutomaticSeasonAndResidualSearches()
         {
             var completeness = typeof(Emby.Plugin.Danmu.LibraryManagerEventsHelper).GetMethod(
-                "IsCompleteAutomaticSearch",
+                "CanUseAutomaticSearch",
                 BindingFlags.Static | BindingFlags.NonPublic);
             Assert(completeness != null,
-                "automatic matching must expose one shared completeness predicate for initial and residual searches");
+                "automatic matching must expose one completed-provider predicate for initial Season and Movie searches");
 
             var unique = new DanmuMatchCandidate
             {
@@ -651,6 +1543,7 @@ namespace Emby.Plugin.Danmu.RegressionTests
             var incomplete = new DanmuMatchSearchResult
             {
                 IsComplete = false,
+                CompletedProviderCount = 1,
                 Candidates = new List<DanmuMatchCandidate> { unique },
                 CompletionDiagnostics = new List<DanmuSearchCompletionDiagnostic>
                 {
@@ -658,12 +1551,32 @@ namespace Emby.Plugin.Danmu.RegressionTests
                     new DanmuSearchCompletionDiagnostic { Provider = "Bilibili", Status = "unstarted", Cancelled = true },
                 },
             };
-            Assert(!(bool)completeness.Invoke(null, new object[] { incomplete }),
-                "a unique partial candidate must remain unusable after any timed-out or unstarted planned call");
+            Assert((bool)completeness.Invoke(null, new object[] { incomplete }),
+                "a unique completed-provider candidate must remain usable after a sibling provider fault");
+
+            var allFailed = new DanmuMatchSearchResult
+            {
+                IsComplete = false,
+                CompletionDiagnostics = new List<DanmuSearchCompletionDiagnostic>
+                {
+                    new DanmuSearchCompletionDiagnostic { Provider = "Bilibili", Status = "failed" },
+                },
+            };
+            Assert(!(bool)completeness.Invoke(null, new object[] { allFailed }),
+                "all-provider failure must stop before candidate selection, binding, or download");
+
+            var cancelled = new DanmuMatchSearchResult
+            {
+                CompletedProviderCount = 1,
+                WasCancelled = true,
+            };
+            Assert(!(bool)completeness.Invoke(null, new object[] { cancelled }),
+                "parent or user cancellation must override completed-provider coverage");
 
             var complete = new DanmuMatchSearchResult
             {
                 IsComplete = true,
+                CompletedProviderCount = 1,
                 Candidates = new List<DanmuMatchCandidate> { unique },
             };
             Assert((bool)completeness.Invoke(null, new object[] { complete }) &&
@@ -675,33 +1588,34 @@ namespace Emby.Plugin.Danmu.RegressionTests
             var automatic = File.ReadAllText(Path.Combine(repositoryRoot, "LibraryManagerEventsHelper.cs"))
                 .Replace("\r\n", "\n");
             var initialGuard = automatic.IndexOf(
-                "if (!IsCompleteAutomaticSearch(search))\n                            {\n                                LogIncompleteAutomaticSearch(originalSeasonName, \"season\", search);\n                                continue;",
+                "if (!CanUseAutomaticSearch(search))\n                            {\n                                LogIncompleteAutomaticSearch(originalSeasonName, \"season\", search);\n                                continue;",
                 StringComparison.Ordinal);
             var initialSelection = automatic.IndexOf(
                 "selectedCandidate = DanmuMatchScorer.SelectAutoCandidate(search.CanonicalCandidates);",
                 StringComparison.Ordinal);
-            var residualGuard = automatic.IndexOf(
-                "LogIncompleteAutomaticSearch(season.Name, \"residual-range\", search);",
-                StringComparison.Ordinal);
-            var residualSelection = automatic.IndexOf(
-                "var candidate = CompositeSeasonMatchService.SelectResidualCandidate(",
-                StringComparison.Ordinal);
-            var firstDownload = automatic.IndexOf(
-                "var outcome = await DownloadEpisodeForProgress(episode, exact, sourceScraper, false, 1)",
-                StringComparison.Ordinal);
+            var automaticSeasonPath = SliceSource(automatic,
+                "private async Task<bool> DownloadAutomaticSeasonWithCompositePlan(",
+                "private static DanmuCompositeSeasonSelection CreateAutomaticSelection(");
             var movieGuard = automatic.IndexOf(
-                "if (!IsCompleteAutomaticSearch(movieSearch))",
+                "if (!CanUseAutomaticSearch(movieSearch))",
                 StringComparison.Ordinal);
             var movieSelection = automatic.IndexOf(
                 "selectedMovieCandidate = DanmuMatchScorer.SelectAutoCandidate(movieSearch.CanonicalCandidates);",
                 StringComparison.Ordinal);
             Assert(initialGuard >= 0 && initialGuard < initialSelection,
-                "initial automatic Season search must reject incomplete coverage before selecting a candidate");
-            Assert(residualGuard >= 0 && residualGuard < residualSelection && residualSelection < firstDownload &&
-                   automatic.Substring(residualGuard, residualSelection - residualGuard).Contains("return false;"),
-                "an incomplete residual search must abort deterministically before selection, binding, or any file download");
+                "initial automatic Season search must reject missing completed-provider coverage before selecting a candidate");
+            Assert(!automaticSeasonPath.Contains("residual-range", StringComparison.Ordinal) &&
+                   !automaticSeasonPath.Contains("SelectResidualCandidate(", StringComparison.Ordinal) &&
+                   !automaticSeasonPath.Contains("automatic-residual", StringComparison.Ordinal) &&
+                   automaticSeasonPath.Contains(
+                       "var automaticSelections = new List<DanmuCompositeSeasonSelection> { automaticSelection };",
+                       StringComparison.Ordinal) &&
+                   automaticSeasonPath.Contains("TryApplySegmentResolved(", StringComparison.Ordinal) &&
+                   automaticSeasonPath.Contains("RebuildAutomaticPlanAsync(", StringComparison.Ordinal) &&
+                   automaticSeasonPath.Contains("DownloadEpisodeForProgress(", StringComparison.Ordinal),
+                "automatic library import must use only its initial authoritative selection, rebuild, and download path without residual search or selection");
             Assert(movieGuard >= 0 && movieGuard < movieSelection,
-                "automatic Movie search must reject incomplete coverage before selecting, binding, or downloading a partial candidate");
+                "automatic Movie search without completed-provider coverage must reject selection, binding, or downloading");
         }
 
         private static void PreservesDirectMetadataAcrossRemoveReplacementAndRestore()
@@ -976,9 +1890,23 @@ namespace Emby.Plugin.Danmu.RegressionTests
                 AppContext.BaseDirectory, "..", "..", "..", ".."));
             var controller = File.ReadAllText(Path.Combine(
                 repositoryRoot, "Core", "Controllers", "DanmuController.cs")).Replace("\r\n", "\n");
-            Assert(controller.Contains(
-                    "request.MatchScore, request.ScoreOrigin, request.SelectionEvidenceToken,"),
-                "the controller must pass resolved server evidence into the initial owning plan");
+            var compositeBuild = SliceSource(controller,
+                "private async Task<CompositePlanBuild> BuildCompositePlanAsync(",
+                "private static bool ShouldReportVerifiedSourceEpisodeSurplus(");
+            var requestBlock = SliceSource(compositeBuild,
+                "var request = new CompositeSeasonSegmentRequest",
+                "selection.ServerResolvedAlignmentMode = segmentResolution.Mode;");
+            var resolvedApply = requestBlock.IndexOf("TryApplySegmentResolved(", StringComparison.Ordinal);
+            var resolvedScore = requestBlock.IndexOf(
+                "MatchScore = selectionEvidence.MatchScore", StringComparison.Ordinal);
+            var resolvedScoreOrigin = requestBlock.IndexOf(
+                "ScoreOrigin = selectionEvidence.ScoreOrigin", StringComparison.Ordinal);
+            var resolvedEvidenceToken = requestBlock.IndexOf(
+                "SelectionEvidenceToken = selection.SelectionEvidenceToken", StringComparison.Ordinal);
+            Assert(resolvedApply >= 0 && resolvedScore >= 0 && resolvedScore < resolvedApply &&
+                   resolvedScoreOrigin >= 0 && resolvedScoreOrigin < resolvedApply &&
+                   resolvedEvidenceToken >= 0 && resolvedEvidenceToken < resolvedApply,
+                "BuildCompositePlanAsync must place server-resolved score, score origin, and closed evidence token on the authoritative request before applying the segment");
             var model = File.ReadAllText(Path.Combine(
                 repositoryRoot, "Model", "DanmuMatchResult.cs")).Replace("\r\n", "\n");
             var groupModel = SliceSource(model,
@@ -988,6 +1916,80 @@ namespace Emby.Plugin.Danmu.RegressionTests
                    !groupModel.Contains("EmitDefaultValue") &&
                    groupModel.Contains("public double? MatchScore { get; set; }"),
                 "Emby/ServiceStack must see a plain nullable score: mapped values serialize, temporary nulls use its default omission policy");
+        }
+
+        private static void PreservesSourceMetadataAcrossEveryBindingEntryPoint()
+        {
+            var metadataJson = System.Text.Json.JsonSerializer.Serialize(
+                new SourceMetadata { Title = "Visible", Year = 2024, Category = "Anime" });
+            Assert(!metadataJson.Contains("HasValue", StringComparison.OrdinalIgnoreCase),
+                "SourceMetadata payloads must expose only title, year, and category");
+            var fidelityProperty = typeof(DanmuMatchCandidate).GetProperty("FidelityTitleEvidence");
+            Assert(fidelityProperty.GetCustomAttributes(typeof(System.Text.Json.Serialization.JsonIgnoreAttribute), true).Any() &&
+                   fidelityProperty.GetCustomAttributes(typeof(System.Runtime.Serialization.IgnoreDataMemberAttribute), true).Any(),
+                "internal fidelity evidence must be hidden from both System.Text.Json and Emby/ServiceStack-style payload serializers");
+            var metadata = new SourceMetadata { Title = "Upstream Season", Year = 2024, Category = "Anime" };
+            var source = new CompositeSeasonSourceIdentity
+            {
+                ProviderId = "DandanID", MediaId = "upstream-season", MediaLookupId = "lookup-season",
+            };
+            var sourceEpisodes = new[]
+            {
+                Source("source-1", "comment-1", 1), Source("source-2", "comment-2", 2),
+            };
+            var owningLocal = LocalEpisodes(1, 2);
+            owningLocal.ForEach(episode =>
+            {
+                episode.Ownership = CompositeSeasonOwnershipKind.Owning;
+                episode.ParentSeasonNumber = 1;
+            });
+
+            Assert(CompositeSeasonPlanner.TryCreatePlan(owningLocal, null, out var automatic, out var error), error);
+            Assert(CompositeSeasonPlanner.TryApplyRemainingOwningSourceEpisodes(
+                automatic, source, sourceEpisodes, "automatic-primary", .95, "search-confidence", "auto-token",
+                metadata, out automatic, out error), error);
+            AssertMetadata(automatic, "automatic");
+
+            Assert(CompositeSeasonPlanner.TryCreatePlan(LocalEpisodes(1, 2), null, out var manual, out error), error);
+            Assert(CompositeSeasonPlanner.TryApplySegment(manual, new CompositeSeasonSegmentRequest
+            {
+                LocalStartEpisodeItemId = "local-1", RequestedEpisodeCount = 2, Source = source,
+                SourceEpisodes = sourceEpisodes.ToList(), SourceStartEpisodeId = "source-1",
+                Origin = "manual", SourceMetadata = metadata,
+            }, out manual, out _, out error), error);
+            AssertMetadata(manual, "manual");
+
+            Assert(CompositeSeasonPlanner.TryCreatePlan(LocalEpisodes(1, 2), null, out var supplemental, out error), error);
+            Assert(CompositeSeasonMatchService.TryNormalizeAndContinueSource(
+                supplemental, source, sourceEpisodes, "automatic-residual", .9, "search-confidence", "supp-token",
+                metadata, out supplemental, out _, out error), error);
+            AssertMetadata(supplemental, "supplementary");
+
+            var directMedia = new ScraperMedia
+            {
+                Id = source.MediaId, Title = metadata.Title, Year = metadata.Year, Category = metadata.Category,
+                Episodes = new List<ScraperEpisode>
+                {
+                    new ScraperEpisode { Id = "source-1", CommentId = "comment-1", EpisodeNumber = 1 },
+                },
+            };
+            var directMapping = CompositeSeasonMatchService.CreateDirectMapping(
+                "local-1", source.ProviderId, directMedia, source.MediaLookupId);
+            Assert(CompositeSeasonPlanner.TryCreatePlan(LocalEpisodes(1, 1), new[] { directMapping },
+                out var direct, out error), error);
+            AssertMetadata(direct, "direct temporary");
+
+            void AssertMetadata(CompositeSeasonPlan plan, string entryPoint)
+            {
+                Assert(plan.Mappings.All(mapping => mapping.SourceMetadata?.Title == metadata.Title &&
+                    mapping.SourceMetadata.Year == metadata.Year && mapping.SourceMetadata.Category == metadata.Category),
+                    entryPoint + " mappings must preserve selected source metadata");
+                var group = CompositeSeasonMatchService.ToGroups(plan, Enumerable.Empty<Episode>())
+                    .Single(item => !item.IsTemporary);
+                Assert(group.SourceMetadata?.Title == metadata.Title && group.SourceMetadata.Year == metadata.Year &&
+                       group.SourceMetadata.Category == metadata.Category,
+                    entryPoint + " segment-to-collection reconstruction must preserve source metadata");
+            }
         }
 
         private static void ProjectsBoundedSourceEpisodeNamesWithoutChangingPlanAuthority()
@@ -1085,6 +2087,125 @@ namespace Emby.Plugin.Danmu.RegressionTests
                 "source display titles must not alter fingerprints, compact selections, or download task snapshots");
         }
 
+        private static void DerivesSourceSurplusOnlyFromAppliedAuthoritativeDetails()
+        {
+            var predicate = typeof(DanmuController).GetMethod(
+                "ShouldReportVerifiedSourceEpisodeSurplus",
+                BindingFlags.NonPublic | BindingFlags.Static);
+            Assert(predicate != null,
+                "the controller must keep one closed predicate for authoritative source-surplus evidence");
+
+            bool Reports(int authoritativeSourceCount, int localCount, int appliedCount) =>
+                (bool)predicate.Invoke(null, new object[]
+                {
+                    authoritativeSourceCount, localCount, appliedCount,
+                });
+
+            var candidateOverstates = new DanmuMatchCandidate { EpisodeSize = 99 };
+            var candidateUnderstates = new DanmuMatchCandidate { EpisodeSize = 1 };
+            Assert(candidateOverstates.EpisodeSize > 3 && !Reports(2, 3, 2) &&
+                   candidateUnderstates.EpisodeSize < 3 && Reports(4, 3, 3),
+                "candidate EpisodeSize must not override the opposite count resolved from authoritative provider details");
+            Assert(!Reports(4, 3, 0),
+                "a source with no successfully applied mapping must never publish surplus state");
+
+            Assert(CompositeSeasonPlanner.TryCreatePlan(LocalEpisodes(1, 3), null,
+                out var localSmallerPlan, out var error), error);
+            var longerSource = Enumerable.Range(1, 4)
+                .Select(number => Source("long-source-" + number, "long-comment-" + number, number))
+                .ToList();
+            Assert(CompositeSeasonPlanner.TryApplySegment(localSmallerPlan,
+                Segment("local-1", "DandanID", "long-source", "long-source-1", longerSource),
+                out localSmallerPlan, out var localSmallerApplied, out error), error);
+            Assert(localSmallerApplied == 3 && localSmallerPlan.Mappings.Count == 3 &&
+                   localSmallerPlan.UnmatchedRuns.Count == 0 &&
+                   Reports(longerSource.Count, 3, localSmallerApplied),
+                "a verified longer source must remain mappable and publish the advisory state");
+
+            Assert(CompositeSeasonPlanner.TryCreatePlan(LocalEpisodes(1, 3), null,
+                out var equalPlan, out error), error);
+            var equalSource = Enumerable.Range(1, 3)
+                .Select(number => Source("equal-source-" + number, "equal-comment-" + number, number))
+                .ToList();
+            Assert(CompositeSeasonPlanner.TryApplySegment(equalPlan,
+                Segment("local-1", "DandanID", "equal-source", "equal-source-1", equalSource),
+                out equalPlan, out var equalApplied, out error), error);
+            Assert(equalApplied == 3 && !Reports(equalSource.Count, 3, equalApplied),
+                "equal authoritative source and local counts must not publish surplus state");
+
+            Assert(CompositeSeasonPlanner.TryCreatePlan(LocalEpisodes(1, 4), null,
+                out var localLargerPlan, out error), error);
+            var shorterSource = Enumerable.Range(1, 3)
+                .Select(number => Source("short-source-" + number, "short-comment-" + number, number))
+                .ToList();
+            Assert(CompositeSeasonPlanner.TryApplySegment(localLargerPlan,
+                Segment("local-1", "DandanID", "short-source", "short-source-1", shorterSource),
+                out localLargerPlan, out var localLargerApplied, out error), error);
+            Assert(localLargerApplied == 3 && !Reports(shorterSource.Count, 4, localLargerApplied) &&
+                   localLargerPlan.UnmatchedRuns.Count == 1 &&
+                   RunIds(localLargerPlan.UnmatchedRuns[0]) == "local-4",
+                "a shorter source must keep the established unmatched-run workflow without a surplus advisory");
+
+            var firstIndependentSource = Reports(2, 3, 2);
+            var secondIndependentSource = Reports(2, 3, 1);
+            Assert(2 + 2 > 3 && !(firstIndependentSource || secondIndependentSource),
+                "several source counts must be compared independently and never summed into synthetic surplus");
+
+            Assert(typeof(DanmuSeasonMatchResult).GetProperty(
+                       "HasVerifiedSourceEpisodeSurplus") != null &&
+                   !new DanmuSeasonMatchResult().HasVerifiedSourceEpisodeSurplus &&
+                   typeof(DanmuMatchCandidate).GetProperty(
+                       "HasVerifiedSourceEpisodeSurplus") == null &&
+                   typeof(DanmuCompositeSeasonSelection).GetProperty(
+                       "HasVerifiedSourceEpisodeSurplus") == null &&
+                   typeof(DanmuParams).GetProperty(
+                       "HasVerifiedSourceEpisodeSurplus") == null,
+                "verified source surplus must remain response-only and absent from candidates and requests");
+            var responseJson = JsonSerializer.Serialize(new DanmuSeasonMatchResult
+            {
+                HasVerifiedSourceEpisodeSurplus = true,
+            });
+            Assert(responseJson.Contains(
+                    "\"HasVerifiedSourceEpisodeSurplus\":true", StringComparison.Ordinal),
+                "the authoritative Season response must project the advisory state on the wire");
+
+            var repositoryRoot = Path.GetFullPath(Path.Combine(
+                AppContext.BaseDirectory, "..", "..", "..", ".."));
+            var controller = File.ReadAllText(Path.Combine(
+                repositoryRoot, "Core", "Controllers", "DanmuController.cs")).Replace("\r\n", "\n");
+            var builder = SliceSource(controller,
+                "private async Task<CompositePlanBuild> BuildCompositePlanAsync(",
+                "private static DanmuCompositeSeasonSelection CloneSeasonPlanSelection(");
+            Assert(builder.Contains(
+                       "var sourceEpisodes = CompositeSeasonMatchService.GetSourceEpisodes(media);") &&
+                   builder.Contains(
+                       "sourceEpisodes.Count, context.LocalEpisodes.Count, appliedMappings.Count") &&
+                   builder.Contains("hasVerifiedSourceEpisodeSurplus |=") &&
+                   builder.Contains("plan.Mappings.Count > 0") &&
+                   !builder.Contains("EpisodeSize"),
+                "BuildCompositePlanAsync must derive the advisory only from applied authoritative detail Episodes");
+            Assert(builder.IndexOf("build.HasVerifiedSourceEpisodeSurplus =", StringComparison.Ordinal) >
+                   builder.IndexOf("build.Plan = plan;", StringComparison.Ordinal),
+                "failed, cancelled, or zero-plan builds must retain the response default false");
+
+            var compositePreview = SliceSource(controller,
+                "private async Task<DanmuSeasonMatchResult> GetCompositeSeasonPlanPreview(",
+                "private async Task PopulateCompositePreviewIfRequired(");
+            var populatedPreview = SliceSource(controller,
+                "private async Task PopulateCompositePreviewIfRequired(",
+                "private static bool IsRematch(");
+            Assert(compositePreview.Contains(
+                       "response.HasVerifiedSourceEpisodeSurplus = build.HasVerifiedSourceEpisodeSurplus;") &&
+                   compositePreview.IndexOf(
+                       "response.HasVerifiedSourceEpisodeSurplus =", StringComparison.Ordinal) >
+                   compositePreview.IndexOf("if (build.Plan == null)", StringComparison.Ordinal) &&
+                   populatedPreview.Contains(
+                       "result.HasVerifiedSourceEpisodeSurplus = direct.HasVerifiedSourceEpisodeSurplus;") &&
+                   populatedPreview.Contains(
+                       "result.HasVerifiedSourceEpisodeSurplus = build.HasVerifiedSourceEpisodeSurplus;"),
+                "whole-Series, single-Season, and explicit plan rebuild responses must project the current authoritative state");
+        }
+
         private static string MappingSnapshot(CompositeSeasonEpisodeMapping mapping)
         {
             return string.Join("|", new[]
@@ -1153,8 +2274,46 @@ namespace Emby.Plugin.Danmu.RegressionTests
         private static CompositeSeasonSourceEpisode Source(string id, string comment, int number) =>
             new CompositeSeasonSourceEpisode { EpisodeId = id, CommentId = comment, EpisodeNumber = number };
 
+        private static CompositeSeasonSourceEpisode SourceNullable(
+            string id, string comment, int? number, int ordinal) =>
+            new CompositeSeasonSourceEpisode
+            {
+                EpisodeId = id,
+                CommentId = comment,
+                EpisodeNumber = number,
+                SourceOrdinal = ordinal,
+            };
+
         private static string RunIds(CompositeSeasonUnmatchedRun run) =>
             string.Join(",", run.Episodes.Select(episode => episode.ItemId));
+
+        private static void AwaitWithWatchdog(Task task, string operation)
+        {
+            if (Task.WhenAny(task, Task.Delay(TimeSpan.FromSeconds(5))).GetAwaiter().GetResult() != task)
+            {
+                throw new InvalidOperationException("Regression watchdog expired: " + operation);
+            }
+
+            task.GetAwaiter().GetResult();
+        }
+
+        private static TResult AwaitWithWatchdog<TResult>(Task<TResult> task, string operation)
+        {
+            AwaitWithWatchdog((Task)task, operation);
+            return task.GetAwaiter().GetResult();
+        }
+
+        private static int Count(string value, string needle)
+        {
+            var count = 0;
+            var index = 0;
+            while ((index = value.IndexOf(needle, index, StringComparison.Ordinal)) >= 0)
+            {
+                count++;
+                index += needle.Length;
+            }
+            return count;
+        }
 
         private static void Assert(bool condition, string message)
         {

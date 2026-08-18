@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Text.RegularExpressions;
 using System.Threading;
 
@@ -26,11 +27,10 @@ namespace Emby.Plugin.Danmu.Core
         private readonly ConcurrentDictionary<string, Entry> _operations =
             new ConcurrentDictionary<string, Entry>(StringComparer.OrdinalIgnoreCase);
         // A cancel request may arrive immediately before its GET request has
-        // registered. Keep a small, short-lived tombstone so that operation
-        // cannot accidentally run for the full interactive deadline.
+        // registered. Keep a small, short-lived tombstone so that the later
+        // operation observes that explicit cancellation deterministically.
         private readonly ConcurrentDictionary<string, DateTime> _preCancelledOperations =
             new ConcurrentDictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
-        private readonly BoundedSearchPolicyOptions _options;
         private int _disposed;
 
         private const int MaximumPreCancelledOperations = 256;
@@ -38,7 +38,10 @@ namespace Emby.Plugin.Danmu.Core
 
         public SearchOperationRegistry(BoundedSearchPolicyOptions options = null)
         {
-            _options = options ?? new BoundedSearchPolicyOptions();
+            // Retain the optional parameter for source compatibility. Search
+            // operation lifetime is now controlled only by explicit cancel,
+            // lease disposal, or registry disposal.
+            _ = options;
         }
 
         public int ActiveOperationCount => _operations.Count;
@@ -66,14 +69,27 @@ namespace Emby.Plugin.Danmu.Core
             PrunePreCancelledOperations();
             var cancelledBeforeRegistration = _preCancelledOperations.TryRemove(normalizedId, out _);
             var source = new CancellationTokenSource();
-            source.CancelAfter(scope == SearchOperationScope.Automatic
-                ? _options.AutomaticOperationTimeout
-                : _options.InteractiveOperationTimeout);
+            _ = scope;
             var entry = new Entry(source);
             if (!_operations.TryAdd(normalizedId, entry))
             {
                 source.Dispose();
                 error = "Search operation id is already active.";
+                return false;
+            }
+
+            // Dispose may have completed its dictionary drain after the first
+            // availability check but before this entry was published. Recheck
+            // after TryAdd and remove only this exact entry so another in-flight
+            // registration with the same id can never be removed accidentally.
+            if (Volatile.Read(ref _disposed) != 0)
+            {
+                if (TryRemoveExact(normalizedId, entry))
+                {
+                    entry.Source.Cancel();
+                    entry.Source.Dispose();
+                }
+                error = "Search operation registry is unavailable.";
                 return false;
             }
 
@@ -147,12 +163,16 @@ namespace Emby.Plugin.Danmu.Core
 
         private void Complete(string operationId, Entry expected)
         {
-            if (_operations.TryGetValue(operationId, out var current) &&
-                ReferenceEquals(current, expected) &&
-                _operations.TryRemove(operationId, out var removed))
+            if (TryRemoveExact(operationId, expected))
             {
-                removed.Source.Dispose();
+                expected.Source.Dispose();
             }
+        }
+
+        private bool TryRemoveExact(string operationId, Entry expected)
+        {
+            return ((ICollection<KeyValuePair<string, Entry>>)_operations).Remove(
+                new KeyValuePair<string, Entry>(operationId, expected));
         }
 
         private static bool TryNormalizeOperationId(string operationId, out string normalizedId)
@@ -184,9 +204,16 @@ namespace Emby.Plugin.Danmu.Core
             public Entry(CancellationTokenSource source)
             {
                 Source = source;
+                // Capture the token before this entry can be published. The
+                // registry may cancel and dispose Source concurrently with
+                // TryBegin returning its lease, but the token snapshot remains
+                // safe to inspect after the source has been disposed.
+                Token = source.Token;
             }
 
             public CancellationTokenSource Source { get; }
+
+            public CancellationToken Token { get; }
         }
 
         public sealed class SearchOperationLease : IDisposable
@@ -203,9 +230,16 @@ namespace Emby.Plugin.Danmu.Core
 
             public string OperationId { get; }
 
-            public CancellationToken CancellationToken => _entry == null
-                ? new CancellationToken(true)
-                : _entry.Source.Token;
+            public CancellationToken CancellationToken
+            {
+                get
+                {
+                    var entry = Volatile.Read(ref _entry);
+                    return entry == null
+                        ? new CancellationToken(true)
+                        : entry.Token;
+                }
+            }
 
             public bool IsCancellationRequested => CancellationToken.IsCancellationRequested;
 

@@ -6,9 +6,10 @@ using System.Threading.Tasks;
 namespace Emby.Plugin.Danmu.Core
 {
     /// <summary>
-    /// Immutable limits for a bounded smart-match search.  Tests and host
-    /// integration can supply shorter values without changing production
-    /// defaults.
+    /// Immutable concurrency settings for a bounded smart-match search.  The
+    /// timeout constructor arguments and properties remain as compatibility
+    /// shims for callers compiled against the earlier bounded-deadline API;
+    /// shared search no longer owns elapsed-time deadlines.
     /// </summary>
     public sealed class BoundedSearchPolicyOptions
     {
@@ -18,25 +19,13 @@ namespace Emby.Plugin.Danmu.Core
             TimeSpan? automaticOperationTimeout = null,
             int maximumConcurrentProviders = 3)
         {
-            ProviderCallTimeout = providerCallTimeout ?? TimeSpan.FromSeconds(10);
-            InteractiveOperationTimeout = interactiveOperationTimeout ?? TimeSpan.FromSeconds(30);
-            AutomaticOperationTimeout = automaticOperationTimeout ?? TimeSpan.FromSeconds(45);
+            _ = providerCallTimeout;
+            _ = interactiveOperationTimeout;
+            _ = automaticOperationTimeout;
+            ProviderCallTimeout = Timeout.InfiniteTimeSpan;
+            InteractiveOperationTimeout = Timeout.InfiniteTimeSpan;
+            AutomaticOperationTimeout = Timeout.InfiniteTimeSpan;
             MaximumConcurrentProviders = maximumConcurrentProviders;
-
-            if (ProviderCallTimeout <= TimeSpan.Zero)
-            {
-                throw new ArgumentOutOfRangeException(nameof(providerCallTimeout));
-            }
-
-            if (InteractiveOperationTimeout <= TimeSpan.Zero)
-            {
-                throw new ArgumentOutOfRangeException(nameof(interactiveOperationTimeout));
-            }
-
-            if (AutomaticOperationTimeout <= TimeSpan.Zero)
-            {
-                throw new ArgumentOutOfRangeException(nameof(automaticOperationTimeout));
-            }
 
             if (MaximumConcurrentProviders < 1)
             {
@@ -56,16 +45,18 @@ namespace Emby.Plugin.Danmu.Core
     public enum BoundedSearchExecutionStatus
     {
         Completed,
+        // Retained for binary/source compatibility. Shared search no longer
+        // emits elapsed-time provider failures.
         ProviderTimedOut,
         Cancelled,
         Faulted,
     }
 
     /// <summary>
-    /// Immediate outcome plus a settlement task.  On timeout the outcome is
-    /// returned promptly, while Settlement remains incomplete until a legacy
-    /// non-cooperative provider has actually stopped and its gate lease can be
-    /// released safely.
+    /// Immediate outcome plus a settlement task.  On explicit cancellation
+    /// the outcome is returned promptly, while Settlement remains incomplete
+    /// until a legacy non-cooperative provider has actually stopped and its
+    /// gate lease can be released safely.
     /// </summary>
     public sealed class BoundedSearchExecution<TResult>
     {
@@ -152,14 +143,16 @@ namespace Emby.Plugin.Danmu.Core
             }
 
             var lease = new GateLease(_globalGate, providerGate);
-            var providerCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            var providerCancellation = cancellationToken.CanBeCanceled
+                ? CancellationTokenSource.CreateLinkedTokenSource(cancellationToken)
+                : null;
             var handoff = false;
             try
             {
                 Task<TResult> providerTask;
                 try
                 {
-                    providerTask = operation(providerCancellation.Token);
+                    providerTask = operation(providerCancellation?.Token ?? CancellationToken.None);
                     if (providerTask == null)
                     {
                         throw new InvalidOperationException("The provider search operation returned no task.");
@@ -170,9 +163,8 @@ namespace Emby.Plugin.Danmu.Core
                     return Faulted<TResult>(ex);
                 }
 
-                var providerTimeout = Task.Delay(Options.ProviderCallTimeout);
                 var cancellationSignal = Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
-                var winner = await Task.WhenAny(providerTask, providerTimeout, cancellationSignal).ConfigureAwait(false);
+                var winner = await Task.WhenAny(providerTask, cancellationSignal).ConfigureAwait(false);
 
                 if (winner == providerTask)
                 {
@@ -199,12 +191,19 @@ namespace Emby.Plugin.Danmu.Core
                     }
                 }
 
-                var timedOut = winner == providerTimeout;
-                providerCancellation.Cancel();
-                var settlement = ReleaseWhenProviderStopsAsync(providerTask, providerCancellation, lease);
                 handoff = true;
+                try
+                {
+                    providerCancellation?.Cancel();
+                }
+                catch (AggregateException)
+                {
+                    // A provider-owned cancellation callback must not release
+                    // either gate while its underlying task is still running.
+                }
+                var settlement = ReleaseWhenProviderStopsAsync(providerTask, providerCancellation, lease);
                 return new BoundedSearchExecution<TResult>(
-                    timedOut ? BoundedSearchExecutionStatus.ProviderTimedOut : BoundedSearchExecutionStatus.Cancelled,
+                    BoundedSearchExecutionStatus.Cancelled,
                     default(TResult),
                     null,
                     settlement);
@@ -213,7 +212,7 @@ namespace Emby.Plugin.Danmu.Core
             {
                 if (!handoff)
                 {
-                    providerCancellation.Dispose();
+                    providerCancellation?.Dispose();
                     lease.Dispose();
                 }
             }
@@ -223,9 +222,8 @@ namespace Emby.Plugin.Danmu.Core
         {
             try
             {
-                // The enclosing operation CTS owns the 30/45-second deadline,
-                // so queue time is part of that budget rather than a second,
-                // competing timeout.
+                // Queueing is bounded only by an explicit caller/parent
+                // cancellation. Shared search owns no elapsed-time budget.
                 await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
                 return GateAcquireStatus.Acquired;
             }
@@ -246,13 +244,13 @@ namespace Emby.Plugin.Danmu.Core
             }
             catch (Exception)
             {
-                // The caller has already received its timeout/cancellation
-                // result. Observing a late provider fault prevents it from
+                // The caller has already received its cancellation result.
+                // Observing a late provider fault prevents it from
                 // becoming unobserved while preserving that terminal result.
             }
             finally
             {
-                providerCancellation.Dispose();
+                providerCancellation?.Dispose();
                 lease.Dispose();
             }
         }

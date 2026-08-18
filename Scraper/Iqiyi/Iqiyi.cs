@@ -295,7 +295,10 @@ namespace Emby.Plugin.Danmu.Scraper.Iqiyi
 
             if (isMovieItemType && video.Epsodelist != null && video.Epsodelist.Count > 0)
             {
-                var tvId = video.Epsodelist[0].TvId;
+                var firstMainEpisode = video.Epsodelist.FirstOrDefault(ep => ep != null &&
+                    ep.TvId > 0 && !string.IsNullOrWhiteSpace(ep.LinkId) &&
+                    !EpisodeContentClassifier.IsExplicitNonMain(ep.Name));
+                var tvId = firstMainEpisode?.TvId ?? 0;
                 if (tvId > 0) // 确保 TvId 有效
                 {
                     media.CommentId = $"{tvId}";
@@ -336,6 +339,50 @@ namespace Emby.Plugin.Danmu.Scraper.Iqiyi
             return media;
         }
 
+        internal static List<ScraperMoviePart> BuildMovieParts(
+            IEnumerable<Emby.Plugin.Danmu.Scraper.Iqiyi.Entity.IqiyiEpisode> episodes)
+        {
+            var parts = new List<ScraperMoviePart>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var index = 0;
+            foreach (var episode in episodes ??
+                Enumerable.Empty<Emby.Plugin.Danmu.Scraper.Iqiyi.Entity.IqiyiEpisode>())
+            {
+                if (episode == null || episode.TvId <= 0 || string.IsNullOrWhiteSpace(episode.LinkId) ||
+                    !seen.Add(episode.LinkId.Trim()))
+                {
+                    continue;
+                }
+
+                index++;
+                var title = (episode.Name ?? string.Empty).Trim();
+                parts.Add(new ScraperMoviePart
+                {
+                    Id = episode.LinkId.Trim(),
+                    Title = title,
+                    Index = index,
+                    IsDownloadable = true,
+                    IsExplicitNonMain = EpisodeContentClassifier.IsExplicitNonMain(title),
+                });
+            }
+            return parts;
+        }
+
+        public override async Task<List<ScraperMoviePart>> GetMovieParts(
+            BaseItem item,
+            string parentId,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!(item is MediaBrowser.Controller.Entities.Movies.Movie) || string.IsNullOrWhiteSpace(parentId))
+            {
+                return new List<ScraperMoviePart>();
+            }
+
+            var video = await _api.GetVideoAsync(parentId, cancellationToken).ConfigureAwait(false);
+            return BuildMovieParts(video?.Epsodelist);
+        }
+
         /// <inheritdoc />
         public override async Task<ScraperEpisode?> GetMediaEpisode(BaseItem item, string id)
         {
@@ -356,13 +403,27 @@ namespace Emby.Plugin.Danmu.Scraper.Iqiyi
                 log.Warn($"[IQIYI] GetMediaEpisode: 对于 LinkId '{id}', 从 GetVideoBaseAsync 获取的 TvId 无效: {tvId}. 返回的 ScraperEpisode 的 CommentId 将为空。");
             }
             var commentIdForEpisode = (tvId > 0) ? $"{tvId}" : string.Empty;
+            var sourceMetadata = BuildEpisodeSourceMetadata(video);
             return new ScraperEpisode()
             {
                 Id = id,
                 CommentId = commentIdForEpisode,
                 Title = video.VideoName,
                 EpisodeNumber = EpisodeContentClassifier.TryGetEpisodeNumber(video.VideoName),
+                SourceMetadata = sourceMetadata,
             };
+        }
+
+        internal static SourceMetadata BuildEpisodeSourceMetadata(
+            Emby.Plugin.Danmu.Scraper.Iqiyi.Entity.IqiyiHtmlVideoInfo video)
+        {
+            return string.IsNullOrWhiteSpace(video?.ParentTitle)
+                ? null
+                : new SourceMetadata
+                {
+                    Title = video.ParentTitle,
+                    Category = video.channelName ?? string.Empty,
+                };
         }
 
         public override async Task<ScraperDanmaku?> GetDanmuContent(BaseItem item, string commentId)

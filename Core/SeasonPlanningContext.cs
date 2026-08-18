@@ -198,8 +198,10 @@ namespace Emby.Plugin.Danmu.Core
             if (context == null || plan == null) return string.Empty;
             // The canonical material is intentionally kept server-side. Length-prefixed
             // fields make the representation unambiguous even when scraper values contain
-            // separators; only its fixed-size SHA-256 digest crosses the V21 wire.
+            // separators; only its fixed-size SHA-256 digest crosses the V22 wire.
             var canonical = new StringBuilder();
+            AppendFingerprintField(canonical, "protocol");
+            AppendFingerprintField(canonical, DanmuMappingProtocol.CurrentVersion.ToString(CultureInfo.InvariantCulture));
             AppendFingerprintField(canonical, context.StructureFingerprint);
             foreach (var entry in (selections ?? Enumerable.Empty<DanmuCompositeSeasonSelection>())
                          .Select((selection, ordinal) => new { selection, ordinal }))
@@ -209,6 +211,10 @@ namespace Emby.Plugin.Danmu.Core
                 var selection = entry.selection;
                 AppendFingerprintField(canonical, selection == null ? "null" : "value");
                 if (selection == null) continue;
+                AppendFingerprintField(canonical, selection.MappingProtocolVersion.ToString(CultureInfo.InvariantCulture));
+                AppendFingerprintField(canonical, selection.AlignmentIntent);
+                AppendFingerprintField(canonical, selection.ServerResolvedAlignmentMode.HasValue
+                    ? selection.ServerResolvedAlignmentMode.Value.ToString() : "?");
                 AppendFingerprintField(canonical, selection.Site);
                 AppendFingerprintField(canonical, selection.CandidateId);
                 AppendFingerprintField(canonical, selection.LocalStartEpisodeItemId);
@@ -218,6 +224,28 @@ namespace Emby.Plugin.Danmu.Core
                     ? selection.SourceStartEpisodeNumber.Value.ToString(CultureInfo.InvariantCulture) : "?");
                 AppendFingerprintField(canonical, selection.MatchOrigin);
                 AppendFingerprintField(canonical, selection.SelectionEvidenceToken);
+                foreach (var consideredEntry in (selection.ServerConsideredLocalEpisodeItemIds ??
+                                 new List<string>()).Select((itemId, consideredOrdinal) =>
+                                 new { itemId, consideredOrdinal }))
+                {
+                    AppendFingerprintField(canonical, "considered-local");
+                    AppendFingerprintField(canonical,
+                        consideredEntry.consideredOrdinal.ToString(CultureInfo.InvariantCulture));
+                    AppendFingerprintField(canonical, consideredEntry.itemId);
+                }
+                foreach (var sourceEntry in (selection.ServerSourceEpisodes ??
+                                 new List<CompositeSeasonSourceEpisode>())
+                             .Select((episode, sourceOrdinal) => new { episode, sourceOrdinal }))
+                {
+                    AppendFingerprintField(canonical, "source-episode");
+                    AppendFingerprintField(canonical, sourceEntry.sourceOrdinal.ToString(CultureInfo.InvariantCulture));
+                    AppendFingerprintField(canonical, sourceEntry.episode?.EpisodeId);
+                    AppendFingerprintField(canonical, sourceEntry.episode?.CommentId);
+                    AppendFingerprintField(canonical, sourceEntry.episode?.EpisodeNumber.HasValue == true
+                        ? sourceEntry.episode.EpisodeNumber.Value.ToString(CultureInfo.InvariantCulture) : "?");
+                    AppendFingerprintField(canonical, sourceEntry.episode == null
+                        ? "?" : sourceEntry.episode.SourceOrdinal.ToString(CultureInfo.InvariantCulture));
+                }
             }
             foreach (var entry in (plan.Mappings ?? new List<CompositeSeasonEpisodeMapping>())
                          .Select((mapping, ordinal) => new { mapping, ordinal }))

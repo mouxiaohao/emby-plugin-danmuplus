@@ -74,6 +74,10 @@ define(
                     container.querySelector('#UseOfficialProxyCors').checked = resolveUseOfficialProxyCors(config.Dandan);
                     container.querySelector('#DandanApiId').value = config.Dandan.ApiId || '';
                     container.querySelector('#DandanApiSecret').value = config.Dandan.ApiSecret || '';
+                    var tmdb = config.Tmdb || {};
+                    container.querySelector('#UseTmdbAliasSearch').checked = tmdb.UseAliasSearch === true;
+                    container.querySelector('#TmdbApiKey').value = tmdb.ApiKey || '';
+                    container.querySelector('#TmdbReadAccessToken').value = tmdb.ReadAccessToken || '';
                     updateDandanApiModeVisibility();
 
                     var scrapersElement = container.querySelector('#Scrapers');
@@ -192,6 +196,12 @@ define(
                         dandan.WithRelatedDanmu = container.querySelector('#WithRelatedDanmu').checked;
                         dandan.ChConvert = container.querySelector('#ChConvert').value;
                         config.Dandan = dandan;
+
+                        var tmdb = config.Tmdb || {};
+                        tmdb.UseAliasSearch = container.querySelector('#UseTmdbAliasSearch').checked;
+                        tmdb.ApiKey = container.querySelector('#TmdbApiKey').value.trim();
+                        tmdb.ReadAccessToken = container.querySelector('#TmdbReadAccessToken').value.trim();
+                        config.Tmdb = tmdb;
 
                         ApiClient.updatePluginConfiguration(TemplateConfig.pluginUniqueId, config).then(function (result) {
                             Dashboard.processPluginConfigurationUpdateResult(result);

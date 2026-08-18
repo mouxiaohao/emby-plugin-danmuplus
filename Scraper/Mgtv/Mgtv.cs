@@ -7,9 +7,11 @@ using System.Net.Http;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Common.Net;
 using Emby.Plugin.Danmu.Core.Extensions;
+using Emby.Plugin.Danmu.Model;
 using Emby.Plugin.Danmu.Scraper.Entity;
 using System.Collections.Generic;
 using Emby.Plugin.Danmu.Scraper;
+using Emby.Plugin.Danmu.Scrapers.Mgtv.Entity;
 using MediaBrowser.Model.Logging;
 
 namespace Emby.Plugin.Danmu.Scrapers.Mgtv
@@ -142,10 +144,10 @@ namespace Emby.Plugin.Danmu.Scrapers.Mgtv
 
             var media = new ScraperMedia();
             media.Id = id;
-            if (isMovieItemType && video.EpisodeList != null && video.EpisodeList.Count > 0)
-            {
-                media.CommentId = $"{id},{video.EpisodeList[0].VideoId}";
-            }
+            media.ProviderId = this.ProviderId;
+            media.Title = video.Title ?? string.Empty;
+            media.Year = video.Year;
+            media.Category = video.TypeName ?? string.Empty;
             if (video.EpisodeList != null && video.EpisodeList.Count > 0)
             {
                 foreach (var ep in video.EpisodeList)
@@ -171,9 +173,61 @@ namespace Emby.Plugin.Danmu.Scrapers.Mgtv
             {
                 // Exact-ID details reliably establish only this usable episode list.
                 media.EpisodeCount = media.Episodes.Count;
+                if (isMovieItemType)
+                {
+                    media.CommentId = media.Episodes[0].CommentId;
+                }
             }
 
             return media;
+        }
+
+        internal static List<ScraperMoviePart> BuildMovieParts(
+            string parentId,
+            IEnumerable<MgtvEpisode> episodes)
+        {
+            var parts = new List<ScraperMoviePart>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var index = 0;
+            foreach (var episode in episodes ?? Enumerable.Empty<MgtvEpisode>())
+            {
+                if (episode == null || string.IsNullOrWhiteSpace(parentId) ||
+                    string.IsNullOrWhiteSpace(episode.VideoId) || !seen.Add(episode.VideoId.Trim()))
+                {
+                    continue;
+                }
+
+                index++;
+                var title = !string.IsNullOrWhiteSpace(episode.Title2)
+                    ? episode.Title2.Trim()
+                    : (episode.Title ?? string.Empty).Trim();
+                parts.Add(new ScraperMoviePart
+                {
+                    Id = parentId.Trim() + "|" + episode.VideoId.Trim(),
+                    Title = title,
+                    Index = index,
+                    IsDownloadable = true,
+                    IsExplicitNonMain = EpisodeContentClassifier.IsExplicitNonMain(episode.ContentType) ||
+                        EpisodeContentClassifier.IsExplicitNonMain(episode.Title) ||
+                        EpisodeContentClassifier.IsExplicitNonMain(episode.Title2),
+                });
+            }
+            return parts;
+        }
+
+        public override async Task<List<ScraperMoviePart>> GetMovieParts(
+            BaseItem item,
+            string parentId,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!(item is MediaBrowser.Controller.Entities.Movies.Movie) || string.IsNullOrWhiteSpace(parentId))
+            {
+                return new List<ScraperMoviePart>();
+            }
+
+            var video = await _api.GetVideoAsync(parentId, cancellationToken).ConfigureAwait(false);
+            return BuildMovieParts(parentId, video?.EpisodeList);
         }
 
         public override async Task<ScraperEpisode?> GetMediaEpisode(BaseItem item, string id)
@@ -182,17 +236,32 @@ namespace Emby.Plugin.Danmu.Scrapers.Mgtv
             var isMovieItemType = item is MediaBrowser.Controller.Entities.Movies.Movie;
             if (isMovieItemType)
             {
-                var video = await _api.GetVideoAsync(id, CancellationToken.None).ConfigureAwait(false);
+                var separator = id?.IndexOf('|') ?? -1;
+                var parentId = separator > 0 ? id.Substring(0, separator) : id;
+                var selectedVideoId = separator > 0 && separator + 1 < id.Length
+                    ? id.Substring(separator + 1)
+                    : string.Empty;
+                var video = await _api.GetVideoAsync(parentId, CancellationToken.None).ConfigureAwait(false);
                 if (video == null || video.EpisodeList == null || video.EpisodeList.Count <= 0)
                 {
                     return null;
                 }
 
-                var firstEpisode = video.EpisodeList[0];
+                var firstEpisode = string.IsNullOrWhiteSpace(selectedVideoId)
+                    ? video.EpisodeList.FirstOrDefault(ep => ep != null &&
+                        !EpisodeContentClassifier.IsExplicitNonMain(ep.ContentType) &&
+                        !EpisodeContentClassifier.IsExplicitNonMain(ep.Title) &&
+                        !EpisodeContentClassifier.IsExplicitNonMain(ep.Title2))
+                    : video.EpisodeList.FirstOrDefault(ep => ep != null &&
+                        string.Equals(ep.VideoId, selectedVideoId, StringComparison.OrdinalIgnoreCase));
+                if (firstEpisode == null || string.IsNullOrWhiteSpace(firstEpisode.VideoId))
+                {
+                    return null;
+                }
                 return new ScraperEpisode()
                 {
-                    Id = id,
-                    CommentId = $"{id},{firstEpisode.VideoId}",
+                    Id = firstEpisode.VideoId,
+                    CommentId = $"{parentId},{firstEpisode.VideoId}",
                     Title = firstEpisode.Title,
                     EpisodeNumber = EpisodeContentClassifier.TryGetEpisodeNumber(firstEpisode.Title2) ??
                         EpisodeContentClassifier.TryGetEpisodeNumber(firstEpisode.Title),
@@ -227,6 +296,12 @@ namespace Emby.Plugin.Danmu.Scrapers.Mgtv
                 Title = sourceEpisode.Title,
                 EpisodeNumber = EpisodeContentClassifier.TryGetEpisodeNumber(sourceEpisode.Title2) ??
                     EpisodeContentClassifier.TryGetEpisodeNumber(sourceEpisode.Title),
+                SourceMetadata = new SourceMetadata
+                {
+                    Title = seasonVideo.Title ?? string.Empty,
+                    Year = seasonVideo.Year,
+                    Category = seasonVideo.TypeName ?? string.Empty,
+                },
             };
         }
 

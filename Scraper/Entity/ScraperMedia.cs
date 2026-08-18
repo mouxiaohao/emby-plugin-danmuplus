@@ -1,4 +1,7 @@
 using System.Collections.Generic;
+using System.Runtime.Serialization;
+using System.Text.Json.Serialization;
+using Emby.Plugin.Danmu.Model;
 
 namespace Emby.Plugin.Danmu.Scraper.Entity
 {
@@ -25,6 +28,15 @@ namespace Emby.Plugin.Danmu.Scraper.Entity
         public int? Year { get; set; }
         public string Category { get; set; } = string.Empty;
         public int? EpisodeCount { get; set; }
+        public SourceMetadata SourceMetadata { get; set; }
+        /// <summary>
+        /// Server-resolved Movie leaf override. It is never accepted as a raw
+        /// browser value; controllers set it only after scoped evidence checks.
+        /// </summary>
+        [JsonIgnore]
+        [IgnoreDataMember]
+        public string SelectedMoviePartId { get; set; } = string.Empty;
+        public string PartTitle { get; set; } = string.Empty;
         public List<ScraperEpisode> Episodes { get; set; } = new List<ScraperEpisode>();
 
     }
@@ -50,5 +62,22 @@ namespace Emby.Plugin.Danmu.Scraper.Entity
         /// expose reliable numbering.
         /// </summary>
         public int? EpisodeNumber { get; set; }
+        /// <summary>Optional parent media/season metadata, never the episode title.</summary>
+        public SourceMetadata SourceMetadata { get; set; }
+    }
+
+    /// <summary>
+    /// Provider-internal Movie leaf that can be verified and downloaded
+    /// independently. Public responses expose an opaque token and Title only.
+    /// </summary>
+    public sealed class ScraperMoviePart
+    {
+        [JsonIgnore]
+        [IgnoreDataMember]
+        public string Id { get; set; } = string.Empty;
+        public string Title { get; set; } = string.Empty;
+        public int? Index { get; set; }
+        public bool IsDownloadable { get; set; }
+        public bool IsExplicitNonMain { get; set; }
     }
 }
