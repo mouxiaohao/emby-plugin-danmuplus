@@ -83,11 +83,11 @@
 
 ## 13. Full local verification
 
-- [ ] 13.1 Run the main backend regression and every affected specialized regression project sequentially, including bounded search, r3 search quality, search-term policy, title fidelity, TMDB alias, candidate detail/evidence, single-target download, and seven-day replay coverage.
-- [ ] 13.2 Run the complete frontend smart-match regression and configuration source/generated-resource assertions; verify manual-keyword rows display only server scores/reasons in server order without browser re-scoring, re-sorting, preselection, or internal-value exposure, and verify TMDB-exhaustion results expose no alias candidates or TMDB diagnostics.
+- [x] 13.1 Run the main backend regression and every affected specialized regression project sequentially, including bounded search, r3 search quality, search-term policy, title fidelity, TMDB alias, candidate detail/evidence, single-target download, and seven-day replay coverage.
+- [x] 13.2 Run the complete frontend smart-match regression and configuration source/generated-resource assertions; verify manual-keyword rows display only server scores/reasons in server order without browser re-scoring, re-sorting, preselection, or internal-value exposure, and verify TMDB-exhaustion results expose no alias candidates or TMDB diagnostics.
 - [x] 13.3 Run a clean sequential Release build, capture DLL version/size/SHA-256, and verify no competing .NET process caused mapped-file output locks.
-- [ ] 13.4 Run `openspec.cmd validate release-2-0-5-r1-search-behavior-and-presentation --strict`, final OpenSpec status, `git diff --check`, and a changed-file allowlist/scope audit.
-- [ ] 13.5 Audit source, staged files, logs, verification records, DLL-visible configuration strings, and any local package manifest for credential values without printing secrets; verify TMDB keys/tokens, Dandan credentials, signatures, authorization headers, and private deployment details are absent.
+- [x] 13.4 Run `openspec.cmd validate release-2-0-5-r1-search-behavior-and-presentation --strict`, final OpenSpec status, `git diff --check`, and a changed-file allowlist/scope audit.
+- [x] 13.5 Audit source, staged files, logs, verification records, DLL-visible configuration strings, and any local package manifest for credential values without printing secrets; verify TMDB keys/tokens, Dandan credentials, signatures, authorization headers, and private deployment details are absent.
 
 ## 14. Independent l1-l10 rollback record
 
@@ -96,18 +96,18 @@
 
 ## 15. Local packaging and approval-gated live verification
 
-- [ ] 15.1 Assemble a local 2.0.5r1 review package containing only the verified Release DLL, matching CustomCssJS source asset, checksums, cumulative notes, and verification record; exclude `bin`, `obj`, logs, backups, diagnostics, credentials, deployment helpers with private paths, and unrelated artifacts.
-- [ ] 15.2 Re-read the local package, verify file/version/hash agreement and forbidden-entry absence, and keep it local; do not push, tag, publish a GitHub Release, merge, or deploy.
+- [x] 15.1 Assemble a local 2.0.5r1 review package containing only the verified Release DLL, matching CustomCssJS source asset, checksums, cumulative notes, and verification record; exclude `bin`, `obj`, logs, backups, diagnostics, credentials, deployment helpers with private paths, and unrelated artifacts.
+- [x] 15.2 Re-read the local package, verify file/version/hash agreement and forbidden-entry absence, and keep it local; do not push, tag, publish a GitHub Release, merge, or deploy.
 - [x] 15.3 Obtain explicit user authorization before any Synology file replacement or Emby restart; authorization for this live-validation deployment is recorded in the task conversation, while credentials and private rollback locations remain outside repository artifacts.
-- [ ] 15.4 If authorized, back up the paired deployed DLL, configuration, and CustomCssJS asset with hashes, ownership, and modes before replacing the approved files; retain a directly usable rollback copy.
+- [x] 15.4 If authorized, back up the paired deployed DLL, configuration, and CustomCssJS asset with hashes, ownership, and modes before replacing the approved files; retain a directly usable rollback copy.
 - [ ] 15.5 Under the existing authorization, restart Emby, verify health, and perform live checks for multi-Season guidance, one-provider failure with successful siblings, JOJO Season 1 alias exhaustion/parent-title rematch, scored manual keywords with no preselection, long search plus explicit cancellation, ordinary automatic scoring after l8/l9, and unchanged seven-day replay/180-second download behavior.
-- [ ] 15.6 If authorized, compare deployed DLL/asset hashes to the verified local package, scan bounded application logs for redacted failures, and either record success or restore the backup pair and re-verify Emby health.
+- [x] 15.6 If authorized, compare deployed DLL/asset hashes to the verified local package, scan bounded application logs for redacted failures, and either record success or restore the backup pair and re-verify Emby health.
 
 ## 16. Final review and handoff
 
-- [ ] 16.1 Have a Sol high-reasoning reviewer inspect the final diff, l boundaries, specs/tasks coherence, failure/cancellation/persistence safety, scored manual-keyword explicit-selection boundary, TMDB state transition, and all verification evidence; resolve every blocking finding before handoff.
+- [x] 16.1 Have a Sol high-reasoning reviewer inspect the final diff, l boundaries, specs/tasks coherence, failure/cancellation/persistence safety, scored manual-keyword explicit-selection boundary, TMDB state transition, and all verification evidence; resolve every blocking finding before handoff.
 - [ ] 16.2 Confirm the delivered worktree is clean at the reviewed candidate, the original dirty checkout remains untouched, every l hash is recorded, and no push/merge/release/deployment occurred without its explicit gate.
-- [ ] 16.3 Present the 2.0.5r1 implementation, verification summary, local artifact paths/hashes, ten recorded rollback commands without claiming waived inverse tests, residual risks, and live-validation result to the user for the next decision.
+- [x] 16.3 Present the 2.0.5r1 implementation, verification summary, local artifact paths/hashes, ten recorded rollback commands without claiming waived inverse tests, residual risks, and live-validation result to the user for the next decision.
 
 ## 17. Post-slice Season score and verified source-surplus refinement
 

@@ -1,173 +1,117 @@
-# 2.0.5r1 local verification record
+# 2.0.5r1 最终验证记录
 
-This repository-relative record is the release-verification template for
-`release-2-0-5-r1-search-behavior-and-presentation`. It records only bounded,
-credential-free evidence. It must not contain authenticated payloads, access
-details, machine-specific absolute paths, server addresses, or deployment
-credentials.
+本记录只保存可公开、无凭据的发布证据，不包含服务器地址、账号、密码、
+token、认证请求、原始提供商响应、私有绝对路径或备份位置。
 
-## Immutable references
+## 基线与发布身份
 
-- Implementation branch: `codex/2.0.5r1-matching-behavior`
-- Exact implementation baseline: `f8a4356537dcf0c8f913bb970bb2bcdc689096fd`
-- Behavioral candidate before release preparation:
-  `5713498de45912384f013fa2180a1e7fadc4f002`
-- Per-slice commits and focused evidence: [`COMMIT_MAP.md`](COMMIT_MAP.md)
-- Release-preparation commit: `6e4c3c09df81150a3fa0d49fe9d5f11dc405d490`
-- Post-slice Season score/source-surplus commit: `872aa157a39cd1b235b52f7a7b630305e7201a3d`
-- Post-slice TMDB alias terminal-marker correction: `6d20fc0a7ac0027aea0309ac78b4f316256f7516`
-- Post-slice strict full-title Season fallback: `b8b5ab26aeaf2eae26025eba5ebe4e8c61aa4f85`
-- No push, tag, merge, GitHub Release, or package publication is authorized.
-- Synology/Emby backup, replacement, restart, and live checks are user-authorized.
-  The final V27 candidate was backed up, deployed, read back, and live-validated
-  under that authorization without initiating a download.
-- That historical authorization and result apply to the previously deployed
-  `6d20fc0` candidate. The new `b8b5ab2` candidate has not been deployed and
-  requires fresh authorization before any server change.
+- 实现分支：`codex/2.0.5r1-matching-behavior`
+- 2.0.4r2 / `origin/develop` 基线：
+  `f8a4356537dcf0c8f913bb970bb2bcdc689096fd`
+- 当前最新正式 GitHub Release 基线：`v2.0.3r10`
+  (`51722a3e6e3050e6e817232b8987486f54792e62`)
+- 最终 sparse-alignment 源码增量：
+  `cd2d4387fc64fd8ce35dd0f9bb22e5d6c8039be1`
+- l1-l10 独立回退提交见 [`COMMIT_MAP.md`](COMMIT_MAP.md)。
+- 本记录不为发布文档预先指定或推测 Git commit、tag 或 GitHub Release
+  身份；发布时应以实际创建并回读的不可变引用为准。
 
-## l1-l10 commit map
+## 最终发布元数据
 
-| Slice | Commit | Independent inverse |
+| 字段 | 最终值 | 结果 |
 | --- | --- | --- |
-| l1 | `f90f779ce1219693fd2ea2ba0713451a893c9a02` | waived by user; not run |
-| l2 | `d6070f60f9344476ea677c968fd62da87e79856c` | waived by user; not run |
-| l3 | `720732398d12293db1e86009bbbfcd498917a1b8` | waived by user; not run |
-| l4 | `9b008697274eb3cc12382eaf9b081101d3402e26` | waived by user; not run |
-| l5 | `1594b53524614763d3d19a7084ef4f1fc45f87f9` | waived by user; not run |
-| l6 | `5713498de45912384f013fa2180a1e7fadc4f002` | waived by user; not run |
-| l7 | `9a9b5e6a111abc2ca03b87a732a0acd51e1b3610` | waived by user; not run |
-| l8 | `67cd8f453ae2999e2e81406e5a5161b543e17792` | waived by user; not run |
-| l9 | `ee09089a5460d2e13bb3424432366a500fa9296f` | waived by user; not run |
-| l10 | `8f2dc5fd65df836e833712743deaaa6eb633e104` | waived by user; not run |
+| Assembly/File version | `2.0.5.1` | PASS |
+| Product/Configuration version | `2.0.5r1` | PASS |
+| TMDB User-Agent | `DanmuPlus/2.0.5r1` | PASS |
+| 映射协议 | V22 | PASS |
+| 前端安装标记 | V28 | PASS |
 
-The release-preparation commit remains outside this behavioral rollback map.
-The user explicitly waived the exhaustive inverse matrix and prioritized live
-deployment testing. No resulting-tree or restoration evidence is claimed.
+## 最终发布文件
 
-## Expected release metadata
+发布清单以 `review-package-v28-sparse-0cda5510` 中的已验证文件为准：
 
-| Field | Expected value | Status |
+| 文件 | 大小 | SHA-256 |
+| --- | ---: | --- |
+| `Emby.Plugin.Danmu.dll` | 1656832 | `0cda55107003c5e491c763969b55c02a51601f3870610a0a6a5418d03833b1aa` |
+| `DanmuSmartMatch.CustomCssJS.js` | 233307 | `01c7c6400f70146a22b2d1cbac65691017ed159a86398e1e653bb1e2fc0fcbb3` |
+
+DLL 的 Assembly/File version 为 `2.0.5.1`，Product version 为
+`2.0.5r1`；JavaScript 与 DLL 配套使用 V28/V22。包内只包含最终 DLL、
+匹配的 JavaScript、校验和与无凭据说明，不含部署脚本、配置、日志、备份、
+诊断转储或凭据。
+
+以下早期候选已被取代并从当前发布清单排除：
+
+- 所有 V27/V21 候选；
+- DLL SHA-256 以 `4892a83a` 开头的早期 sparse 候选；
+- DLL SHA-256 以 `0b05af38` 开头的早期 sparse 候选。
+
+这些文件只可作为本地历史证据，不得复制到 2.0.5r1 当前 Release。
+
+## 提交后 clean rebuild 对照
+
+本轮提交后的 clean rebuild 生成了另一个 `Emby.Plugin.Danmu.dll`：
+
+| 项目 | clean rebuild | 现场已部署/发布权威 DLL |
 | --- | --- | --- |
-| Assembly version | `2.0.5.1` | static PASS |
-| File version | `2.0.5.1` | static PASS |
-| Informational version | `2.0.5r1` | static PASS |
-| Configuration version | `2.0.5r1` | static PASS |
-| TMDB User-Agent | `DanmuPlus/2.0.5r1` | static PASS |
-| Frontend installation marker | V27 | static PASS |
-| Mapping protocol | V21, unchanged | static PASS |
+| 大小 | 1656832 bytes | 1656832 bytes |
+| SHA-256 | `e3bb181f7682d186b78aad32bb4fae6be50b53875e457e710bfac8eebe9743fa` | `0cda55107003c5e491c763969b55c02a51601f3870610a0a6a5418d03833b1aa` |
+| Assembly/File/Product version | `2.0.5.1` / `2.0.5.1` / `2.0.5r1` | `2.0.5.1` / `2.0.5.1` / `2.0.5r1` |
 
-## Planned local checks
+逐 RID 对双方各 5856 个 managed method 的名称、签名、属性、IL 与异常区域
+进行核对，结果全部相同。双方 591344-byte managed resources 的 SHA-256
+也均为 `a54438c1c4c39a0d76d41d60fd9e2428e6265300d6e9d73ea1b7aa1ef7a704fb`。
+已观察到的二进制差异包括 MVID 与 PDB debug identifiers；这些结构化比较
+不能证明整个二进制除已列字段外逐字节完全一致。
 
-All .NET commands must run sequentially to avoid shared output-file contention.
-`PENDING` means the check has not run; it is not evidence of success.
+Release 仍使用已在群晖部署后逐字节哈希回读验证的 `0cda5510…` DLL；
+`e3bb181f…` clean rebuild 只作为提交后可重复构建与 managed 内容对照证据，
+不替换发布权威文件。
 
-| Check | Configuration | Result | Evidence note |
-| --- | --- | --- | --- |
-| Frontend smart-match regression | Node | PASS | Complete frontend suite and syntax checks |
-| Version/document consistency | n/a | PASS | Metadata, V27/V21, images, cumulative history |
-| Main backend regression | Release | PASS | Complete main executable, including retained reliability contracts |
-| Bounded-search foundation/policy | Release | PASS | No shared 10/30/45-second deadline; explicit cancellation retained |
-| R3 search quality | Release | PASS | Provider-local failure isolation |
-| Search-term policy | Release | PASS | Scored manual-keyword discovery, merge/order/sixty-row and Movie-zero behavior |
-| Title fidelity | Release | PASS | No restricted 0.85 promotion |
-| TMDB alias regression | Release | PASS | Exhaustion/rematch and cancellation |
-| Candidate evidence/detail | Release | PASS (focused) | Manual-keyword core target-bound selection validation |
-| Composite-season planner | Release | PASS | Authoritative mapping invariants and response-only verified source surplus |
-| Single-target download arbiter | Release | PASS | Retained 180-second boundary covered by complete main reliability contracts |
-| Seven-day replay | Release | PASS | Retained skip/replay rules |
-| Full plugin build | Release | PASS | Clean sequential build; 0 errors and 131 existing warnings |
-| OpenSpec strict validation | n/a | PASS | Change is valid under strict validation |
-| Changed-file allowlist and diff check | n/a | PASS | Exact implementation allowlist; no unrelated staged content or whitespace errors |
-| Credential-safe artifact audit | n/a | PASS | Source, staged implementation, and final V27 review package contain no private addresses or credential assignments |
-| l1-l10 independent inverse matrix | Release/focused | WAIVED | User requested live deployment testing first; no inverse result claimed |
+## 本地验证
 
-## Current deployed strict-title candidate
+| 检查 | 结果 | 证据范围 |
+| --- | --- | --- |
+| 完整后端回归与所有受影响专项回归 | PASS | bounded search、R3、search-term、TitleFidelity、TMDB alias、candidate detail/evidence、composite planner、R5 scope、single-target、seven-day replay |
+| 完整前端与配置资源回归 | PASS | 服务端分数/原因/顺序、无预选、TMDB 耗尽隐藏、V22/V28、稀疏对齐与 stale 状态 |
+| clean sequential Release build | PASS | 0 errors；无竞争 .NET 构建输出锁 |
+| strict OpenSpec validation | PASS | 相关 change 严格校验通过 |
+| diff、变更范围、凭据与包清单审计 | PASS | 无白名单外发布文件、无凭据或私有部署细节 |
+| Sol-high 最终审查 | PASS | 无阻塞发现；稀疏编号、显式锚点、fallback、fingerprint、写入栅栏、S0 与 frozen replay 边界通过 |
 
-The following DLL was rebuilt from artifact source commit `68279e8`, the
-documentation-only child of the reviewed `b8b5ab2` implementation commit. The
-local artifact and deployed DLL were read back with the same hash during the
-authorized strict-title live validation.
+用户已免除 l1-l10 十棵逆向树的穷举运行。本记录只保留独立提交与普通
+`git revert` 边界，不声明未运行的逆向树通过。
 
-| Artifact | Repository-relative location | Size | SHA-256 |
-| --- | --- | --- | --- |
-| Release DLL | `bin/Release/netstandard2.0/Emby.Plugin.Danmu.dll` | 1633792 | `009f03c73b956057a1807e0c2122f6b0d111c9c68626ed613e52afc09f62c7a6` |
+## 最终行为验收
 
-## Previous V27 rollback artifact and hashes
+- Season 普通评分为父剧名 `60`、季名 `20`、精确年份 `20`、集数 `0`；
+  集数差异只驱动黄色提示，不改变评分、候选顺序或下载资格。
+- TMDB alias 父标题证据在当前别名与原始父剧名间取最大值；严格“双空残余”
+  完整标题 NFKC 符号兜底只补足同一标题对的季名分。
+- 临时映射错误显示明确原因；整剧空 Season 只执行一次受控重试。
+- 显式可靠编号采用零偏移或用户锚点的编号差；编号不可靠时整窗位置兜底，
+  同一窗口不混用两种模式。精确 `SourceStartEpisodeId` 是权威来源锚点。
+- V22 计划指纹覆盖对齐意图、窗口、来源编号/顺序、锚点和精确映射；
+  代际或指纹变化会在下载、标识符及元数据写入前 fail closed。
+- 显式单 Season 0 保持可用；whole-Series 与 unattended/media-import 在
+  provider search 前跳过 Season 0。
+- 逐集 retry 与 seven-day replay 使用冻结的本地 ItemId、来源 EpisodeId 和
+  CommentId 元组；重验证时 CommentId 变化会视为 stale，不按编号或位置替换。
 
-The artifacts below document the previously deployed and live-validated V27
-candidate. They are retained as historical rollback evidence and are not the
-current local `b8b5ab2` candidate.
+## 群晖与 Emby 只读现场验证
 
-| Artifact | Repository-relative location | Size | SHA-256 |
-| --- | --- | --- | --- |
-| Release DLL | `bin/Release/netstandard2.0/Emby.Plugin.Danmu.dll` | 1632768 | `127d3ca0938d1307482cc7dd827353589221385b4061e9e13b628d65f239fe9f` |
-| Smart-match source | `Frontend/DanmuSmartMatch.CustomCssJS.js` | 224910 | `c8fd263c6cff1c3c9b93a6d95b721c4ba07886ee091f34fb085ce4b63448c55f` |
-| Cumulative update notes | `UPDATE.md` | 16325 | `2c6f6f8d9a0bb9a1af40f9e3070d33ac344b942ea0ace4b83c40a69c070be604` |
-| Verification record | `artifacts/2.0.5r1/VERIFICATION.md` | self-record | verified by package `SHA256SUMS` |
-| Local review package | `artifacts/2.0.5r1/review-package-v27-final` | 6 allowlisted files | all entries verified by `SHA256SUMS` |
+- 已先备份部署中的 DLL、CustomCssJS 与插件配置，并完成可用回退副本的
+  校验和回读；随后只部署最终 DLL/V28 JavaScript 配对。
+- 部署文件哈希回读与上表一致；Emby 进程运行，健康接口 HTTP 200，
+  `Emby.Plugin.Danmu, Version=2.0.5.1` 加载成功，启动日志无插件加载/DI 错误。
+- Spy Family Season 3 的库内 E1-E6/E10-E13 映射保持 E10→来源 E10。
+- Frieren 显式 E29→来源 E1 时，缺少本地 E30 后 E31→来源 E3。
+- 只调用只读预览；未启动下载、绑定、元数据写入或强制刷新。
+- 旧 XML 未删除、未覆盖、未自动修复；任何后续强制刷新仍需要单独确认。
+- 有界日志检查未发现映射协议、stale-plan 或插件加载失败。
 
-## Approval gates
+## 发布结论
 
-- Local source edits and deterministic verification do not authorize external
-  publication or live changes.
-- Creating a local review package does not authorize pushing, tagging, merging,
-  publishing a Release, or uploading any artifact.
-- Live backup, replacement, restart, and representative checks are authorized
-  after the Release build, deployment smoke checks, artifact checks, and usable
-  rollback backup pass. Those gates passed for the final V27 candidate, including
-  server-side hash readback, service health, and rollback-backup checksum readback.
-- When the authorized live validation runs, record only bounded outcomes and hashes;
-  do not place server locations, credentials, request signatures, headers, raw
-  responses, or backup locations in this file.
-- A live replacement must not begin until the currently deployed paired assets
-  are backed up and a directly usable rollback is confirmed.
-
-## Authorized live validation
-
-- Current deployed DLL SHA-256: `009f03c73b956057a1807e0c2122f6b0d111c9c68626ed613e52afc09f62c7a6`.
-- Deployed CustomCssJS configuration SHA-256: `552f384a3b4cc19785e8f39c0ce4e735930b16a9ab0b96b1fe9edfbc8b4e636b`.
-- Deployed plugin configuration SHA-256: `02519afd92022babacf9e6d516c44c0dde0117a2744593501d8cb29222536069`.
-- V27 installation marker count was exactly one; service health and the directly
-  usable three-file rollback backup checksum readback passed after restart.
-- Emby 4.9.5.0 loaded `Emby.Plugin.Danmu, Version=2.0.5.1`; the bounded startup
-  log contained no Danmu load/DI error and the public health endpoint returned
-  HTTP 200 after replacement.
-- Single-Season preview for `妄想学生会` Season 2 returned the exact starred
-  Dandanplay title at 100 (`60 + 20 + 20 + 0`) and selected it automatically.
-  The markerless Dandanplay title carried source year 2010 against the library
-  Season year 2014, so it remained unpromoted at 60 rather than the provisional
-  80 expectation; this is the correct known-year-conflict result under the
-  frozen score contract.
-- Single-Season preview for Season 1 returned the markerless title at 100 and
-  selected it automatically, confirming that the pre-existing both-empty
-  residual rule still wins before the strict complete-title fallback.
-- Only `MatchPreview` was invoked for the strict-title checks; no download
-  endpoint was invoked.
-- The prior deployed DLL SHA-256
-  `127d3ca0938d1307482cc7dd827353589221385b4061e9e13b628d65f239fe9f`
-  remains in the freshly checksum-verified rollback set together with the
-  unchanged CustomCssJS and plugin configurations.
-
-Historical V27 validation retained for rollback context:
-
-- Whole-Series preview for Bookworm returned four Seasons and 52 local Episodes.
-  S1 matched at 80; S2, S3, and S4 matched their corresponding Season titles at
-  100; all four Seasons were selected. S4 alone displayed exactly one visible
-  yellow `库内集数少于来源集数` notice.
-- Single-Season S4 preview matched the corresponding 2026 source at 100 and
-  displayed the same notice exactly once in yellow.
-- No download button was activated during either live preview.
-
-## Final sign-off placeholders
-
-- Release-preparation commit: `6e4c3c09df81150a3fa0d49fe9d5f11dc405d490`
-- Reviewed local candidate commit: `b8b5ab26aeaf2eae26025eba5ebe4e8c61aa4f85`
-- Artifact source commit: `68279e8847d6de4d91a286ca51cf25c2f1fe1e1a` (documentation-only child; production source unchanged)
-- Independent reviewer findings: final Sol-high review reported no P0, P1, or P2 finding and approved local submission; it did not authorize deployment
-- Full local verification result: PASS; TitleFidelity, TMDB alias, SearchTermPolicy, R3 search quality, complete backend regression, clean sequential Release build, strict OpenSpec validation, and scope/credential/diff checks passed
-- Current local DLL: 1633792 bytes; SHA-256 `009f03c73b956057a1807e0c2122f6b0d111c9c68626ed613e52afc09f62c7a6`
-- Current `b8b5ab2` package result: NOT CREATED; the committed DLL and hash are recorded locally without repackaging or publication
-- Historical V27 local package result: PASS; six allowlisted files, checksum readback, source/package equality, and credential audit verified
-- External publication approval: not granted
-- Current `b8b5ab2` live validation result: PASS; deployed hash readback, paired rollback checksum, Emby health/plugin load, Season 2 starred 100, markerless known-year-conflict 60, unchanged Season 1 100, and no-download checks passed
-- Historical `6d20fc0` live validation result: PASS; final V27 deployed and read back, rollback backup verified, whole-Series and single-Season previews passed, and no download was initiated
+最终 V22/V28 包、本地回归、clean Release、strict OpenSpec、范围/凭据审计、
+Sol-high 审查以及授权的只读现场验证全部 PASS。当前发布只应使用本记录中的
+两个最终文件与哈希；不得回退到中途 V27/V21 或两个早期 sparse 包。
