@@ -574,14 +574,42 @@ namespace Emby.Plugin.Danmu.BoundedSearchPolicyRegression
             Assert(seasonGuard >= 0 && seasonContinue > seasonGuard && seasonSelect > seasonContinue,
                 "an incomplete automatic Season round must continue before candidate selection, binding, or download");
 
-            var residual = Slice(helper,
-                "while (plan.UnmatchedRuns.Count > 0)",
-                "if (plan.Mappings.Count == 0 || plan.UnmatchedRuns.Count > 0) return false;");
-            var residualGuard = residual.IndexOf("if (!CanUseAutomaticSearch(search))", StringComparison.Ordinal);
-            var residualAbort = residual.IndexOf("return false;", residualGuard, StringComparison.Ordinal);
-            var residualSelect = residual.IndexOf("SelectResidualCandidate", StringComparison.Ordinal);
-            Assert(residualGuard >= 0 && residualAbort > residualGuard && residualSelect > residualAbort,
-                "an incomplete residual round must abort before supplemental selection, binding, or any mapped download");
+            var automatic = Slice(helper,
+                "private async Task<bool> DownloadAutomaticSeasonWithCompositePlan(",
+                "private sealed class AutomaticSeasonPlanSnapshot");
+            Assert(!automatic.Contains("while (plan.UnmatchedRuns.Count > 0)", StringComparison.Ordinal) &&
+                   !automatic.Contains("SearchSeasonAsync", StringComparison.Ordinal) &&
+                   !automatic.Contains("SelectResidualCandidate", StringComparison.Ordinal) &&
+                   CountOccurrences(automatic, "CompositeSeasonPlanner.TryApplySegmentResolved(") == 1,
+                "automatic Season matching must apply one initial selection through the shared resolver without residual search or looping");
+
+            var incompleteGuard = automatic.IndexOf(
+                "if (plan.Mappings.Count == 0 || plan.UnmatchedRuns.Count > 0) return false;",
+                StringComparison.Ordinal);
+            var preflight = automatic.IndexOf(
+                "var preflight = await RebuildAutomaticPlanAsync(", StringComparison.Ordinal);
+            var staleGuard = automatic.IndexOf(
+                "preflight.Plan == null || !string.Equals(", preflight, StringComparison.Ordinal);
+            var staleAbort = automatic.IndexOf("return false;", staleGuard, StringComparison.Ordinal);
+            var beginWrite = automatic.IndexOf("BeginCompositeSeasonWrite(", StringComparison.Ordinal);
+            var download = automatic.IndexOf("DownloadEpisodeForProgress(", StringComparison.Ordinal);
+            var episodeBinding = automatic.IndexOf("PersistDownloadProviderIdAsync(", StringComparison.Ordinal);
+            var seasonBinding = automatic.IndexOf("UpsertSeasonDisplayMirrorAsync(", StringComparison.Ordinal);
+            Assert(incompleteGuard >= 0 && preflight > incompleteGuard && staleGuard > preflight &&
+                   staleAbort > staleGuard && beginWrite > staleAbort && download > beginWrite &&
+                   episodeBinding > download && seasonBinding > episodeBinding,
+                "zero-mapping, unmatched, or stale automatic plans must return before the write lease, download, or binding paths");
+
+            var rebuild = Slice(helper,
+                "private async Task<AutomaticSeasonPlanSnapshot> RebuildAutomaticPlanAsync(",
+                "internal static bool CanUseAutomaticSearch(");
+            Assert(CountOccurrences(rebuild, "CompositeSeasonPlanner.TryApplySegmentResolved(") == 1 &&
+                   !rebuild.Contains("SearchSeasonAsync", StringComparison.Ordinal) &&
+                   !rebuild.Contains("DownloadEpisodeForProgress(", StringComparison.Ordinal) &&
+                   !rebuild.Contains("PersistDownloadProviderIdAsync(", StringComparison.Ordinal) &&
+                   !rebuild.Contains("UpsertSeasonDisplayMirrorAsync(", StringComparison.Ordinal) &&
+                   !rebuild.Contains("BeginCompositeSeasonWrite(", StringComparison.Ordinal),
+                "automatic rebuild must use the shared resolver and keep every stale or failed reconstruction read-only");
         }
 
         private static DanmuMatchCandidate Candidate(string id, string site, int sourceOrder)
