@@ -270,9 +270,16 @@ namespace Emby.Plugin.Danmu.R5TargetSeasonScopeRegression
                    automatic.Contains("IsCurrent(seasonId, automaticGeneration)", StringComparison.Ordinal) &&
                    automatic.Contains("Generation = automaticGeneration", StringComparison.Ordinal) &&
                    automatic.Contains("seasons.Where(candidate =>", StringComparison.Ordinal) &&
+                   automatic.Contains("season.IndexNumber.Value <= 0", StringComparison.Ordinal) &&
+                   automatic.Contains("season?.IndexNumber.GetValueOrDefault() <= 0", StringComparison.Ordinal) &&
+                   !automatic.Substring(
+                       automatic.IndexOf("private async Task<bool> DownloadAutomaticSeasonWithCompositePlan", StringComparison.Ordinal),
+                       automatic.IndexOf("private sealed class AutomaticSeasonPlanSnapshot", StringComparison.Ordinal) -
+                       automatic.IndexOf("private async Task<bool> DownloadAutomaticSeasonWithCompositePlan", StringComparison.Ordinal))
+                       .Contains("SearchSeasonAsync", StringComparison.Ordinal) &&
                    !automatic.Contains("season.IndexNumber.HasValue && season.IndexNumber == 0",
                        StringComparison.Ordinal),
-                "interactive and every reachable automatic target, including Update and S0, must share the identifier-free target coordinator");
+                "interactive positive Seasons must share the coordinator, while unattended S0 is rejected before provider work and automatic plans never discover residual sources");
         }
 
         private static void PlanFingerprintCoversSelectionsAndMappings()
@@ -296,10 +303,22 @@ namespace Emby.Plugin.Danmu.R5TargetSeasonScopeRegression
                 }, "manual", out firstPlan, out error), error);
             var selection = new DanmuCompositeSeasonSelection
             {
+                MappingProtocolVersion = DanmuMappingProtocol.CurrentVersion,
+                AlignmentIntent = DanmuCompositeAlignmentIntentWire.DefaultZeroOffset,
                 Site = "test", CandidateId = "lookup",
                 LocalStartEpisodeItemId = scope.EligibleEpisodes[0].ItemId,
                 RequestedEpisodeCount = 2, SourceStartEpisodeId = "ep-1",
                 MatchOrigin = "manual", SelectionEvidenceToken = "evidence-a",
+                ServerResolvedAlignmentMode = CompositeSeasonAlignmentMode.NumberAware,
+                ServerConsideredLocalEpisodeItemIds = scope.EligibleEpisodes
+                    .Select(item => item.ItemId).ToList(),
+                ServerSourceEpisodes = new List<CompositeSeasonSourceEpisode>
+                {
+                    new CompositeSeasonSourceEpisode
+                        { EpisodeId = "ep-1", CommentId = "c-1", EpisodeNumber = 1, SourceOrdinal = 1 },
+                    new CompositeSeasonSourceEpisode
+                        { EpisodeId = "ep-2", CommentId = "c-2", EpisodeNumber = 2, SourceOrdinal = 2 },
+                },
             };
             var baseline = SeasonPlanningContextBuilder.CreatePlanFingerprint(
                 context, new[] { selection }, firstPlan);
@@ -307,7 +326,7 @@ namespace Emby.Plugin.Danmu.R5TargetSeasonScopeRegression
                        (character >= '0' && character <= '9') ||
                        (character >= 'a' && character <= 'f')) &&
                    !baseline.Contains("c-1", StringComparison.Ordinal),
-                "the V21 wire fingerprint must be a fixed lowercase SHA-256 digest and never expose CommentId");
+                "the V22 wire fingerprint must be a fixed lowercase SHA-256 digest and never expose CommentId");
             firstPlan.Mappings[0].CommentId = "changed-comment";
             var commentChanged = SeasonPlanningContextBuilder.CreatePlanFingerprint(
                 context, new[] { selection }, firstPlan);
@@ -318,9 +337,32 @@ namespace Emby.Plugin.Danmu.R5TargetSeasonScopeRegression
             firstPlan.Mappings[0].SourceEpisodeId = "changed-episode";
             var mappingChanged = SeasonPlanningContextBuilder.CreatePlanFingerprint(
                 context, new[] { selection }, firstPlan);
+            firstPlan.Mappings[0].SourceEpisodeId = "ep-1";
+            selection.CandidateId = "lookup";
+            selection.AlignmentIntent = DanmuCompositeAlignmentIntentWire.ExplicitAnchor;
+            var intentChanged = SeasonPlanningContextBuilder.CreatePlanFingerprint(
+                context, new[] { selection }, firstPlan);
+            selection.AlignmentIntent = DanmuCompositeAlignmentIntentWire.DefaultZeroOffset;
+            selection.ServerResolvedAlignmentMode = CompositeSeasonAlignmentMode.PositionalFallback;
+            var modeChanged = SeasonPlanningContextBuilder.CreatePlanFingerprint(
+                context, new[] { selection }, firstPlan);
+            selection.ServerResolvedAlignmentMode = CompositeSeasonAlignmentMode.NumberAware;
+            selection.ServerSourceEpisodes[0].SourceOrdinal = 2;
+            var provenanceChanged = SeasonPlanningContextBuilder.CreatePlanFingerprint(
+                context, new[] { selection }, firstPlan);
+            selection.ServerSourceEpisodes[0].SourceOrdinal = 1;
+            selection.MappingProtocolVersion = 21;
+            var protocolChanged = SeasonPlanningContextBuilder.CreatePlanFingerprint(
+                context, new[] { selection }, firstPlan);
+            selection.MappingProtocolVersion = DanmuMappingProtocol.CurrentVersion;
+            selection.ServerConsideredLocalEpisodeItemIds.Reverse();
+            var consideredOrderChanged = SeasonPlanningContextBuilder.CreatePlanFingerprint(
+                context, new[] { selection }, firstPlan);
             Assert(baseline != commentChanged && baseline != selectionChanged &&
-                   selectionChanged != mappingChanged,
-                "selection, CommentId, and local-to-source mapping changes must invalidate the server plan fingerprint");
+                   selectionChanged != mappingChanged && baseline != intentChanged &&
+                   baseline != modeChanged && baseline != provenanceChanged &&
+                   baseline != protocolChanged && baseline != consideredOrderChanged,
+                "protocol intent, resolved mode, source provenance/order, CommentId, and exact mappings must invalidate the server fingerprint");
         }
 
         private static void AutomaticGenerationIsSupersededByInteractivePreview()

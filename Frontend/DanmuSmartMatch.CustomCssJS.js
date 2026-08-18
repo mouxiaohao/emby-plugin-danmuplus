@@ -5,9 +5,11 @@
 (function () {
     "use strict";
 
-    // V27 refreshes the installed UI while retaining the V21 mapping contract.
-    var INSTALL_FLAG = "__embyDanmuSmartMenuV27";
-    var MAPPING_PROTOCOL_VERSION = 21;
+    // V28 refreshes the installed UI together with the V22 mapping contract.
+    var INSTALL_FLAG = "__embyDanmuSmartMenuV28";
+    var MAPPING_PROTOCOL_VERSION = 22;
+    var DEFAULT_ZERO_OFFSET = "DefaultZeroOffset";
+    var EXPLICIT_ANCHOR = "ExplicitAnchor";
     var BUTTON_ID = "danmu-bulk-download";
     var activeDialogs = [];
     var dialogHistoryGeneration = 0;
@@ -803,7 +805,9 @@
         (seasons || []).forEach(function (season) {
             var key = seasonSelectionKey(season);
             var generation = seasonPlanGeneration(season);
-            var contract = hasCurrentMappingContract(season)
+            var contract = hasCurrentMappingContract(season) &&
+                serverCompositeAlignmentIntentsAreClosed(season) &&
+                manualCompositeAlignmentIntentsAreClosed(selections, season)
                 ? MAPPING_PROTOCOL_VERSION + ":" + generation : "";
             if (!contract || contracts[key] !== contract) {
                 delete selections[key];
@@ -1251,8 +1255,10 @@
         var start = ordered.findIndex(function (episode) {
             return String(value(episode, "ItemId", "itemId", "") || "") === startId;
         });
-        var requested = Math.max(1, Number(value(selection, "RequestedEpisodeCount", "requestedEpisodeCount", 0)) || 1);
-        return start < 0 ? [] : ordered.slice(start, start + requested).map(function (episode) {
+        if (start < 0) return [];
+        var requested = Number(value(selection, "RequestedEpisodeCount", "requestedEpisodeCount", 0));
+        var end = requested > 0 ? Math.min(ordered.length, start + requested) : ordered.length;
+        return ordered.slice(start, end).map(function (episode) {
             return String(value(episode, "ItemId", "itemId", "") || "");
         }).filter(Boolean);
     }
@@ -1261,8 +1267,17 @@
         var targets = {};
         (localItemIds || []).forEach(function (id) { targets[String(id)] = true; });
         var result = { kept: [], removed: [] };
+        var hasExactStart = (selections || []).some(function (selection) {
+            return Boolean(targets[String(value(selection,
+                "LocalStartEpisodeItemId", "localStartEpisodeItemId", "") || "")]);
+        });
         (selections || []).forEach(function (selection) {
-            var overlaps = selectionLocalEpisodeItemIds(season, selection).some(function (id) { return targets[id]; });
+            var exactStart = Boolean(targets[String(value(selection,
+                "LocalStartEpisodeItemId", "localStartEpisodeItemId", "") || "")]);
+            var overlaps = exactStart || (!hasExactStart &&
+                selectionLocalEpisodeItemIds(season, selection).some(function (id) {
+                    return targets[id];
+                }));
             result[overlaps ? "removed" : "kept"].push(selection);
         });
         return result;
@@ -1394,6 +1409,7 @@
         dialog.candidateDetails = cloneDialogState(draft.candidateDetails);
         dialog.candidateDetailFingerprint = draft.candidateDetailFingerprint || "";
         dialog.candidateDetailGeneration = draft.candidateDetailGeneration || 0;
+        discardIncompatibleSeasonDrafts(dialog, [seasons[seasonIndex]], selections);
     }
 
     function temporaryRangeStateKey(season, group) {
@@ -1683,6 +1699,8 @@
     }
 
     function compositeHasDownloadableMappings(season, selections) {
+        if (!serverCompositeAlignmentIntentsAreClosed(season) ||
+            !manualCompositeAlignmentIntentsAreClosed(selections, season)) return false;
         var plan = compositePlan(season);
         var eligibleIds = eligibleCompositeItemIds(season);
         var exactGroups = compositeArray(season, "CompositeGroups", "compositeGroups").some(function (group) {
@@ -1711,8 +1729,178 @@
         return isForbiddenBatchOrigin(origin);
     }
 
+    function closedAlignmentIntent(intent) {
+        var normalized = String(intent || "");
+        if (normalized === DEFAULT_ZERO_OFFSET || normalized === EXPLICIT_ANCHOR) {
+            return normalized;
+        }
+        return "";
+    }
+
+    function defaultAlignmentIntentForLocalStart(season, localStartEpisodeItemId) {
+        var ordered = compositeOrderedEpisodesForSeason(season);
+        var firstLocalId = ordered.length
+            ? String(value(ordered[0], "ItemId", "itemId", "") || "") : "";
+        var localStart = String(localStartEpisodeItemId || "");
+        return firstLocalId && localStart && firstLocalId !== localStart
+            ? EXPLICIT_ANCHOR : DEFAULT_ZERO_OFFSET;
+    }
+
+    function sourceStartAlignmentIntent(sourceStart, season, group, existingSelection) {
+        if (existingSelection) {
+            var existingIntent = closedAlignmentIntent(value(
+                existingSelection, "AlignmentIntent", "alignmentIntent", ""));
+            if (!existingIntent) return "";
+            return sourceStart && sourceStart.dataset.danmuSourceStartDirty === "true"
+                ? EXPLICIT_ANCHOR : existingIntent;
+        }
+        if (sourceStart && sourceStart.dataset.danmuSourceStartDirty === "true") {
+            return EXPLICIT_ANCHOR;
+        }
+        var episodes = group && group.episodes || [];
+        var localStart = episodes.length
+            ? value(episodes[0], "ItemId", "itemId", "") : "";
+        return defaultAlignmentIntentForLocalStart(season, localStart);
+    }
+
+    function sourceStartEpisodeIdForSubmission(sourceStart, existingSelection) {
+        if (sourceStart && sourceStart.dataset.danmuSourceStartDirty === "true") {
+            return "";
+        }
+        return value(existingSelection,
+            "SourceStartEpisodeId", "sourceStartEpisodeId", "");
+    }
+
+    function hasOrdinaryServerCompositeMapping(season) {
+        var eligibleIds = eligibleCompositeItemIds(season);
+        var plan = compositePlan(season);
+        if (compositeArray(plan, "Mappings", "mappings").some(function (mapping) {
+            var localId = String(value(mapping,
+                "LocalEpisodeItemId", "localEpisodeItemId", "") || "");
+            var source = value(mapping, "Source", "source", null);
+            return Boolean(eligibleIds[localId]) && source &&
+                !isDirectCompositeOrigin(value(mapping, "Origin", "origin", ""));
+        })) return true;
+        return compositeArray(season, "CompositeGroups", "compositeGroups").some(function (group) {
+            return !value(group, "IsTemporary", "isTemporary", false) &&
+                !isDirectCompositeOrigin(value(group, "MatchOrigin", "matchOrigin", "")) &&
+                value(group, "Site", "site", "") && value(group, "CandidateId", "candidateId", "") &&
+                compositeArray(group, "Episodes", "episodes").some(function (episode) {
+                    var id = String(value(episode, "ItemId", "itemId", "") || "");
+                    return Boolean(eligibleIds[id]) ||
+                        (!plan && isEligibleCompositeEpisode(season, episode));
+                });
+        });
+    }
+
+    function canonicalCompositeSelectionState(season) {
+        if (!hasCurrentMappingContract(season)) return { valid: false, selections: [] };
+        var plan = compositePlan(season);
+        var groups = compositeArray(season, "CompositeGroups", "compositeGroups");
+        var compositeResult = Boolean(plan) || groups.length > 0 ||
+            Boolean(value(season, "RequiresCompositeMapping", "requiresCompositeMapping", false));
+        if (!compositeResult) return { valid: true, selections: [] };
+
+        var hasPascal = season && Object.prototype.hasOwnProperty.call(season, "CompositeSelections");
+        var hasCamel = season && Object.prototype.hasOwnProperty.call(season, "compositeSelections");
+        if (hasPascal === hasCamel) return { valid: false, selections: [] };
+        var raw = hasPascal ? season.CompositeSelections : season.compositeSelections;
+        if (!Array.isArray(raw)) return { valid: false, selections: [] };
+
+        var generation = seasonPlanGeneration(season);
+        var seenStarts = {};
+        var selections = [];
+        var selectionFields = [
+            ["LocalStartEpisodeItemId", "localStartEpisodeItemId"],
+            ["RequestedEpisodeCount", "requestedEpisodeCount"],
+            ["Site", "site"], ["CandidateId", "candidateId"],
+            ["SourceStartEpisodeId", "sourceStartEpisodeId"],
+            ["SourceStartEpisodeNumber", "sourceStartEpisodeNumber"],
+            ["MatchOrigin", "matchOrigin"],
+            ["SelectionEvidenceToken", "selectionEvidenceToken"],
+            ["AlignmentIntent", "alignmentIntent"],
+            ["MappingProtocolVersion", "mappingProtocolVersion"],
+            ["PlanGeneration", "planGeneration"]
+        ];
+        var allowedSelectionFields = {};
+        selectionFields.forEach(function (names) {
+            allowedSelectionFields[names[0]] = true;
+            allowedSelectionFields[names[1]] = true;
+        });
+        for (var index = 0; index < raw.length; index++) {
+            var selection = raw[index];
+            if (!selection || typeof selection !== "object" || Array.isArray(selection)) {
+                return { valid: false, selections: [] };
+            }
+            if (Object.keys(selection).some(function (key) { return !allowedSelectionFields[key]; }) ||
+                selectionFields.some(function (names) {
+                    var pascal = Object.prototype.hasOwnProperty.call(selection, names[0]);
+                    var camel = Object.prototype.hasOwnProperty.call(selection, names[1]);
+                    return pascal === camel;
+                })) return { valid: false, selections: [] };
+            var localStart = value(selection,
+                "LocalStartEpisodeItemId", "localStartEpisodeItemId", null);
+            var requested = value(selection, "RequestedEpisodeCount", "requestedEpisodeCount", null);
+            var site = value(selection, "Site", "site", null);
+            var candidateId = value(selection, "CandidateId", "candidateId", null);
+            var sourceStartId = value(selection,
+                "SourceStartEpisodeId", "sourceStartEpisodeId", null);
+            var sourceStartNumber = value(selection,
+                "SourceStartEpisodeNumber", "sourceStartEpisodeNumber", null);
+            var matchOrigin = value(selection, "MatchOrigin", "matchOrigin", null);
+            var evidence = value(selection,
+                "SelectionEvidenceToken", "selectionEvidenceToken", null);
+            var alignmentIntent = value(selection, "AlignmentIntent", "alignmentIntent", null);
+            var protocol = value(selection,
+                "MappingProtocolVersion", "mappingProtocolVersion", null);
+            var planGeneration = value(selection, "PlanGeneration", "planGeneration", null);
+            if (typeof localStart !== "string" || !localStart || seenStarts[localStart] ||
+                typeof requested !== "number" || !Number.isSafeInteger(requested) || requested < 0 ||
+                typeof site !== "string" || !site || typeof candidateId !== "string" || !candidateId ||
+                typeof sourceStartId !== "string" || typeof sourceStartNumber !== "number" ||
+                !Number.isSafeInteger(sourceStartNumber) || sourceStartNumber < 0 ||
+                typeof matchOrigin !== "string" || !matchOrigin || typeof evidence !== "string" ||
+                !closedAlignmentIntent(alignmentIntent) || protocol !== MAPPING_PROTOCOL_VERSION ||
+                typeof planGeneration !== "number" || planGeneration !== generation) {
+                return { valid: false, selections: [] };
+            }
+            seenStarts[localStart] = true;
+            selections.push({
+                LocalStartEpisodeItemId: localStart,
+                RequestedEpisodeCount: requested,
+                Site: site,
+                CandidateId: candidateId,
+                SourceStartEpisodeId: sourceStartId,
+                SourceStartEpisodeNumber: sourceStartNumber,
+                MatchOrigin: matchOrigin,
+                SelectionEvidenceToken: evidence,
+                AlignmentIntent: alignmentIntent,
+                MappingProtocolVersion: protocol,
+                PlanGeneration: planGeneration
+            });
+        }
+        if (!selections.length && hasOrdinaryServerCompositeMapping(season)) {
+            return { valid: false, selections: [] };
+        }
+        return { valid: true, selections: selections };
+    }
+
+    function serverCompositeAlignmentIntentsAreClosed(season) {
+        return canonicalCompositeSelectionState(season).valid;
+    }
+
+    function manualCompositeAlignmentIntentsAreClosed(selections, season) {
+        return compositeSelectionStore(selections || {}, season, false).every(function (selection) {
+            return Boolean(closedAlignmentIntent(value(
+                selection, "AlignmentIntent", "alignmentIntent", "")));
+        });
+    }
+
     function compactCompositeSelection(localStart, requestedCount, site, candidateId,
-        sourceStartEpisodeId, sourceStartEpisodeNumber, matchOrigin, selectionEvidenceToken, planGeneration) {
+        sourceStartEpisodeId, sourceStartEpisodeNumber, matchOrigin, selectionEvidenceToken,
+        alignmentIntent, planGeneration) {
+        var closedIntent = closedAlignmentIntent(alignmentIntent);
+        if (!closedIntent) return null;
         return {
             LocalStartEpisodeItemId: localStart || "",
             RequestedEpisodeCount: Number(requestedCount) || 0,
@@ -1723,90 +1911,24 @@
                 ? 0 : Number(sourceStartEpisodeNumber) || 0,
             MatchOrigin: matchOrigin || "manual",
             SelectionEvidenceToken: selectionEvidenceToken || "",
+            AlignmentIntent: closedIntent,
             MappingProtocolVersion: MAPPING_PROTOCOL_VERSION,
             PlanGeneration: planGeneration
         };
     }
 
     function serverCompositeRequestSelections(season) {
-        if (!hasCurrentMappingContract(season)) return [];
-        var previewGroups = compositeArray(season, "CompositeGroups", "compositeGroups");
-        var eligibleIds = eligibleCompositeItemIds(season);
-        if (previewGroups.length) {
-            return previewGroups.filter(function (group) {
-                var episodes = compositeArray(group, "Episodes", "episodes");
-                return !value(group, "IsTemporary", "isTemporary", false) &&
-                    !isDirectCompositeOrigin(value(group, "MatchOrigin", "matchOrigin", "")) &&
-                    episodes.length > 0 && episodes.every(function (episode) {
-                        var id = String(value(episode, "ItemId", "itemId", "") || "");
-                        return Boolean(eligibleIds[id]) ||
-                            (!compositePlan(season) && isEligibleCompositeEpisode(season, episode));
-                    }) &&
-                    value(group, "Site", "site", "") && value(group, "CandidateId", "candidateId", "");
-            }).map(function (group) {
-                var episodes = compositeArray(group, "Episodes", "episodes");
-                return compactCompositeSelection(
-                    value(episodes[0], "ItemId", "itemId", ""),
-                    episodes.length,
-                    value(group, "Site", "site", ""),
-                    value(group, "CandidateId", "candidateId", ""),
-                    value(group, "SourceStartEpisodeId", "sourceStartEpisodeId", ""),
-                    value(episodes[0], "SourceEpisodeNumber", "sourceEpisodeNumber", null),
-                    value(group, "MatchOrigin", "matchOrigin", ""),
-                    value(group, "SelectionEvidenceToken", "selectionEvidenceToken", ""),
-                    seasonPlanGeneration(season)
-                );
-            });
-        }
-
-        var plan = compositePlan(season);
-        var ordered = eligibleCompositeEpisodes(season, orderedCompositeEpisodes(plan));
-        var byLocalId = {};
-        compositeArray(plan, "Mappings", "mappings").forEach(function (mapping) {
-            byLocalId[value(mapping, "LocalEpisodeItemId", "localEpisodeItemId", "")] = mapping;
-        });
-        var groups = [];
-        var current = null;
-        ordered.forEach(function (episode, index) {
-            var mapping = byLocalId[value(episode, "ItemId", "itemId", "")];
-            var origin = value(mapping, "Origin", "origin", "");
-            var source = value(mapping, "Source", "source", null);
-            if (!mapping || !source || isDirectCompositeOrigin(origin)) {
-                current = null;
-                return;
-            }
-            var key = sourceKey(source) + "\u001f" + normalizeDecisionCode(origin);
-            if (!current || current.key !== key || current.lastIndex + 1 !== index) {
-                current = { key: key, lastIndex: index, mappings: [] };
-                groups.push(current);
-            }
-            current.lastIndex = index;
-            current.mappings.push(mapping);
-        });
-        return groups.filter(function (group) {
-            var first = group.mappings[0] || {};
-            var source = value(first, "Source", "source", {});
-            return value(first, "LocalEpisodeItemId", "localEpisodeItemId", "") &&
-                value(source, "ProviderId", "providerId", "") && value(source, "MediaId", "mediaId", "");
-        }).map(function (group) {
-            var first = group.mappings[0];
-            var source = value(first, "Source", "source", {});
-            return compactCompositeSelection(
-                value(first, "LocalEpisodeItemId", "localEpisodeItemId", ""),
-                group.mappings.length,
-                value(source, "ProviderId", "providerId", ""),
-                value(source, "MediaId", "mediaId", ""),
-                value(first, "SourceEpisodeId", "sourceEpisodeId", ""),
-                value(first, "SourceEpisodeNumber", "sourceEpisodeNumber", null),
-                value(first, "Origin", "origin", ""),
-                value(first, "SelectionEvidenceToken", "selectionEvidenceToken", ""),
-                seasonPlanGeneration(season)
-            );
-        });
+        var state = canonicalCompositeSelectionState(season);
+        return state.valid ? state.selections : [];
     }
 
     function compositeRequestSelections(selections, season) {
         if (!hasCurrentMappingContract(season)) return [];
+        if (!serverCompositeAlignmentIntentsAreClosed(season) ||
+            !manualCompositeAlignmentIntentsAreClosed(selections, season)) {
+            clearCompositeSelectionStore(selections, season);
+            return [];
+        }
         // Only submit choices still attached to an unmatched run in the current
         // server plan. A refreshed preview can turn an old local range into an
         // exact mapping; keeping that stale browser choice would make the
@@ -1823,9 +1945,10 @@
                 value(selection, "SourceStartEpisodeNumber", "sourceStartEpisodeNumber", null),
                 "manual",
                 value(selection, "SelectionEvidenceToken", "selectionEvidenceToken", ""),
+                value(selection, "AlignmentIntent", "alignmentIntent", ""),
                 seasonPlanGeneration(season)
             );
-        });
+        }).filter(Boolean);
         return verified.concat(manual);
     }
 
@@ -2385,6 +2508,12 @@
         header.className = "danmuCompositeHeader";
         header.textContent = seasonLibraryContextLine(season);
         container.appendChild(header);
+        if (!serverCompositeAlignmentIntentsAreClosed(season)) {
+            var staleIntent = document.createElement("div");
+            staleIntent.className = "danmuAlignmentIntentStale";
+            staleIntent.textContent = "映射对齐信息已过期，请重新预览后再下载。";
+            container.appendChild(staleIntent);
+        }
         if (value(season, "HasVerifiedSourceEpisodeSurplus", "hasVerifiedSourceEpisodeSurplus", false) === true) {
             var shortfall = document.createElement("div");
             shortfall.className = "danmuEpisodeShortfallNotice";
@@ -2623,9 +2752,16 @@
         startLabel.textContent = "来源起始集";
         var sourceStart = document.createElement("input");
         sourceStart.type = "number";
+        sourceStart.className = "danmuCompositeSourceStart";
         sourceStart.min = "1";
         sourceStart.value = String(Math.max(1,
             Number(value(existingSelection, "SourceStartEpisodeNumber", "sourceStartEpisodeNumber", 1)) || 1));
+        sourceStart.dataset.danmuSourceStartDirty = "false";
+        function markSourceStartDirty() {
+            sourceStart.dataset.danmuSourceStartDirty = "true";
+        }
+        sourceStart.addEventListener("input", markSourceStartDirty);
+        sourceStart.addEventListener("change", markSourceStartDirty);
         startLabel.appendChild(sourceStart);
         inputs.append(countLabel, startLabel);
         dialog.body.appendChild(inputs);
@@ -2769,11 +2905,23 @@
             var selectionsForSeason = compositeSelectionStore(selections, season, true);
             var previousSelections = selectionsForSeason.slice();
             var localStart = value(group.episodes[0], "ItemId", "itemId", "");
+            var alignmentIntent = sourceStartAlignmentIntent(
+                sourceStart, season, group, existingSelection);
+            if (!alignmentIntent) {
+                clearCompositeSelectionStore(selections, season);
+                dialog.restorePendingCompositeRematch = null;
+                renderSeriesPicker(dialog, item, seasons, selections, keywords);
+                notify("旧映射缺少有效的对齐信息，请重新预览后再选择。", true);
+                return;
+            }
             var replacement = {
                 LocalStartEpisodeItemId: localStart,
                 RequestedEpisodeCount: requested,
                 Source: { ProviderId: value(candidate, "Site", "site", ""), MediaId: value(candidate, "Id", "id", "") },
+                SourceStartEpisodeId: sourceStartEpisodeIdForSubmission(
+                    sourceStart, existingSelection),
                 SourceStartEpisodeNumber: sourceNumber,
+                AlignmentIntent: alignmentIntent,
                 Origin: "manual",
                 SelectionEvidenceToken: value(candidate, "SelectionEvidenceToken", "selectionEvidenceToken", "")
             };
@@ -4094,6 +4242,14 @@
         sourceMetadataPublicLabel: sourceMetadataPublicLabel,
         localEpisodeLabel: localEpisodeLabel,
         sourceEpisodePublicLabel: sourceEpisodePublicLabel,
+        closedAlignmentIntent: closedAlignmentIntent,
+        defaultAlignmentIntentForLocalStart: defaultAlignmentIntentForLocalStart,
+        sourceStartAlignmentIntent: sourceStartAlignmentIntent,
+        sourceStartEpisodeIdForSubmission: sourceStartEpisodeIdForSubmission,
+        canonicalCompositeSelectionState: canonicalCompositeSelectionState,
+        serverCompositeRequestSelections: serverCompositeRequestSelections,
+        serverCompositeAlignmentIntentsAreClosed: serverCompositeAlignmentIntentsAreClosed,
+        manualCompositeAlignmentIntentsAreClosed: manualCompositeAlignmentIntentsAreClosed,
         compactCompositeSelection: compactCompositeSelection,
         isForbiddenBatchOrigin: isForbiddenBatchOrigin,
         normalizeDecisionCode: normalizeDecisionCode,

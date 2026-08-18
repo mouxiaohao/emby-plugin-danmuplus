@@ -35,9 +35,22 @@ namespace Emby.Plugin.Danmu.Core
             var accepted = acceptedItemIds ?? new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             return (originEpisodes ?? Enumerable.Empty<DanmuEpisodeDownloadResult>())
                 .Where(episode => IsRecentFileSkip(episode) &&
+                                  HasFrozenExactTuple(episode) &&
                                   !accepted.Contains(episode.ItemId ?? string.Empty))
                 .Select(CloneEpisode)
                 .ToList();
+        }
+
+        public static bool HasFrozenExactTuple(DanmuEpisodeDownloadResult episode)
+        {
+            return episode != null &&
+                   !string.IsNullOrWhiteSpace(episode.ItemId) &&
+                   !string.IsNullOrWhiteSpace(episode.SourceSite) &&
+                   !string.IsNullOrWhiteSpace(episode.SourceCandidateId) &&
+                   !string.IsNullOrWhiteSpace(episode.SourceEpisodeId) &&
+                   !string.IsNullOrWhiteSpace(episode.FrozenCommentId) &&
+                   (string.Equals(episode.SourceScopeType, "Episode", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(episode.SourceScopeType, "Season", StringComparison.OrdinalIgnoreCase));
         }
 
         public static DanmuEpisodeDownloadResult CloneEpisode(DanmuEpisodeDownloadResult episode)
@@ -52,6 +65,7 @@ namespace Emby.Plugin.Danmu.Core
                 SourceSite = episode.SourceSite ?? string.Empty,
                 SourceCandidateId = episode.SourceCandidateId ?? string.Empty,
                 SourceEpisodeId = episode.SourceEpisodeId ?? string.Empty,
+                FrozenCommentId = episode.FrozenCommentId ?? string.Empty,
                 SourceScopeType = episode.SourceScopeType ?? string.Empty,
                 MatchOrigin = episode.MatchOrigin ?? string.Empty,
                 Status = episode.Status ?? string.Empty,

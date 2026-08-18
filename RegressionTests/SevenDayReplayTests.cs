@@ -29,7 +29,7 @@ namespace Emby.Plugin.Danmu.RegressionTests
                 ItemId = "recent", Status = "skipped",
                 SkipReason = SevenDayReplayPolicy.RecentFileSkipReason,
                 SourceSite = "DandanID", SourceCandidateId = "source", SourceEpisodeId = "episode",
-                SourceScopeType = "Episode",
+                FrozenCommentId = "comment", SourceScopeType = "Episode",
             };
             var legacySkip = new DanmuEpisodeDownloadResult { ItemId = "legacy", Status = "skipped" };
             var partial = new DanmuEpisodeDownloadResult
@@ -43,11 +43,14 @@ namespace Emby.Plugin.Danmu.RegressionTests
 
             Assert(frozen.Count == 1 && frozen[0].ItemId == "recent",
                 "only the machine-readable seven-day file skip may be replayed");
-            Assert(frozen[0].SourceScopeType == "Episode",
-                "the replay snapshot must retain the verified provider-id source scope");
+            Assert(frozen[0].SourceScopeType == "Episode" && frozen[0].FrozenCommentId == "comment",
+                "the replay snapshot must retain the exact provider/media/EpisodeId/CommentId tuple");
             frozen[0].SourceEpisodeId = "mutated";
             Assert(recent.SourceEpisodeId == "episode",
                 "the replay scope must be a copied snapshot, not the origin task evidence");
+            recent.FrozenCommentId = string.Empty;
+            Assert(SevenDayReplayPolicy.FreezeEligibleEpisodes(new[] { recent }, null).Count == 0,
+                "seven-day replay must fail closed when the captured CommentId is absent");
         }
 
         private static void RejectsNonTerminalTaskStates()
@@ -124,9 +127,30 @@ namespace Emby.Plugin.Danmu.RegressionTests
             Assert(source.Contains("var isSevenDayReplayTask = string.Equals(task.TargetItemType, \"SevenDayReplay\"") &&
                    source.Contains("var useFrozenEpisodeSource = isCompositeTask || isSevenDayReplayTask") &&
                    source.Contains("PrepareFrozenReplayAsync(season, episode, episodeResult)") &&
-                   source.Contains("useFrozenEpisodeSource ? 1 : task.SourceEpisodeNumber") &&
+                   source.Contains("var confirmedSourceNumber = sourceEpisode.EpisodeNumber ?? request.SourceEpisodeNumber") &&
+                   source.Contains("CreateSingleTargetTask(episode, request, scraper, \"Episode\", confirmedSourceNumber)") &&
+                   source.Contains("task.Episodes[0].SourceEpisodeId = sourceEpisode.Id ?? string.Empty") &&
+                   source.Contains("task.Episodes[0].FrozenCommentId = sourceEpisode.CommentId ?? string.Empty") &&
                    source.Contains("var requiresCompositeTransition = task.IsCompositePlan"),
-                "single-source and composite seven-day replay retries must both rebuild from frozen per-episode source evidence, use source episode 1, and retain the composite write barrier");
+                "the first task must retain the provider's real Episode number and exact EpisodeId/CommentId while replay keeps the composite write barrier");
+            var retryStart = source.IndexOf(
+                "private async Task<DanmuDownloadTaskResult> RetryTrackedEpisode", StringComparison.Ordinal);
+            var retryEnd = source.IndexOf(
+                "private async Task<DanmuDownloadTaskResult> RetryTrackedMovie", retryStart,
+                StringComparison.Ordinal);
+            var retryBody = retryStart >= 0 && retryEnd > retryStart
+                ? source.Substring(retryStart, retryEnd - retryStart)
+                : string.Empty;
+            Assert(retryBody.Contains("DanmuExactEpisodeSelectionHelper.TryCreateExactMedia(") &&
+                   retryBody.Contains("PrepareFrozenReplayAsync(season, episode, episodeResult)") &&
+                   (retryBody.Contains("DownloadEpisodeForProgress(\r\n                        episode,\r\n                        media,\r\n                        scraper,\r\n                        true,\r\n                        1)") ||
+                    retryBody.Contains("DownloadEpisodeForProgress(\n                        episode,\n                        media,\n                        scraper,\n                        true,\n                        1)")),
+                "ordinary, composite, and replay retries all execute their exact one-Episode media at ordinal 1 rather than reusing a real source number such as E5");
+            Assert(source.Contains("string.IsNullOrWhiteSpace(episodeResult.FrozenCommentId)") &&
+                   source.Contains("sourceEpisode.CommentId, episodeResult.FrozenCommentId") &&
+                   source.Contains("revalidatedSourceEpisode.CommentId") &&
+                   source.Contains("FrozenCommentId = x.FrozenCommentId"),
+                "replay and retry must retain and revalidate the exact CommentId instead of substituting current number/position data");
             Assert(source.Contains("SourceScopeType = isDirectEpisodeProviderId ? \"Episode\" : \"Season\";") &&
                    source.Contains("SourceScopeType = \"Season\",") &&
                    source.Contains("var isDirectMapping = IsDirectEpisodeProviderMapping(episodeResult);") &&

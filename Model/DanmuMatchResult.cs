@@ -174,6 +174,13 @@ namespace Emby.Plugin.Danmu.Model
         public CompositeSeasonPlan CompositePlan { get; set; }
         public List<DanmuCompositeSeasonGroup> CompositeGroups { get; set; } =
             new List<DanmuCompositeSeasonGroup>();
+        // Response-only compact authoritative intent. Unlike CompositeGroups,
+        // this preserves the exact ordered selection fields that produced the
+        // plan fingerprint, including RequestedEpisodeCount == 0 and sparse
+        // anchors. ServerSource*, resolved modes, mappings, and CommentIds are
+        // never projected into this list.
+        public List<DanmuCompositeSeasonSelection> CompositeSelections { get; set; } =
+            new List<DanmuCompositeSeasonSelection>();
     }
 
     public class DanmuCompositeSeasonGroup
@@ -184,6 +191,10 @@ namespace Emby.Plugin.Danmu.Model
         public string CandidateId { get; set; } = string.Empty;
         public string SourceStartEpisodeId { get; set; } = string.Empty;
         public int? SourceStartEpisodeNumber { get; set; }
+        // Response-only echo of the server-validated selection intent. The
+        // browser uses it to preserve an explicit anchor across rerenders; it
+        // is never accepted as exact mapping evidence.
+        public string AlignmentIntent { get; set; } = string.Empty;
         public string MatchOrigin { get; set; } = string.Empty;
         public double? MatchScore { get; set; }
         public string ScoreOrigin { get; set; } = string.Empty;
@@ -207,9 +218,34 @@ namespace Emby.Plugin.Danmu.Model
     // This is intentionally compact. Comment IDs and arbitrary item mappings
     // are not accepted from the browser; the server re-fetches the selected
     // upstream media and derives each exact mapping itself.
+    public static class DanmuCompositeAlignmentIntentWire
+    {
+        public const string DefaultZeroOffset = "DefaultZeroOffset";
+        public const string ExplicitAnchor = "ExplicitAnchor";
+
+        public static bool TryParse(string value, out CompositeSeasonAlignmentIntent intent)
+        {
+            if (string.Equals(value, DefaultZeroOffset, StringComparison.Ordinal))
+            {
+                intent = CompositeSeasonAlignmentIntent.DefaultZeroOffset;
+                return true;
+            }
+            if (string.Equals(value, ExplicitAnchor, StringComparison.Ordinal))
+            {
+                intent = CompositeSeasonAlignmentIntent.ExplicitAnchor;
+                return true;
+            }
+            intent = default(CompositeSeasonAlignmentIntent);
+            return false;
+        }
+    }
+
     public class DanmuCompositeSeasonSelection
     {
         public int MappingProtocolVersion { get; set; } = Core.DanmuMappingProtocol.CurrentVersion;
+        // Required V22 wire value. Missing, numeric, differently-cased, or
+        // unknown values fail closed in the server reconstruction path.
+        public string AlignmentIntent { get; set; } = string.Empty;
         public long PlanGeneration { get; set; }
         public string LocalStartEpisodeItemId { get; set; } = string.Empty;
         public int RequestedEpisodeCount { get; set; }
@@ -224,6 +260,20 @@ namespace Emby.Plugin.Danmu.Model
         [JsonIgnore]
         [IgnoreDataMember]
         public SourceMetadata ServerSourceMetadata { get; set; }
+        // Authoritative reconstruction provenance. The browser selects only
+        // intent and exact anchors; it cannot choose the resolved algorithm or
+        // supply provider Episode facts.
+        [JsonIgnore]
+        [IgnoreDataMember]
+        public CompositeSeasonAlignmentMode? ServerResolvedAlignmentMode { get; set; }
+        [JsonIgnore]
+        [IgnoreDataMember]
+        public List<CompositeSeasonSourceEpisode> ServerSourceEpisodes { get; set; } =
+            new List<CompositeSeasonSourceEpisode>();
+        [JsonIgnore]
+        [IgnoreDataMember]
+        public List<string> ServerConsideredLocalEpisodeItemIds { get; set; } =
+            new List<string>();
     }
 
     /// <summary>
@@ -593,6 +643,11 @@ namespace Emby.Plugin.Danmu.Model
         public string SourceSite { get; set; } = string.Empty;
         public string SourceCandidateId { get; set; } = string.Empty;
         public string SourceEpisodeId { get; set; } = string.Empty;
+        // Exact server-owned download evidence. It must survive task snapshots
+        // and seven-day replay cloning but must never be exposed to the browser.
+        [JsonIgnore]
+        [IgnoreDataMember]
+        public string FrozenCommentId { get; set; } = string.Empty;
         // Frozen provider-id provenance.  MatchOrigin describes the match
         // decision, whereas this records whether SourceCandidateId identifies
         // an upstream Episode or a Season/media collection.

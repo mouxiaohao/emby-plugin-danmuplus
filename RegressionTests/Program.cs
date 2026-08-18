@@ -822,10 +822,33 @@ namespace Emby.Plugin.Danmu.RegressionTests
             var automaticSelectionJson = JsonSerializer.Serialize(new DanmuCompositeSeasonSelection
             {
                 ServerSourceMetadata = new SourceMetadata { Title = "server-only", Year = 2014 },
+                ServerResolvedAlignmentMode = CompositeSeasonAlignmentMode.NumberAware,
+                ServerSourceEpisodes = new List<CompositeSeasonSourceEpisode>
+                {
+                    new CompositeSeasonSourceEpisode
+                    {
+                        EpisodeId = "server-episode", CommentId = "server-comment",
+                        EpisodeNumber = 1, SourceOrdinal = 1,
+                    },
+                },
+                ServerConsideredLocalEpisodeItemIds = new List<string> { "server-local" },
             });
             Assert(!automaticSelectionJson.Contains("server-only", StringComparison.Ordinal) &&
-                   !automaticSelectionJson.Contains("ServerSourceMetadata", StringComparison.Ordinal),
-                "automatic planning metadata snapshots must remain server-only");
+                   !automaticSelectionJson.Contains("server-episode", StringComparison.Ordinal) &&
+                   !automaticSelectionJson.Contains("server-comment", StringComparison.Ordinal) &&
+                   !automaticSelectionJson.Contains("ServerSourceMetadata", StringComparison.Ordinal) &&
+                   !automaticSelectionJson.Contains("ServerResolvedAlignmentMode", StringComparison.Ordinal) &&
+                   !automaticSelectionJson.Contains("ServerSourceEpisodes", StringComparison.Ordinal) &&
+                   !automaticSelectionJson.Contains("server-local", StringComparison.Ordinal) &&
+                   !automaticSelectionJson.Contains("ServerConsideredLocalEpisodeItemIds", StringComparison.Ordinal),
+                "automatic planning metadata, resolved mode, and source provenance snapshots must remain server-only");
+            var frozenReplayJson = JsonSerializer.Serialize(new DanmuEpisodeDownloadResult
+            {
+                ItemId = "local", SourceEpisodeId = "source", FrozenCommentId = "secret-comment",
+            });
+            Assert(!frozenReplayJson.Contains("secret-comment", StringComparison.Ordinal) &&
+                   !frozenReplayJson.Contains("FrozenCommentId", StringComparison.Ordinal),
+                "the frozen replay CommentId must remain server-only in task responses");
         }
 
         private static void FiltersAndSecuresMoviePartEvidence()
@@ -1246,10 +1269,34 @@ namespace Emby.Plugin.Danmu.RegressionTests
                 "Movie search must issue exactly one standard or explicit metadata term without a second hop");
             var libraryEvents = File.ReadAllText(Path.Combine(
                 repositoryRoot, "LibraryManagerEventsHelper.cs")).Replace("\r\n", "\n");
-            Assert(libraryEvents.Contains("residualSeasonName, season.ProductionYear") &&
-                   libraryEvents.Contains("IsDistinctSeasonIdentity(") &&
-                   !libraryEvents.Contains("seriesTitle, season.ProductionYear, run.Episodes.Count, seriesTitle"),
-                "residual automatic search must keep the Series keyword override while passing only a distinct real Season identity for rank-2 fidelity");
+            var automaticStart = libraryEvents.IndexOf(
+                "private async Task<bool> DownloadAutomaticSeasonWithCompositePlan", StringComparison.Ordinal);
+            var automaticEnd = libraryEvents.IndexOf(
+                "private sealed class AutomaticSeasonPlanSnapshot", automaticStart, StringComparison.Ordinal);
+            Assert(automaticStart >= 0 && automaticEnd > automaticStart,
+                "the automatic composite-plan method slice must remain discoverable");
+            var automaticPlan = libraryEvents.Substring(automaticStart, automaticEnd - automaticStart);
+            Assert(!automaticPlan.Contains("residual-range", StringComparison.Ordinal) &&
+                   !automaticPlan.Contains("residualSeasonName", StringComparison.Ordinal) &&
+                   !automaticPlan.Contains("SelectResidualCandidate", StringComparison.Ordinal) &&
+                   !automaticPlan.Contains("SearchSeasonAsync", StringComparison.Ordinal),
+                "unattended/media-import matching must apply only its initial source and never discover a residual source");
+
+            var temporaryStart = controller.IndexOf(
+                "private async Task<DanmuSeasonMatchResult> GetCompositeSeasonPlanPreview", StringComparison.Ordinal);
+            var temporaryEnd = controller.IndexOf(
+                "private async Task PopulateCompositePreviewIfRequired", temporaryStart, StringComparison.Ordinal);
+            Assert(temporaryStart >= 0 && temporaryEnd > temporaryStart,
+                "the interactive temporary-range preview method slice must remain discoverable");
+            var temporaryRange = controller.Substring(temporaryStart, temporaryEnd - temporaryStart);
+            Assert(temporaryRange.Contains("DanmuTemporaryRangeSearchPolicy.TryResolveSearchKeyword(", StringComparison.Ordinal) &&
+                   temporaryRange.Contains("request.Keyword,", StringComparison.Ordinal) &&
+                   temporaryRange.Contains("parent?.Name ?? string.Empty, latest.Name ?? string.Empty", StringComparison.Ordinal) &&
+                   temporaryRange.Contains("latest.ProductionYear, range.Episodes.Count, searchKeyword, _logger", StringComparison.Ordinal) &&
+                   temporaryRange.Contains("new[] { parent?.OriginalTitle }", StringComparison.Ordinal) &&
+                   temporaryRange.Contains("new[] { latest.OriginalTitle }", StringComparison.Ordinal) &&
+                   temporaryRange.Contains("manualKeywordDiscovery: true", StringComparison.Ordinal),
+                "interactive temporary-range search must retain the user keyword fallback, parent/real-Season title and year, exact range count, and distinct Season fidelity inputs");
             Assert(resolver.Contains("GetSingleEpisodeDirectScopes(Episode episode)") &&
                    resolver.Contains("new BaseItem[] { episode }") &&
                    controller.Contains("DanmuProviderIdResolver.GetSingleEpisodeDirectScopes(latest)"),

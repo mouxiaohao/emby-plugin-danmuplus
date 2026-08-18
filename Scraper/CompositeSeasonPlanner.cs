@@ -56,31 +56,20 @@ namespace Emby.Plugin.Danmu.Scraper
                 return false;
             }
 
-            var offset = 0;
-            while (offset < available.Count)
-            {
-                var run = plan.UnmatchedRuns.FirstOrDefault(candidate => candidate.Episodes.Count > 0 &&
-                    candidate.Episodes.All(episode => episode.Ownership == CompositeSeasonOwnershipKind.Owning &&
-                        episode.ParentSeasonNumber == owningKey));
-                if (run == null) break;
-                var remaining = available.Skip(offset).ToList();
-                var request = new CompositeSeasonSegmentRequest
-                {
-                    LocalStartEpisodeItemId = run.Episodes[0].ItemId,
-                    RequestedEpisodeCount = Math.Min(run.Episodes.Count, remaining.Count),
-                    Source = source,
-                    SourceEpisodes = remaining,
-                    SourceStartEpisodeId = remaining[0].EpisodeId,
-                    Origin = origin ?? string.Empty,
-                    MatchScore = matchScore,
-                    ScoreOrigin = scoreOrigin ?? string.Empty,
-                    SelectionEvidenceToken = selectionEvidenceToken ?? string.Empty,
-                    SourceMetadata = sourceMetadata?.Clone(),
-                };
-                if (!TryApplySegment(plan, request, out plan, out var applied, out error)) return false;
-                offset += applied;
-            }
-            return true;
+            // Non-owning rows are explicit zero-consumption boundaries. The
+            // shared continuation resolver carries one forward-only source
+            // frontier across the owning windows and resolves each window's
+            // numeric/positional mode independently.
+            var nonOwningBoundaryIds = new HashSet<string>(
+                plan.OrderedEpisodes
+                    .Where(episode => episode.Ownership != CompositeSeasonOwnershipKind.Owning ||
+                                      episode.ParentSeasonNumber != owningKey)
+                    .Select(episode => episode.ItemId),
+                StringComparer.OrdinalIgnoreCase);
+            return CompositeSeasonMatchService.TryContinueSourceAcrossSegmentWindows(
+                plan, source, available, origin, matchScore, scoreOrigin,
+                selectionEvidenceToken, sourceMetadata, nonOwningBoundaryIds,
+                out plan, out _, out error);
         }
 
         public static bool TryApplyRemainingSourceEpisodes(
@@ -109,31 +98,10 @@ namespace Emby.Plugin.Danmu.Scraper
             SourceMetadata sourceMetadata,
             out CompositeSeasonPlan plan, out string error)
         {
-            plan = currentPlan;
-            error = string.Empty;
             var available = (availableSourceEpisodes ?? Enumerable.Empty<CompositeSeasonSourceEpisode>()).ToList();
-            var offset = 0;
-            while (plan != null && plan.UnmatchedRuns.Count > 0 && offset < available.Count)
-            {
-                var run = plan.UnmatchedRuns[0];
-                var remaining = available.Skip(offset).ToList();
-                var request = new CompositeSeasonSegmentRequest
-                {
-                    LocalStartEpisodeItemId = run.Episodes[0].ItemId,
-                    RequestedEpisodeCount = Math.Min(run.Episodes.Count, remaining.Count),
-                    Source = source,
-                    SourceEpisodes = remaining,
-                    SourceStartEpisodeId = remaining[0].EpisodeId,
-                    Origin = origin ?? string.Empty,
-                    MatchScore = matchScore,
-                    ScoreOrigin = scoreOrigin ?? string.Empty,
-                    SelectionEvidenceToken = selectionEvidenceToken ?? string.Empty,
-                    SourceMetadata = sourceMetadata?.Clone(),
-                };
-                if (!TryApplySegment(plan, request, out plan, out var applied, out error)) return false;
-                offset += applied;
-            }
-            return true;
+            return CompositeSeasonMatchService.TryContinueSourceAcrossSegmentWindows(
+                currentPlan, source, available, origin, matchScore, scoreOrigin,
+                selectionEvidenceToken, sourceMetadata, out plan, out _, out error);
         }
         public static bool TryCreatePlan(
             IEnumerable<CompositeSeasonLocalEpisode> localEpisodes,
@@ -346,8 +314,24 @@ namespace Emby.Plugin.Danmu.Scraper
             out int appliedEpisodeCount,
             out string error)
         {
+            var success = TryApplySegmentResolved(currentPlan, request, out plan, out var resolution, out error);
+            appliedEpisodeCount = success ? resolution.Mappings.Count : 0;
+            return success;
+        }
+
+        /// <summary>
+        /// Applies one segment and exposes both the authoritative local rows
+        /// considered and the exact mappings produced by the shared resolver.
+        /// </summary>
+        public static bool TryApplySegmentResolved(
+            CompositeSeasonPlan currentPlan,
+            CompositeSeasonSegmentRequest request,
+            out CompositeSeasonPlan plan,
+            out CompositeSeasonSegmentResolution resolution,
+            out string error)
+        {
             plan = null;
-            appliedEpisodeCount = 0;
+            resolution = null;
             error = string.Empty;
             if (currentPlan == null || !ValidatePlan(currentPlan, out error))
             {
@@ -356,29 +340,15 @@ namespace Emby.Plugin.Danmu.Scraper
             }
 
             if (request == null || request.Source == null || !request.Source.IsValid ||
-                string.IsNullOrWhiteSpace(request.LocalStartEpisodeItemId) ||
-                string.IsNullOrWhiteSpace(request.SourceStartEpisodeId))
+                string.IsNullOrWhiteSpace(request.LocalStartEpisodeItemId))
             {
-                error = "The local start, source identity, and source start episode are required.";
+                error = "The local start and source identity are required.";
                 return false;
             }
 
             if (request.RequestedEpisodeCount < 0)
             {
                 error = "Requested episode count cannot be negative.";
-                return false;
-            }
-
-            var sources = request.SourceEpisodes ?? new List<CompositeSeasonSourceEpisode>();
-            if (!ValidateSourceEpisodes(sources, out error))
-            {
-                return false;
-            }
-
-            var sourceStart = FindIndex(sources, request.SourceStartEpisodeId, item => item.EpisodeId);
-            if (sourceStart < 0)
-            {
-                error = "The selected source start episode does not exist in the verified source episode list.";
                 return false;
             }
 
@@ -390,36 +360,10 @@ namespace Emby.Plugin.Danmu.Scraper
                 return false;
             }
 
-            var localStart = FindIndex(run.Episodes, request.LocalStartEpisodeItemId, item => item.ItemId);
-            var availableLocal = run.Episodes.Count - localStart;
-            var availableSource = sources.Count - sourceStart;
-            var count = request.RequestedEpisodeCount == 0
-                ? Math.Min(availableLocal, availableSource)
-                : Math.Min(request.RequestedEpisodeCount, Math.Min(availableLocal, availableSource));
-            if (count <= 0)
-            {
-                error = "The selected local and source ranges do not overlap.";
-                return false;
-            }
+            if (!TryResolveSegment(run.Episodes, request, out resolution, out error)) return false;
 
             var mappings = currentPlan.Mappings.Select(CloneMapping).ToList();
-            for (var offset = 0; offset < count; offset++)
-            {
-                var source = sources[sourceStart + offset];
-                mappings.Add(new CompositeSeasonEpisodeMapping
-                {
-                    LocalEpisodeItemId = run.Episodes[localStart + offset].ItemId,
-                    Source = CloneSource(request.Source),
-                    SourceEpisodeId = source.EpisodeId,
-                    CommentId = source.CommentId,
-                    SourceEpisodeNumber = source.EpisodeNumber,
-                    Origin = request.Origin ?? string.Empty,
-                    MatchScore = request.MatchScore,
-                    ScoreOrigin = request.ScoreOrigin ?? string.Empty,
-                    SelectionEvidenceToken = request.SelectionEvidenceToken ?? string.Empty,
-                    SourceMetadata = request.SourceMetadata?.Clone(),
-                });
-            }
+            mappings.AddRange(resolution.Mappings.Select(CloneMapping));
 
             if (!ValidateMappings(currentPlan.OrderedEpisodes, mappings, out error))
             {
@@ -431,7 +375,141 @@ namespace Emby.Plugin.Danmu.Scraper
                 currentPlan.CompositeSafetyRequired);
             plan.CompositeSafetyRequired = plan.CompositeSafetyRequired || plan.IsComposite;
             ApplyBindingSafety(plan);
-            appliedEpisodeCount = count;
+            return true;
+        }
+
+        /// <summary>
+        /// Resolves a segment without mutating a plan. Number reliability is
+        /// decided once for the whole selected segment; fallback never mixes
+        /// positional and numeric pairs.
+        /// </summary>
+        public static bool TryResolveSegment(
+            IEnumerable<CompositeSeasonLocalEpisode> localEpisodes,
+            CompositeSeasonSegmentRequest request,
+            out CompositeSeasonSegmentResolution resolution,
+            out string error)
+        {
+            resolution = null;
+            error = string.Empty;
+            if (request == null || request.Source == null || !request.Source.IsValid ||
+                string.IsNullOrWhiteSpace(request.LocalStartEpisodeItemId))
+            {
+                error = "The local start and source identity are required.";
+                return false;
+            }
+            if (request.RequestedEpisodeCount < 0)
+            {
+                error = "Requested episode count cannot be negative.";
+                return false;
+            }
+            if (!Enum.IsDefined(typeof(CompositeSeasonAlignmentIntent), request.AlignmentIntent))
+            {
+                error = "The segment alignment intent is invalid.";
+                return false;
+            }
+
+            var locals = (localEpisodes ?? Enumerable.Empty<CompositeSeasonLocalEpisode>()).
+                Select(CloneLocalEpisode).ToList();
+            if (locals.Count == 0 || locals.Any(local => string.IsNullOrWhiteSpace(local.ItemId)) ||
+                locals.GroupBy(local => local.ItemId, StringComparer.OrdinalIgnoreCase).Any(group => group.Count() > 1))
+            {
+                error = "The segment local episode list is invalid.";
+                return false;
+            }
+            var localStart = FindIndex(locals, request.LocalStartEpisodeItemId, item => item.ItemId);
+            if (localStart < 0)
+            {
+                error = "The selected local start episode does not exist in the authoritative local segment.";
+                return false;
+            }
+
+            var sources = request.SourceEpisodes ?? new List<CompositeSeasonSourceEpisode>();
+            if (!ValidateSourceEpisodes(sources, out error)) return false;
+
+            var sourceNumbersReliable = HasReliableUniquePositiveNumbers(
+                sources.Select(source => source.EpisodeNumber));
+            var sourceStart = ResolveSourceStartIndex(sources, request.SourceStartEpisodeId,
+                request.SourceStartEpisodeNumber, sourceNumbersReliable, out error);
+            if (sourceStart < 0) return false;
+
+            var localCount = locals.Count - localStart;
+            if (request.RequestedEpisodeCount > 0) localCount = Math.Min(localCount, request.RequestedEpisodeCount);
+            var considered = locals.Skip(localStart).Take(localCount).ToList();
+            if (considered.Count == 0)
+            {
+                error = "The selected local range is empty.";
+                return false;
+            }
+
+            var localNumbersReliable = HasReliableUniquePositiveNumbers(
+                considered.Select(local => local.EpisodeNumber));
+            var numberAware = localNumbersReliable && sourceNumbersReliable;
+            if (request.RequiredAlignmentMode == CompositeSeasonAlignmentMode.NumberAware && !numberAware)
+            {
+                error = "A continued number-aware segment no longer has reliable unique positive numbering.";
+                return false;
+            }
+            if (request.RequiredAlignmentMode == CompositeSeasonAlignmentMode.PositionalFallback)
+            {
+                numberAware = false;
+            }
+            var resolvedMappings = new List<CompositeSeasonEpisodeMapping>();
+            if (numberAware)
+            {
+                var sourceByNumber = sources.ToDictionary(source => source.EpisodeNumber.Value);
+                var localAnchor = request.LocalAnchorEpisodeNumber ?? considered[0].EpisodeNumber.Value;
+                if (localAnchor <= 0)
+                {
+                    error = "The explicit local Episode anchor must be a positive authoritative coordinate.";
+                    return false;
+                }
+                var sourceAnchor = sources[sourceStart].EpisodeNumber.Value;
+                foreach (var local in considered)
+                {
+                    int targetNumber;
+                    try
+                    {
+                        targetNumber = request.AlignmentIntent == CompositeSeasonAlignmentIntent.DefaultZeroOffset
+                            ? local.EpisodeNumber.Value
+                            : checked((int)((long)sourceAnchor + local.EpisodeNumber.Value - (long)localAnchor));
+                    }
+                    catch (OverflowException)
+                    {
+                        error = "The explicit Episode anchor offset overflows the supported Episode number range.";
+                        return false;
+                    }
+                    if (targetNumber <= 0 || !sourceByNumber.TryGetValue(targetNumber, out var source)) continue;
+                    resolvedMappings.Add(CreateMapping(local, source, request));
+                }
+            }
+            else
+            {
+                var positionalSources = OrderSourcesForFallback(sources).ToList();
+                var positionalStart = FindIndex(positionalSources, sources[sourceStart].EpisodeId,
+                    item => item.EpisodeId);
+                var count = Math.Min(considered.Count, positionalSources.Count - positionalStart);
+                for (var index = 0; index < count; index++)
+                {
+                    resolvedMappings.Add(CreateMapping(considered[index], positionalSources[positionalStart + index], request));
+                }
+            }
+
+            if (resolvedMappings.Count == 0)
+            {
+                error = "The selected local and source ranges do not overlap.";
+                return false;
+            }
+
+            resolution = new CompositeSeasonSegmentResolution
+            {
+                Intent = request.AlignmentIntent,
+                Mode = numberAware ? CompositeSeasonAlignmentMode.NumberAware :
+                    CompositeSeasonAlignmentMode.PositionalFallback,
+                Diagnostic = numberAware ? "number-aware" :
+                    "positional-fallback: unreliable local or source numbering",
+                ConsideredLocalEpisodes = considered.Select(CloneLocalEpisode).ToList(),
+                Mappings = resolvedMappings,
+            };
             return true;
         }
 
@@ -575,6 +653,80 @@ namespace Emby.Plugin.Danmu.Scraper
                 }
             }
             return true;
+        }
+
+        private static bool HasReliableUniquePositiveNumbers(IEnumerable<int?> numbers)
+        {
+            var seen = new HashSet<int>();
+            foreach (var number in numbers)
+            {
+                if (!number.HasValue || number.Value <= 0 || !seen.Add(number.Value)) return false;
+            }
+            return seen.Count > 0;
+        }
+
+        private static int ResolveSourceStartIndex(
+            IList<CompositeSeasonSourceEpisode> sources,
+            string sourceStartEpisodeId,
+            int? sourceStartEpisodeNumber,
+            bool sourceNumbersReliable,
+            out string error)
+        {
+            error = string.Empty;
+            if (!string.IsNullOrWhiteSpace(sourceStartEpisodeId))
+            {
+                var exact = FindIndex(sources, sourceStartEpisodeId, source => source.EpisodeId);
+                if (exact >= 0) return exact;
+                error = "The selected source start episode does not exist in the verified source episode list.";
+                return -1;
+            }
+
+            if (!sourceStartEpisodeNumber.HasValue || sourceStartEpisodeNumber.Value <= 0 || !sourceNumbersReliable)
+            {
+                error = "A number-only source start requires reliable unique positive provider Episode numbering.";
+                return -1;
+            }
+
+            var matches = sources.Select((source, index) => new { source, index })
+                .Where(entry => entry.source.EpisodeNumber == sourceStartEpisodeNumber.Value)
+                .Select(entry => entry.index)
+                .ToList();
+            if (matches.Count != 1)
+            {
+                error = "The number-only source start does not uniquely identify a verified source episode.";
+                return -1;
+            }
+            return matches[0];
+        }
+
+        private static IEnumerable<CompositeSeasonSourceEpisode> OrderSourcesForFallback(
+            IList<CompositeSeasonSourceEpisode> sources)
+        {
+            var ordinalsReliable = sources.All(source => source.SourceOrdinal > 0) &&
+                                   sources.Select(source => source.SourceOrdinal).Distinct().Count() == sources.Count;
+            return ordinalsReliable
+                ? sources.OrderBy(source => source.SourceOrdinal).ToList()
+                : sources.ToList();
+        }
+
+        private static CompositeSeasonEpisodeMapping CreateMapping(
+            CompositeSeasonLocalEpisode local,
+            CompositeSeasonSourceEpisode source,
+            CompositeSeasonSegmentRequest request)
+        {
+            return new CompositeSeasonEpisodeMapping
+            {
+                LocalEpisodeItemId = local.ItemId,
+                Source = CloneSource(request.Source),
+                SourceEpisodeId = source.EpisodeId,
+                CommentId = source.CommentId,
+                SourceEpisodeNumber = source.EpisodeNumber,
+                Origin = request.Origin ?? string.Empty,
+                MatchScore = request.MatchScore,
+                ScoreOrigin = request.ScoreOrigin ?? string.Empty,
+                SelectionEvidenceToken = request.SelectionEvidenceToken ?? string.Empty,
+                SourceMetadata = request.SourceMetadata?.Clone(),
+            };
         }
 
         private static CompositeSeasonPlan BuildPlan(

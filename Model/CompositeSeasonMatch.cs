@@ -82,7 +82,41 @@ namespace Emby.Plugin.Danmu.Model
     {
         public string EpisodeId { get; set; } = string.Empty;
         public string CommentId { get; set; } = string.Empty;
+
+        /// <summary>
+        /// Provider-supplied Episode number. Missing values remain null and are
+        /// never replaced by list position.
+        /// </summary>
         public int? EpisodeNumber { get; set; }
+
+        /// <summary>Stable one-based order in the provider detail response.</summary>
+        public int SourceOrdinal { get; set; }
+    }
+
+    public enum CompositeSeasonAlignmentIntent
+    {
+        /// <summary>The exact local/source pair defines the numeric offset.</summary>
+        ExplicitAnchor = 0,
+
+        /// <summary>The server-owned initial segment uses source number = local number.</summary>
+        DefaultZeroOffset = 1,
+    }
+
+    public enum CompositeSeasonAlignmentMode
+    {
+        NumberAware = 0,
+        PositionalFallback = 1,
+    }
+
+    public sealed class CompositeSeasonSegmentResolution
+    {
+        public CompositeSeasonAlignmentIntent Intent { get; set; }
+        public CompositeSeasonAlignmentMode Mode { get; set; }
+        public string Diagnostic { get; set; } = string.Empty;
+        public List<CompositeSeasonLocalEpisode> ConsideredLocalEpisodes { get; set; } =
+            new List<CompositeSeasonLocalEpisode>();
+        public List<CompositeSeasonEpisodeMapping> Mappings { get; set; } =
+            new List<CompositeSeasonEpisodeMapping>();
     }
 
     /// <summary>An exact local-to-upstream mapping, safe to use for downloading.</summary>
@@ -165,6 +199,21 @@ namespace Emby.Plugin.Danmu.Model
         public List<CompositeSeasonSourceEpisode> SourceEpisodes { get; set; } =
             new List<CompositeSeasonSourceEpisode>();
         public string SourceStartEpisodeId { get; set; } = string.Empty;
+        public int? SourceStartEpisodeNumber { get; set; }
+
+        /// <summary>
+        /// Server-resolved local coordinate for an exact source anchor that
+        /// may already be mapped during authoritative reconstruction.
+        /// </summary>
+        public int? LocalAnchorEpisodeNumber { get; set; }
+        public CompositeSeasonAlignmentIntent AlignmentIntent { get; set; } =
+            CompositeSeasonAlignmentIntent.ExplicitAnchor;
+
+        /// <summary>
+        /// Server-only continuation constraint that prevents one logical
+        /// segment from changing alignment mode between local runs.
+        /// </summary>
+        public CompositeSeasonAlignmentMode? RequiredAlignmentMode { get; set; }
         public string Origin { get; set; } = "manual";
         public double MatchScore { get; set; }
         public string ScoreOrigin { get; set; } = string.Empty;
