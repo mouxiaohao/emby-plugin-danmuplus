@@ -394,9 +394,20 @@ namespace Emby.Plugin.Danmu.TitleFidelityTests
                 },
                 "DandanID", "DandanPlay", 0, "Localized Parent", "Season 2", 2024, 12,
                 new[] { "Target Parent＊" }, null);
+            var noLocalParentAlias = DanmuMatchScorer.Score(
+                new ScraperSearchInfo
+                {
+                    Id = "no-local-parent-alias",
+                    Name = "Target Parent*",
+                    Category = "anime",
+                    Year = 2024,
+                    EpisodeSize = 12,
+                },
+                "DandanID", "DandanPlay", 0, "Localized Parent", "Season 2", 2024, 12);
             Assert(localParentAlias.FidelityTitleEvidence == 1 &&
-                   localParentAlias.ParentTitleScore == 0,
-                "Series.OriginalTitle may remain rank-1 fidelity evidence but must not earn ordinary Season parent-score credit");
+                   localParentAlias.ParentTitleScore == noLocalParentAlias.ParentTitleScore &&
+                   localParentAlias.ParentTitleScore > 0 && localParentAlias.ParentTitleScore < 1,
+                "Series.OriginalTitle may remain rank-1 fidelity evidence but ordinary parent scoring must use only the authoritative title's continuous evidence");
 
             var genericSeason = ScoreSeasonWithRoles(
                 "generic-season", "Target Parent*", "Season 2", "Season 2");

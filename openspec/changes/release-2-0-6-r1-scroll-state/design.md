@@ -1,0 +1,115 @@
+## Context
+
+See `proposal.md` for motivation and `specs/smart-match-error-and-presentation/spec.md` for the observable contract. The implementation base is the reviewed 2.0.6 candidate in the isolated `emby-plugin-danmuplus-2.0.6` worktree, including its completed 36/36 OpenSpec change and deployed DLL hash `a9524b271ce4065eae348973c4f0047f0b9818d31ff92a87a45dae373e226f5c`. That candidate is a verified but uncommitted working-tree state over `d22a1069524bd891c5b36c758f75f4112a19e1f4`; creating a branch or recording ordinary `git diff` alone cannot make its modified and untracked files reproducible.
+
+Before any r1 application-code, version, or documentation edit, implementation must therefore create a credential-safe baseline manifest plus the actual tracked binary patch. The manifest records the base commit, full porcelain state, the path, size, and SHA-256 of every existing 2.0.6 modified or untracked file, and the binary patch hash. The already-created `release-2-0-6-r1-scroll-state` OpenSpec directory is explicitly classified as planning delta and excluded from the 2.0.6 file set. `artifacts/2.0.6` is hashed as a tree and remains byte-for-byte immutable throughout r1 work. Later allowlist and package checks distinguish baseline entries from r1 delta against that manifest.
+
+The Smart Match dialog reuses one `.danmuSmartBody` scroll container while replacing its children. `renderSeriesSeasonPicker` currently replaces a scrolled whole-Series overview with candidate rows but retains the old `scrollTop`; the rematch path appears correct only because its temporary short loading view causes the browser to clamp the old offset to zero. Returning then reconstructs the overview without any retained viewport identity, so it stays at the child/busy offset. A numeric offset is not sufficient: expanded `逐集映射` disclosures collapse on reconstruction, and applying a Season or temporary-range match can change, merge, or remove rows before the old position.
+
+The host-page issue is caused by the dialog's cross-platform history guard, not by action-sheet timing or overlay layout. `openDialog` appends the fixed overlay and then unconditionally calls `history.pushState` with the current route so Android/WebView back can be consumed. On desktop Emby 4.9.5 with Chrome, isolated live probes established the following causal boundary without downloading, binding, or changing server configuration:
+
+- Closing the same action sheet through `dialogHelper.close` returned `undefined`, detached after roughly 800 ms, and preserved the active virtual list and its offset.
+- Appending and removing the same fixed overlay without history work preserved the active virtual list and its offset for the complete observation window.
+- Calling `pushState` alone, with no menu or overlay, emitted `Page.navigatedWithinDocument`, collapsed the virtual list from its loaded extent to one viewport, rebuilt it at offset zero, and issued a new first-page item query. Omitting the optional URL argument produced the same result.
+
+The user's modified Android CustomJSS phone and car-head-unit runtimes instead rebuild the same route when the dialog calls `pushState`, so the overlay disappears immediately after menu activation. An authorized no-history probe restored dialog opening on both devices but exposed duplicate ownership: Smart Match closed or returned while Emby also navigated. A command-trace probe then proved Emby's cancelable `command: "back"` is dispatched before its downstream `backbutton`; canceling the command stabilized the host but suppressed that later event. Finally, a command-owner probe canceled the command and synchronously invoked the topmost Smart Match return state machine once. Both devices then returned a child to its parent, closed only a top-level dialog, retained busy/protected views, and left the Emby route unchanged; after the overlay closed, Back again belonged to Emby. This establishes command ownership as the compatibility boundary and disproves both dialog-owned history and a separate Smart Match `backbutton` listener for the target runtimes. The diagnostic result is design evidence and does not replace final V30 acceptance.
+
+## Goals / Non-Goals
+
+**Goals:**
+
+- Give every newly entered return-capable secondary page, plus an initial direct candidate page, an explicit synchronous top position after its rows exist.
+- Restore a returning parent to the same logical trigger row and viewport-relative position even when disclosures collapse or matching changes the parent's height and structure.
+- Prevent dialog open, internal return, and explicit close on every platform from mutating session history or re-entering the Emby route.
+- Preserve Android/WebView parent, top-level, and busy/protected behavior through single-owner cancellation of Emby's `command: "back"`, without a Smart Match `backbutton` listener.
+- Keep desktop click and Android long-press menu entry working without new dependencies or unverified browser APIs.
+- Preserve the reviewed 2.0.6 backend behavior and produce a version-consistent 2.0.6r1 package.
+
+**Non-Goals:**
+
+- Changing candidate scoring, server ordering, provider grouping or priority, candidate eligibility, or automatic selection.
+- Treating the visually first row as a new mathematical global-maximum guarantee.
+- Resetting inline detail expansion, terminal progress/busy views, or arbitrary same-page rerenders that are not a newly entered secondary page or replacement candidate result.
+- Capturing, persisting, or repeatedly restoring host scroll offsets; changing Emby page overflow/position styles; or patching Emby core code.
+- Promise-wrapping `dialogHelper.close`, delaying fixed-overlay creation, or changing action-sheet animation behavior.
+- Adopting `CloseWatcher`, Navigation API interception, responsive-width platform detection, or touch-capability platform detection in r1.
+- Converting desktop browser Back into Smart Match parent navigation; desktop route traversal remains owned by Emby and only performs dialog cleanup.
+- Changing DTOs, public routes, persistence, download behavior, mapping protocol V22, or automatic library-import behavior.
+
+## Decisions
+
+### 1. Model parent-to-child dialog navigation with semantic viewport contexts
+
+Add a transient last-in-first-out navigation-context stack to each dialog. Geometry capture is trigger-local and two-phase: passive `pointerdown` (mouse/pen/touch), platform-scoped legacy `touchstart` on Android or `mousedown` on desktop when Pointer Events are unavailable, or Enter/Space `keydown` records only a pending sample on the exact internal trigger. This split prevents a synthesized mouse event from overwriting legacy touch geometry without timers. The matching business `click` passes its actual event, clears the sample first, and atomically pushes exactly one context before mutation. An untrusted/programmatic click never consumes an older trusted pending sample and instead captures click-time geometry. Preactivation never enters the stack, prevents or cancels input, changes focus/scroll, reads host state, or schedules work. Cancellation, context menu, drag, blur, detachment, trigger mismatch, or changed candidate/action/row/section identity discards the sample. If capture returns no context, each of the five business handlers returns immediately without rendering, rebuilding, or issuing a request. A context contains the parent surface and return renderer, the raw `scrollTop`, action/row/section/neighbor identity and viewport geometry. Presentation anchors remain opaque and in-memory only.
+
+The four return-capable boundaries are Series overview to Season candidate, composite Season/range overview to temporary-range candidate, Episode candidate list to source-Episode selector, and Movie candidate list to part/version selector. Capture before the asynchronous rematch/detail path starts, not when its child renderer eventually runs, because a short busy page can already clamp the parent geometry. Parent-title/ProviderId rematch, composite rebuild, or Episode/Movie detail cancellation/failure that reconstructs a parent consumes only that provisional transition context after restoring it; success that enters a child retains the same context. A direct Season candidate that resolves into a one-Season composite target currently has no parent-return contract and must not acquire a fictitious one; progress/download pages likewise do not push a context.
+
+After a newly entered child has synchronously appended its controls and rows or empty result, set the body to zero exactly once. Apply this to `renderSeriesSeasonPicker`, `renderCompositeGroupPicker`, `renderEpisodeSourcePicker`, and `renderMoviePartPicker`, as well as initial or replacement ordinary results from `renderCandidatePicker` and `renderItemCandidatePicker`. Searching or rerendering the same child retains its original parent context instead of pushing a duplicate. Do not run the entry reset merely for inline candidate details, `setBusy`, progress, or a parent render.
+
+Every visible return button and Android command-owned return for the same child must call one shared `returnToParent` closure. Successful Season/range selection and failure recovery that intentionally return to the parent use that closure too. It first renders current parent data, then resolves the equivalent action within the original logical row and sets `scrollTop` so that action appears at its captured viewport-relative offset. This automatically compensates when `逐集映射` is now collapsed or row heights changed. If the action vanished, try its stable row, then its enclosing Season/range, and then its closest surviving logical neighbor. Only if no semantic anchor survives, clamp the captured raw offset to `0..max(0, scrollHeight - clientHeight)`; when there is no scrollable range, use zero.
+
+Pop exactly one context on a completed return and clear abandoned contexts on dialog disposal, desktop host navigation, or a genuinely non-returnable transition. Entering `renderSingleTargetProgress`, submission busy state, or any view with a usable `preDownloadRecovery` is not terminal: if `StartTrackedDownload` fails or is cancelled and the source/version child is restored, retain the original candidate-parent context and do not push a duplicate. Clear it only after the server has accepted the task with a valid TaskId and internal parent return is no longer available, or when the dialog/navigation is explicitly abandoned. Nested source/version navigation remains last-in-first-out, and a failed provisional transition must never pop an older context. Never schedule a later correction with `requestAnimationFrame` or a timer: restoration occurs once, synchronously, after the rebuilt parent has all of the rows used for geometry. This is preferred over retaining obsolete DOM because selection must render current mapping and match state, and preferred over a raw-pixel snapshot because disclosure and mapping geometry legitimately changes. Candidate arrays remain untouched and the first existing server-authored row is only made visible, not redefined.
+
+### 2. Freeze platform back ownership without dialog-owned history
+
+Determine one immutable `backMode` when a dialog opens. Its only values are `"desktop"` and `"android-command"`. Select `android-command` only when `navigator.userAgentData.platform === "Android"` or `navigator.userAgent` contains an `Android` token, using trimmed case-insensitive comparison and treating missing values or throwing getters as absent. Malformed, desktop, touch-only, and narrow-responsive signals resolve to `desktop`; do not guess compatibility from viewport or input capability.
+
+Neither mode creates, replaces, nor traverses a dialog-owned history entry. Dialog open, visible close, Escape, force close, internal parent return, and ordinary disposal issue zero `pushState`, `replaceState`, and `history.back` calls. Keep the immediate fixed-overlay insertion and action-sheet close order. Any host `popstate` is Emby-owned: synchronously dispose every connected Smart Match overlay and its per-dialog listeners from top to bottom, do not invoke internal parent return, do not issue another history operation, and allow the host traversal to continue.
+
+This zero-history design removes the demonstrated route rebuild instead of hiding it with host scroll restoration. The Android compatibility requirement is satisfied by the host's cancelable command boundary, not by an artificial same-route history entry.
+
+### 3. Own Android return through Emby's command channel
+
+Install exactly one script-lifecycle `document` capture listener for `command`. The installation marker prevents duplicate registration across repeated script evaluation. The listener ignores every command except exact `event.detail.command === "back"`, then locates only the topmost connected dialog whose frozen mode is `android-command`. With no eligible dialog it must not read media state, cancel the event, request an API, or write storage.
+
+For an eligible dialog, process the command in this fail-safe order:
+
+1. Record whether the event was already canceled (`preexisting`).
+2. If it was not, call `preventDefault` once; if the event is not cancelable, the method is missing, cancellation stays false, or cancellation throws, leave Smart Match state unchanged and return.
+3. Only after `defaultPrevented === true`, call the dialog's narrow `handleCommandBack()` once. That method reuses the existing topmost return state machine: a child invokes its shared viewport-aware parent closure, a closable top-level dialog disposes, and busy/protected state consumes the command while staying open.
+4. Never call `stopPropagation`, never register or depend on a Smart Match `backbutton` listener in `android-command` mode, never schedule a timer, and never fall through to history or another fallback.
+
+If the handler returns false or throws, keep the command canceled and do not retry or hand the same gesture to another channel; log only a fixed diagnostic category without media data. A pre-canceled event still invokes the eligible topmost handler once. Nested overlays are last-in-first-out and only one handler runs per command.
+
+Do not introduce `CloseWatcher` or Navigation API interception in r1. Desktop browser Back and every host `popstate` remain Emby-owned; their cleanup closes all Smart Match overlays rather than attempting internal parent navigation. Desktop users retain X and Escape for dialog-only dismissal.
+
+### 4. Leave menu close and overlay timing unchanged
+
+Retain the current non-observable `closeMenu` call and immediate `openDialog` sequence. The isolated live controls prove asynchronous action-sheet removal and fixed-overlay insertion are not sufficient to reset the virtual list, whereas `pushState` alone is. Promise-wrapping the helper or delaying the overlay would add failure handling without removing the navigation and first-page request that cause the defect.
+
+### 5. Extend deterministic verification at the actual boundary
+
+Add fake-element `scrollTop`, `scrollHeight`, `clientHeight`, action/row geometry, and opaque anchor lookup only for the Smart Match body, plus controllable platform identity, command propagation/cancellation, host route, listener counts, and history call counters. Tests must enter each return-capable child through its real trigger, prove entry resets to zero, and exercise visible-button and Android command-owned return through the same closure. Timing fixtures set content top 706 and preactivation scroll 326, simulate native focus moving scroll to 426 before click, and prove pointer mouse/touch, Enter, and Space restore 326 while a programmatic click uses 426. Cancellation/long-press, A-to-B ownership, replacement activation, candidate change, double/detached click, and all five allowed trigger boundaries are guarded. One expanded-`逐集映射` fixture must make action-first and row-first yield different offsets, then assert the full order independently: surviving action, surviving row, surviving section, pre-recorded logical neighbor, clamped raw offset, and zero for a non-scrollable parent. Additional changed-height cases cover successful range/Season updates and merged or removed rows. Candidate tests also prove server order is unchanged.
+
+Failure fixtures cover Series parent-title/ProviderId rematch cancellation, failure, and a result with no enterable child; composite rematch cancellation/failure or a rebuilt plan without the target run; Episode/Movie detail cancellation/failure; and Episode/Movie submission failure followed by `preDownloadRecovery`, child Back, and candidate-action restoration. Each provisional failure restores and consumes exactly its own context, while recovered submission retains one context until the later parent return.
+
+Every platform fixture must prove dialog open, X, Escape, force close, internal return, and cleanup issue zero `pushState`, `replaceState`, and `history.back` calls. Host `popstate` must dispose every stacked overlay without invoking a Smart Match parent handler or an extra traversal. Android fixtures dispatch real capture/bubble `command` events and cover secondary return, top-level close, busy/protected retention, nested topmost ownership, no-overlay and non-back passthrough, preexisting cancellation, noncancelable and ineffective/throwing cancellation, handler false/throw, listener singleton, zero Smart Match `backbutton` listeners, and a stable host route. Responsive width, touch-only, mixed-case/whitespace Android, and throwing/malformed identity fixtures freeze the intended mode.
+
+Live desktop acceptance additionally observes the active virtual list and bounded browser diagnostics: dialog open must not emit same-route navigation, collapse the loaded list, or initiate a first-page parent/item query. Evidence records only counts and redacted endpoint shapes, never authentication material, item identifiers, or raw responses.
+
+### 6. Publish a complete 2.0.6r1 identity without a protocol bump
+
+Keep `AssemblyVersion` at `2.0.6.0` for plugin compatibility, `FileVersion` at `2.0.6.1`, and informational, configuration, and TMDB User-Agent versions at `2.0.6r1`. Advance the distinct frontend installation marker from V29 to V30 so a long-lived WebView cannot retain an earlier r1 closure; the separate configuration cache token remains `2-0-6r1`. Keep mapping protocol V22 because request/response and draft compatibility do not change. Update README and cumulative `UPDATE.md` while preserving all existing history and media.
+
+## Risks / Trade-offs
+
+- [An Android runtime omits both UA-CH platform and the conventional UA token] → Default to desktop/host-owned Back with no history mutation and keep the real target Android gate incomplete until its identity and command behavior are proven; do not guess from width or touch.
+- [Desktop browser Back no longer acts as Smart Match parent navigation] → Treat it as host navigation, dispose the overlay without a second traversal, and retain X/Escape for dialog-only dismissal; the documented parent-navigation contract remains Android/WebView-specific.
+- [A command is not cancelable or cancellation fails] → Do not mutate Smart Match state before ownership is proven; leave host behavior unchanged rather than half-handling the gesture.
+- [The Smart Match handler returns false or throws after cancellation] → Keep the command canceled, record only a fixed non-media diagnostic category, and never retry through history or `backbutton`, preventing double navigation.
+- [A singleton command listener observes unrelated host traffic] → Require exact command, topmost connected overlay, and frozen `android-command` mode before reading dialog state or taking ownership.
+- [An asynchronous entry reset or restoration pulls the user back] → Perform exactly one synchronous write after the destination rows are appended and never schedule a second correction.
+- [Expanded mappings collapse or a successful match changes parent height] → Restore against the equivalent action in the rebuilt geometry, then its row/parent/neighbor, and treat numeric `scrollTop` only as a clamped final fallback.
+- [A child rerender or recoverable submission overwrites, duplicates, or prematurely clears its parent state] → Capture at the real transition before mutation, carry the same context through child searches/errors and `preDownloadRecovery`, and pop only on a completed last-in-first-out return or an accepted non-returnable task.
+- [Broad reset placement loses overview or inline-detail context] → Allowlist the four return-capable child boundaries plus initial/replacement ordinary candidate results and add negative regression cases for non-navigation surfaces.
+- [A JavaScript-only functional fix is packaged with inconsistent plugin identity] → Clean-build and reverify the version-stamped DLL, pair it with V30, verify cache/resource assertions, and publish them only as one r1 package.
+- [A diagnostic probe leaks into the formal asset] → Allowlist the formal source/package, require V30 exactly once and every Car probe marker/override/badge/trace hook zero times, and scan the package before deployment.
+
+## Migration Plan
+
+1. Before any r1 application/version/documentation edit, freeze the uncommitted 2.0.6 state with its base commit, full porcelain listing, actual tracked binary patch, per-file path/size/SHA-256 manifest for modified and untracked baseline files, and immutable `artifacts/2.0.6` tree hash; classify the already-created r1 OpenSpec directory only as planning delta.
+2. Revise the superseded Android history/backbutton fixtures to command-ownership fixtures, then implement the formal `desktop | android-command` mode, singleton command owner, zero-history lifecycle, transient dialog navigation contexts, and destination reset/restoration in isolated frontend slices.
+3. Run the full frontend regression, configuration/resource assertions, main backend regression, and a clean sequential Release build; verify version fields, V30, V22, package hashes, and absence of diagnostic probe code.
+4. Assemble a credential-safe local 2.0.6r1 review package and obtain final review. Do not push, merge, tag, publish, replace Synology files, restart Emby, or run live browser acceptance without the applicable explicit gate.
+5. If live deployment is authorized, back up the paired DLL, plugin configuration, and frontend configuration with hashes, owner, and mode; deploy the reviewed DLL/V30 asset together, restart, health-check, then verify every parent/child scroll boundary including collapsed-mapping and changed-height return, desktop virtual-list/history/network stability, and phone plus car-head-unit click/long-press/command-back behavior without downloading or binding. Require V30 once, V29 and every Car probe marker zero, and do not count the D diagnostic result as acceptance of the formal asset.
+6. Roll back by restoring the paired 2.0.6 DLL and configurations and rechecking Emby health. No stored-data migration is required.

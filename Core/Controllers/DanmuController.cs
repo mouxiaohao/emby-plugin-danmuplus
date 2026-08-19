@@ -1081,6 +1081,8 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 CopyDecision(result, result.Seasons[0]);
             }
 
+            var retainedPartialPlan = result.Seasons.Any(x => string.Equals(x.Status, "partial", StringComparison.OrdinalIgnoreCase) &&
+                CompositeSeasonPartialState.HasConfirmedPartialMappings(x.CompositePlan));
             result.CanStart = result.Seasons.Count > 0 && result.Seasons.All(x => x.AutoSelected);
             if (result.CanStart)
             {
@@ -1091,6 +1093,12 @@ namespace Emby.Plugin.Danmu.Core.Controllers
             }
             else
             {
+                if (item is Season && retainedPartialPlan)
+                {
+                    result.Status = result.Seasons[0].Status;
+                    result.Message = result.Seasons[0].Message;
+                    return result;
+                }
                 if (item is Series && result.Seasons.Any(x => string.Equals(
                     x.Status, "cancelled", StringComparison.OrdinalIgnoreCase)))
                 {
@@ -1107,9 +1115,12 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 }
                 else if (item is Series)
                 {
-                    result.Status = result.Seasons.Any(x => x.AutoSelected) ? "partial" :
+                    var retainedPartial = retainedPartialPlan;
+                    result.Status = result.Seasons.Any(x => x.AutoSelected) || retainedPartial ? "partial" :
                         result.Seasons.Any(x => x.Status == "ambiguous") ? "ambiguous" : "no_match";
-                    result.Message = "所有季度均已完成搜索；无法唯一匹配的季度需要分别手动选择";
+                    result.Message = retainedPartial
+                        ? "已保留部分映射；未匹配的余集保持未匹配状态"
+                        : "所有季度均已完成搜索；无法唯一匹配的季度需要分别手动选择";
                 }
                 else
                 {
@@ -1319,6 +1330,7 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 Site = scraper.ProviderId,
                 SiteName = scraper.ProviderName,
                 Name = "Selected Season candidate",
+                SourceMetadata = candidateEvidence.SourceMetadata?.Clone(),
                 MatchOrigin = "manual",
                 DecisionReason = "manual-selection",
                 Score = candidateEvidence.MatchScore,
@@ -1326,11 +1338,27 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 ScoreOrigin = candidateEvidence.ScoreOrigin,
                 SelectionEvidenceToken = request.SelectionEvidenceToken,
             };
+            var authoritativeSearch = await DanmuMatchSearchEngine.SearchSeasonAsync(
+                _scraperManager.All(), parent?.Name ?? string.Empty, latest.Name ?? string.Empty,
+                latest.ProductionYear, episodes.Count, null, _logger, BoundedSearchPolicy.Shared,
+                cancellationToken, cancellationToken, new[] { parent?.OriginalTitle },
+                new[] { latest.OriginalTitle }, latest).ConfigureAwait(false);
+            var authoritativeCandidate = authoritativeSearch.CanonicalCandidates.FirstOrDefault(item =>
+                string.Equals(item.Site, candidate.Site, StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(item.Id, candidate.Id, StringComparison.OrdinalIgnoreCase));
+            if (authoritativeCandidate != null)
+            {
+                candidate.Name = authoritativeCandidate.Name;
+                candidate.SourceMetadata = authoritativeCandidate.SourceMetadata?.Clone();
+                candidate.ServerTitleAliases = (authoritativeCandidate.ServerTitleAliases ?? new List<string>()).ToList();
+            }
             result.Candidates.Add(candidate);
             await PopulateCompositePreviewIfRequired(
                 latest, result, candidate, "manual",
                 request.CompositeStartEpisodeItemId, request.CompositeEpisodeCount,
-                cancellationToken, targetOwnershipExclusions).ConfigureAwait(false);
+                cancellationToken, targetOwnershipExclusions, authoritativeSearch.CanonicalCandidates,
+                RemainderOperationPolicy.InteractiveRecursive, authoritativeSearch.CompletionDiagnostics,
+                authoritativeSearch.WasCancelled).ConfigureAwait(false);
             if (result.CompositePlan == null)
             {
                 result.Status = cancellationToken.IsCancellationRequested ? "cancelled" : "retryable";
@@ -1775,7 +1803,9 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 {
                     await PopulateCompositePreviewIfRequired(latest, result, selected, "scored",
                         compositeStartEpisodeItemId, compositeEpisodeCount,
-                        cancellationToken, targetOwnershipExclusions).ConfigureAwait(false);
+                        cancellationToken, targetOwnershipExclusions, search.CanonicalCandidates,
+                        RemainderOperationPolicy.InteractiveRecursive, search.CompletionDiagnostics,
+                        search.WasCancelled).ConfigureAwait(false);
                 }
                 return result;
             }
@@ -1989,7 +2019,11 @@ namespace Emby.Plugin.Danmu.Core.Controllers
             string compositeStartEpisodeItemId = null,
             int compositeEpisodeCount = 0,
             CancellationToken cancellationToken = default(CancellationToken),
-            IReadOnlyCollection<string> targetOwnershipExclusions = null)
+            IReadOnlyCollection<string> targetOwnershipExclusions = null,
+            IEnumerable<DanmuMatchCandidate> canonicalCandidates = null,
+            RemainderOperationPolicy remainderPolicy = RemainderOperationPolicy.BackgroundNonRecursive,
+            IEnumerable<DanmuSearchCompletionDiagnostic> canonicalCompletionDiagnostics = null,
+            bool canonicalSearchWasCancelled = false)
         {
             if (season == null || result == null || candidate == null ||
                 string.IsNullOrWhiteSpace(candidate.Site) || string.IsNullOrWhiteSpace(candidate.Id))
@@ -2103,6 +2137,24 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 return;
             }
 
+            if (remainderPolicy == RemainderOperationPolicy.InteractiveRecursive &&
+                build.Plan.UnmatchedRuns.Count > 0 && canonicalCandidates != null && !canonicalSearchWasCancelled)
+            {
+                try
+                {
+                    build = await ExtendInteractiveRemainderPlanAsync(season, result, build, candidate,
+                        canonicalCandidates, canonicalCompletionDiagnostics, cancellationToken).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    // A completed first segment remains a silent partial result.
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "[CompositeSeason] Remainder recursion stopped after committed prefix.");
+                }
+            }
+
             result.CompositePlan = build.Plan;
             result.HasVerifiedSourceEpisodeSurplus = build.HasVerifiedSourceEpisodeSurplus;
             result.PlanFingerprint = build.PlanFingerprint;
@@ -2121,6 +2173,307 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 result.Message = "来源只覆盖部分剧集；请继续匹配下方临时季。";
             }
         }
+
+        // This loop deliberately sits above BuildCompositePlanAsync: the planner
+        // remains pure and every successful decision is revalidated through the
+        // same target-bound evidence/fingerprint chain as a manual selection.
+        private async Task<CompositePlanBuild> ExtendInteractiveRemainderPlanAsync(
+            Season season, DanmuSeasonMatchResult result, CompositePlanBuild build,
+            DanmuMatchCandidate firstCandidate, IEnumerable<DanmuMatchCandidate> canonicalCandidates,
+            IEnumerable<DanmuSearchCompletionDiagnostic> canonicalCompletionDiagnostics,
+            CancellationToken cancellationToken)
+        {
+            var candidates = (canonicalCandidates ?? Enumerable.Empty<DanmuMatchCandidate>()).Where(x => x != null).ToList();
+            var details = new Dictionary<string, RemainderResolvedCandidate>(StringComparer.OrdinalIgnoreCase);
+            var resolvedByLookup = new Dictionary<string, RemainderResolvedCandidate>(StringComparer.OrdinalIgnoreCase);
+            // Pools retain only raw search rows. ResolveRemainderCandidateAsync
+            // caches media facts/null, while each round still projects the
+            // current candidate row into a fresh decision candidate.
+            var candidatePools = new Dictionary<string, List<DanmuMatchCandidate>>(StringComparer.OrdinalIgnoreCase);
+            var used = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var selection in build.Selections)
+            {
+                if (CandidateEvidence.TryResolve(selection.SelectionEvidenceToken, season.Id.ToString(),
+                        selection.Site, selection.CandidateId, out var evidence) &&
+                    evidence.RemainderDecision != null)
+                    used.Add(evidence.RemainderDecision.StableProviderId + "\u001f" + evidence.RemainderDecision.StableMediaId);
+            }
+
+            var firstResolved = await ResolveRemainderCandidateAsync(season, firstCandidate, details, null, cancellationToken).ConfigureAwait(false);
+            if (firstResolved == null) return build;
+            var providerLock = firstResolved.ProviderId;
+            if (string.IsNullOrWhiteSpace(providerLock) ||
+                !string.Equals(firstCandidate.Site, providerLock, StringComparison.OrdinalIgnoreCase)) return build;
+            // Completion belongs to the provider selected by the first resolved
+            // segment. An unrelated provider fault must not block this locked
+            // continuation; a missing/failed locked-provider search stops
+            // before any remainder detail lookup or commit.
+            if (!RemainderProviderCompletion.IsClosed(canonicalCompletionDiagnostics, providerLock)) return build;
+            // Exclude every other Provider before detail resolution, tuple/Part
+            // analysis, or pool reuse. Cross-provider rows cannot be ambiguous.
+            candidates = candidates.Where(candidate => string.Equals(candidate.Site, providerLock,
+                StringComparison.OrdinalIgnoreCase)).ToList();
+            used.Add(firstResolved.StableId);
+            var usedLookups = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                firstCandidate.Site + "\u001f" + firstCandidate.Id,
+            };
+            var lastTitles = firstResolved.DecisionCandidate.Titles.ToList();
+            var initialPartStatus = GetResolvedPartStatus(lastTitles, result.SeriesName, out var initialPartNumber);
+            if (initialPartStatus == PartTitleParseStatus.Malformed) return build;
+            var lastPart = initialPartStatus == PartTitleParseStatus.Valid ? (int?)initialPartNumber : null;
+            var initial = CreateRemainderSnapshot(build);
+            if (initial == null) return build;
+            var input = new RemainderDecisionInput
+            {
+                ParentTitle = result.SeriesName, LastSelectedTitles = lastTitles,
+                LogicalSeasonNumber = GetActiveLogicalSeason(build, season.IndexNumber.GetValueOrDefault()),
+                LastPartNumber = lastPart, UsedStableIds = used, UsedLookupIds = usedLookups,
+                CandidateCoverageComplete = true, ProviderLock = providerLock,
+            };
+            var final = await new RemainderInteractiveOrchestrator().RunAsync(initial, input,
+                (state, token) => Task.FromResult(CreateRemainderSnapshot(state as CompositePlanBuild)),
+                async (snapshot, poolKey, token) =>
+                {
+                    var current = snapshot.State as CompositePlanBuild;
+                    var currentCandidates = candidates;
+                    var isLogical = string.Equals(poolKey, "logical", StringComparison.OrdinalIgnoreCase);
+                    if (!isLogical && candidatePools.TryGetValue(poolKey ?? string.Empty, out var cachedCandidates))
+                        currentCandidates = cachedCandidates;
+                    if (isLogical)
+                    {
+                        if (!snapshot.SuffixFirstYear.HasValue || snapshot.SuffixFirstYear <= 0)
+                            return new RemainderRoundCandidates { Complete = false };
+                        var lockedProviders = _scraperManager.All().Where(provider => string.Equals(provider.ProviderId,
+                            providerLock, StringComparison.OrdinalIgnoreCase)).ToList();
+                        if (lockedProviders.Count == 0) return new RemainderRoundCandidates { Complete = false };
+                        var logicalSearch = await DanmuMatchSearchEngine.SearchLogicalSeasonAsync(lockedProviders,
+                            new LogicalSeasonSearchContext { ParentTitle = result.SeriesName,
+                                ExpectedLogicalSeasonNumber = GetActiveLogicalSeason(current, season.IndexNumber.GetValueOrDefault()) + 1,
+                                FirstEpisodeYear = snapshot.SuffixFirstYear, SuffixEpisodeCount = snapshot.UniqueSuffixItemIds.Count },
+                            _logger, BoundedSearchPolicy.Shared, token, token, null, null, season).ConfigureAwait(false);
+                        if (logicalSearch.WasCancelled || !RemainderProviderCompletion.IsClosed(
+                                logicalSearch.CompletionDiagnostics, providerLock))
+                            return new RemainderRoundCandidates { Complete = false };
+                        currentCandidates = logicalSearch.CanonicalCandidates.Where(item => item != null &&
+                            string.Equals(item.Site, providerLock, StringComparison.OrdinalIgnoreCase)).ToList();
+                    }
+                    var decisionCandidates = new List<RemainderCandidate>();
+                    foreach (var candidate in currentCandidates)
+                    {
+                        if (!string.Equals(candidate.Site, providerLock, StringComparison.OrdinalIgnoreCase)) continue;
+                        var resolved = await ResolveRemainderCandidateAsync(season, candidate, details, providerLock, token).ConfigureAwait(false);
+                        if (resolved == null) return new RemainderRoundCandidates { Complete = false };
+                        resolvedByLookup[resolved.DecisionCandidate.LookupId] = resolved;
+                        decisionCandidates.Add(resolved.DecisionCandidate);
+                    }
+                    var key = isLogical ? "logical:" + (GetActiveLogicalSeason(current, season.IndexNumber.GetValueOrDefault()) + 1) : (poolKey ?? string.Empty);
+                    var materialized = new RemainderRoundCandidates { Complete = true, PoolKey = key, Candidates = decisionCandidates };
+                    if (isLogical) candidatePools[key] = currentCandidates;
+                    return materialized;
+                },
+                async (snapshot, decision, token) =>
+                {
+                    var current = snapshot.State as CompositePlanBuild;
+                    if (current == null || decision?.Candidate == null ||
+                        !resolvedByLookup.TryGetValue(decision.Candidate.LookupId ?? string.Empty, out var selected) ||
+                        selected.SourceEpisodes == null || selected.SourceEpisodes.Count == 0 ||
+                        !string.Equals(decision.Candidate.ProviderId, providerLock, StringComparison.OrdinalIgnoreCase) ||
+                        !string.Equals(selected.ProviderId, providerLock, StringComparison.OrdinalIgnoreCase))
+                        return new RemainderCommitOutcome();
+                    var origin = ToRemainderOrigin(decision.Kind);
+                    var activeLogicalSeason = GetActiveLogicalSeason(current, season.IndexNumber.GetValueOrDefault());
+                    var evidence = new DanmuRemainderDecisionEvidence
+                    {
+                        DecisionKind = origin,
+                        Stage = decision.Kind == RemainderDecisionKind.Part ? DanmuRemainderDecisionStages.Part :
+                            decision.Kind == RemainderDecisionKind.LogicalSeason ? DanmuRemainderDecisionStages.LogicalSeason : DanmuRemainderDecisionStages.Metadata,
+                        PartNumber = decision.PartNumber, ComparisonYear = snapshot.SuffixFirstYear,
+                        SourceYear = selected.Metadata?.Year ?? selected.Candidate.SourceMetadata?.Year ?? selected.Candidate.Year,
+                        LocalEpisodeCount = snapshot.UniqueSuffixItemIds.Count, VerifiedSourceEpisodeCount = selected.SourceEpisodes.Count,
+                        LogicalSeasonNumber = decision.NextLogicalSeasonNumber, ActiveLogicalSeasonNumber = activeLogicalSeason,
+                        FinalScore = decision.FinalScore, SimilarCandidateCount = decision.SimilarCandidateCount,
+                        MatchingTupleCount = decision.MatchingTupleCount, AuthoritativeParentTitle = decision.AuthoritativeParentTitle,
+                        ParentTitleScore = decision.Kind == RemainderDecisionKind.LogicalSeason ? selected.Candidate.ParentTitleScore : (double?)null,
+                        SeasonNumberScore = decision.Kind == RemainderDecisionKind.LogicalSeason ? selected.Candidate.KeywordScore : (double?)null,
+                        YearScore = decision.Kind == RemainderDecisionKind.LogicalSeason ? selected.Candidate.YearScore : (double?)null,
+                        ProviderLock = providerLock,
+                        StableProviderId = selected.Candidate.Site, StableMediaId = selected.MediaId,
+                        RunStartItemId = snapshot.UniqueSuffixItemIds[0], RunItemIds = snapshot.UniqueSuffixItemIds.ToList(),
+                        PlanGeneration = result.PlanGeneration,
+                        EpisodeCountMismatchWarning = decision.Kind == RemainderDecisionKind.MetadataCountWarning,
+                        VerifiedSourceEpisodes = selected.SourceEpisodes.Select(item => new CompositeSeasonSourceEpisode { EpisodeId = item.EpisodeId,
+                            CommentId = item.CommentId, EpisodeNumber = item.EpisodeNumber, SourceOrdinal = item.SourceOrdinal }).ToList(),
+                    };
+                    var evidenceToken = CandidateEvidence.RegisterRemainder(season.Id.ToString(), selected.Candidate.Site,
+                        selected.Candidate.Id, selected.Candidate.MatchScore,
+                        SourceMetadata.MergeDetailWithSnapshot(selected.Metadata, selected.Candidate.SourceMetadata), evidence);
+                    if (string.IsNullOrWhiteSpace(evidenceToken)) return new RemainderCommitOutcome();
+                    var selections = current.Selections.Concat(new[] { new DanmuCompositeSeasonSelection
+                    {
+                        MappingProtocolVersion = DanmuMappingProtocol.CurrentVersion,
+                        AlignmentIntent = DanmuCompositeAlignmentIntentWire.ExplicitAnchor,
+                        PlanGeneration = result.PlanGeneration, LocalStartEpisodeItemId = snapshot.UniqueSuffixItemIds[0],
+                        RequestedEpisodeCount = snapshot.UniqueSuffixItemIds.Count, Site = selected.Candidate.Site, CandidateId = selected.Candidate.Id,
+                        SourceStartEpisodeId = selected.SourceEpisodes[0].EpisodeId,
+                        SourceStartEpisodeNumber = selected.SourceEpisodes[0].EpisodeNumber ?? 0,
+                        MatchOrigin = origin, SelectionEvidenceToken = evidenceToken, ServerRemainderDecision = evidence,
+                    }}).ToList();
+                    var next = await BuildCompositePlanAsync(season, selections, false, current.ExcludedItemIds, token).ConfigureAwait(false);
+                    var nextSnapshot = CreateRemainderSnapshot(next);
+                    return new RemainderCommitOutcome
+                    {
+                        Committed = next?.Plan != null && nextSnapshot != null,
+                        GenerationCurrent = SeasonPlanGenerations.IsCurrent(season.Id.ToString(), result.PlanGeneration),
+                        NextSnapshot = nextSnapshot,
+                    };
+                }, cancellationToken).ConfigureAwait(false) as CompositePlanBuild;
+            return final ?? build;
+        }
+
+        private static RemainderAuthoritativeSnapshot CreateRemainderSnapshot(CompositePlanBuild build)
+        {
+            if (build?.Plan == null || build.Context == null) return null;
+            var unmatched = build.Plan.UnmatchedRuns ?? new List<CompositeSeasonUnmatchedRun>();
+            if (unmatched.Count == 0)
+            {
+                return new RemainderAuthoritativeSnapshot
+                {
+                    State = build, TotalUnmatchedItemCount = 0,
+                    Mappings = ToMappingSnapshots(build.Plan.Mappings).ToList(),
+                };
+            }
+            if (!RemainderProgressGuard.TryGetUniqueMaximalSuffix(build.Context.LocalEpisodes.Select(item => item.ItemId),
+                    unmatched.Select(run => run.Episodes.Select(episode => episode.ItemId)), out var suffix))
+            {
+                // The build itself remains authoritative. A non-suffix gap only
+                // stops a later recursion round; it must not roll back a just
+                // accepted explicit-anchor selection that made progress.
+                return new RemainderAuthoritativeSnapshot
+                {
+                    State = build, TotalUnmatchedItemCount = unmatched.Sum(run => run.Episodes.Count),
+                    Mappings = ToMappingSnapshots(build.Plan.Mappings).ToList(),
+                };
+            }
+            var first = build.Context.Episodes.FirstOrDefault(episode =>
+                string.Equals(episode.Id.ToString(), suffix[0], StringComparison.OrdinalIgnoreCase));
+            return new RemainderAuthoritativeSnapshot
+            {
+                State = build, UniqueSuffixItemIds = suffix, SuffixFirstYear = first?.ProductionYear,
+                TotalUnmatchedItemCount = unmatched.Sum(run => run.Episodes.Count),
+                Mappings = ToMappingSnapshots(build.Plan.Mappings).ToList(),
+            };
+        }
+
+        private static int GetActiveLogicalSeason(CompositePlanBuild build, int initialSeason)
+        {
+            var active = initialSeason;
+            foreach (var selection in build?.Selections ?? new List<DanmuCompositeSeasonSelection>())
+            {
+                var decision = selection?.ServerRemainderDecision;
+                if (decision != null && string.Equals(decision.Stage, DanmuRemainderDecisionStages.LogicalSeason,
+                        StringComparison.Ordinal) && decision.LogicalSeasonNumber.HasValue)
+                    active = decision.LogicalSeasonNumber.Value;
+            }
+            return active;
+        }
+
+        private sealed class RemainderResolvedCandidate
+        {
+            public DanmuMatchCandidate Candidate { get; set; }
+            public RemainderCandidate DecisionCandidate { get; set; }
+            public List<CompositeSeasonSourceEpisode> SourceEpisodes { get; set; }
+            public string StableId { get; set; } = string.Empty;
+            public string ProviderId { get; set; } = string.Empty;
+            public string MediaId { get; set; } = string.Empty;
+            public SourceMetadata Metadata { get; set; }
+        }
+
+        private static PartTitleParseStatus GetResolvedPartStatus(IEnumerable<string> titles, string parentTitle, out int partNumber)
+        {
+            partNumber = 0;
+            var values = (titles ?? Enumerable.Empty<string>()).Select(title =>
+            {
+                if (string.IsNullOrWhiteSpace(title)) return Tuple.Create(PartTitleParseStatus.Absent, 0);
+                var status = PartTitleParser.AnalyzeForFamily(title, parentTitle, out var number);
+                return Tuple.Create(status, number);
+            }).ToList();
+            if (values.Any(value => value.Item1 == PartTitleParseStatus.Malformed)) return PartTitleParseStatus.Malformed;
+            var valid = values.Where(value => value.Item1 == PartTitleParseStatus.Valid).Select(value => value.Item2).Distinct().ToList();
+            if (valid.Count > 1) return PartTitleParseStatus.Malformed;
+            if (valid.Count == 1) { partNumber = valid[0]; return PartTitleParseStatus.Valid; }
+            return PartTitleParseStatus.Absent;
+        }
+
+        private static IEnumerable<RemainderProgressGuard.MappingSnapshot> ToMappingSnapshots(
+            IEnumerable<CompositeSeasonEpisodeMapping> mappings)
+        {
+            return (mappings ?? Enumerable.Empty<CompositeSeasonEpisodeMapping>()).Select(mapping => new RemainderProgressGuard.MappingSnapshot
+            {
+                LocalId = mapping.LocalEpisodeItemId, ProviderId = mapping.Source?.ProviderId,
+                MediaId = mapping.Source?.MediaId, LookupId = mapping.Source?.MediaLookupId,
+                SourceEpisodeId = mapping.SourceEpisodeId, CommentId = mapping.CommentId,
+                SourceEpisodeNumber = mapping.SourceEpisodeNumber,
+                Origin = mapping.Origin, Token = mapping.SelectionEvidenceToken,
+            }).ToList();
+        }
+
+        private static bool SourceEpisodesEqual(IList<CompositeSeasonSourceEpisode> current, IList<CompositeSeasonSourceEpisode> expected)
+        {
+            return current != null && expected != null && current.Count == expected.Count && current.Select((item, index) =>
+                string.Equals(item.EpisodeId, expected[index].EpisodeId, StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(item.CommentId, expected[index].CommentId, StringComparison.OrdinalIgnoreCase) &&
+                item.EpisodeNumber == expected[index].EpisodeNumber && item.SourceOrdinal == expected[index].SourceOrdinal).All(value => value);
+        }
+
+        private async Task<RemainderResolvedCandidate> ResolveRemainderCandidateAsync(Season season,
+            DanmuMatchCandidate candidate, IDictionary<string, RemainderResolvedCandidate> cache,
+            string expectedProviderId, CancellationToken cancellationToken)
+        {
+            if (candidate == null || string.IsNullOrWhiteSpace(candidate.Site) || string.IsNullOrWhiteSpace(candidate.Id)) return null;
+            if (!string.IsNullOrWhiteSpace(expectedProviderId) && !string.Equals(candidate.Site, expectedProviderId,
+                    StringComparison.OrdinalIgnoreCase)) return null;
+            var lookup = candidate.Site + "\u001f" + candidate.Id;
+            if (cache.TryGetValue(lookup, out var cached)) return cached == null ? null : ProjectRemainderCandidate(candidate, lookup, cached);
+            var scraper = _scraperManager.All().FirstOrDefault(item => string.Equals(item.ProviderId, candidate.Site, StringComparison.OrdinalIgnoreCase));
+            if (scraper == null) { cache[lookup] = null; return null; }
+            var resolution = await BoundedSearchPolicy.Shared.ExecuteAsync(scraper.ProviderId,
+                ignored => scraper.GetMedia(season, candidate.Id), cancellationToken).ConfigureAwait(false);
+            if (resolution.Status != BoundedSearchExecutionStatus.Completed || resolution.Result == null) { cache[lookup] = null; return null; }
+            var sourceEpisodes = CompositeSeasonMatchService.GetSourceEpisodes(resolution.Result);
+            if (sourceEpisodes.Count == 0 || sourceEpisodes.Any(item => string.IsNullOrWhiteSpace(item.EpisodeId) || string.IsNullOrWhiteSpace(item.CommentId)) ||
+                sourceEpisodes.Select(item => item.EpisodeId).Distinct(StringComparer.OrdinalIgnoreCase).Count() != sourceEpisodes.Count ||
+                sourceEpisodes.Select(item => item.CommentId).Distinct(StringComparer.OrdinalIgnoreCase).Count() != sourceEpisodes.Count) { cache[lookup] = null; return null; }
+            var source = CompositeSeasonMatchService.GetSource(scraper.ProviderId, resolution.Result, candidate.Id);
+            if (source == null || !source.IsValid) { cache[lookup] = null; return null; }
+            if (!string.IsNullOrWhiteSpace(expectedProviderId) && !string.Equals(source.ProviderId, expectedProviderId,
+                    StringComparison.OrdinalIgnoreCase)) { cache[lookup] = null; return null; }
+            var stableId = source.ProviderId + "\u001f" + source.MediaId;
+            var resolvedMetadata = CompositeSeasonMatchService.GetSourceMetadata(resolution.Result);
+            var resolved = new RemainderResolvedCandidate { SourceEpisodes = sourceEpisodes,
+                StableId = stableId, ProviderId = source.ProviderId, MediaId = source.MediaId, Metadata = resolvedMetadata };
+            cache[lookup] = resolved; return ProjectRemainderCandidate(candidate, lookup, resolved);
+        }
+
+        private static RemainderResolvedCandidate ProjectRemainderCandidate(DanmuMatchCandidate candidate, string lookup,
+            RemainderResolvedCandidate resolution)
+        {
+            return new RemainderResolvedCandidate
+            {
+                Candidate = candidate, SourceEpisodes = resolution.SourceEpisodes, StableId = resolution.StableId, ProviderId = resolution.ProviderId,
+                MediaId = resolution.MediaId, Metadata = resolution.Metadata,
+                DecisionCandidate = new RemainderCandidate { ProviderId = resolution.ProviderId, StableId = resolution.StableId,
+                    VerifiedEpisodeCount = resolution.SourceEpisodes.Count, DetailsComplete = true,
+                    Year = resolution.Metadata?.Year ?? candidate.SourceMetadata?.Year ?? candidate.Year,
+                    LogicalSeasonScore = candidate.Score, LookupId = lookup,
+                    Titles = new[] { candidate.Name, candidate.SourceMetadata?.Title, resolution.Metadata?.Title }
+                        .Concat(candidate.ServerTitleAliases ?? new List<string>()).ToList() },
+            };
+        }
+
+        private static string ToRemainderOrigin(RemainderDecisionKind kind) => kind == RemainderDecisionKind.Part ? DanmuMatchOrigin.RemainderPart :
+            kind == RemainderDecisionKind.MetadataCountWarning ? DanmuMatchOrigin.RemainderMetadataCountWarning :
+            kind == RemainderDecisionKind.LogicalSeason ? DanmuMatchOrigin.RemainderLogicalSeason : DanmuMatchOrigin.RemainderMetadata;
 
         private static bool IsRematch(DanmuParams request)
         {
@@ -3036,6 +3389,14 @@ namespace Emby.Plugin.Danmu.Core.Controllers
             build.StructureFingerprint = context.StructureFingerprint;
             var local = context.LocalEpisodes;
             var mappings = new List<CompositeSeasonEpisodeMapping>();
+            var usedRemainderLookups = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var usedRemainderStableIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            string firstResolvedProviderId = null;
+            var hasInitialSelection = false;
+            // A logical remainder must begin at the actual local Season
+            // ordinal; leaving this null would let its first evidence choose
+            // an arbitrary predecessor.
+            int? activeLogicalSeason = season.IndexNumber.GetValueOrDefault();
             var hasVerifiedSourceEpisodeSurplus = false;
             var effectiveExclusions = MergeEpisodeExclusions(excludedLocalEpisodeItemIds, null);
             var canonicalSelections = (selections ?? Enumerable.Empty<DanmuCompositeSeasonSelection>())
@@ -3098,6 +3459,40 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                     build.Error = "Selected candidate evidence expired or belongs to another Season.";
                     return build;
                 }
+                selection.ServerRemainderDecision = selectionEvidence.RemainderDecision?.Clone();
+                if (selection.ServerRemainderDecision != null &&
+                    (!selection.ServerRemainderDecision.IsValid() ||
+                     !string.Equals(selection.MatchOrigin, selection.ServerRemainderDecision.DecisionKind, StringComparison.Ordinal) ||
+                     selection.PlanGeneration != selection.ServerRemainderDecision.PlanGeneration ||
+                     !string.Equals(selection.LocalStartEpisodeItemId, selection.ServerRemainderDecision.RunStartItemId, StringComparison.OrdinalIgnoreCase) ||
+                     selection.RequestedEpisodeCount != selection.ServerRemainderDecision.LocalEpisodeCount ||
+                     !selection.ServerRemainderDecision.RunItemIds.All(item => local.Any(localItem => string.Equals(localItem.ItemId, item, StringComparison.OrdinalIgnoreCase)))))
+                {
+                    build.Error = "Remainder selection evidence no longer matches the target run.";
+                    return build;
+                }
+                if (selection.ServerRemainderDecision != null &&
+                    (!RemainderProgressGuard.TryGetUniqueMaximalSuffix(local.Select(item => item.ItemId),
+                         plan.UnmatchedRuns.Select(group => group.Episodes.Select(episode => episode.ItemId)), out var authoritativeRun) ||
+                     !authoritativeRun.SequenceEqual(selection.ServerRemainderDecision.RunItemIds, StringComparer.OrdinalIgnoreCase)))
+                {
+                    build.Error = "Remainder target is no longer the unique trailing suffix.";
+                    return build;
+                }
+                var authoritativeRemainderFirst = selection.ServerRemainderDecision == null ? null : context.Episodes.FirstOrDefault(episode =>
+                    string.Equals(episode.Id.ToString(), selection.ServerRemainderDecision.RunItemIds[0], StringComparison.OrdinalIgnoreCase));
+                var authoritativeParentTitle = (season.GetParent() as Series)?.Name ?? string.Empty;
+                if (selection.ServerRemainderDecision != null &&
+                    ((string.Equals(selection.ServerRemainderDecision.DecisionKind, DanmuRemainderDecisionKinds.Metadata, StringComparison.Ordinal) ||
+                      string.Equals(selection.ServerRemainderDecision.DecisionKind, DanmuRemainderDecisionKinds.MetadataCountWarning, StringComparison.Ordinal) ||
+                      string.Equals(selection.ServerRemainderDecision.DecisionKind, DanmuRemainderDecisionKinds.LogicalSeason, StringComparison.Ordinal)) &&
+                     authoritativeRemainderFirst?.ProductionYear != selection.ServerRemainderDecision.ComparisonYear ||
+                     (string.Equals(selection.ServerRemainderDecision.DecisionKind, DanmuRemainderDecisionKinds.LogicalSeason, StringComparison.Ordinal) &&
+                      !string.Equals(DanmuMatchScorer.Normalize(authoritativeParentTitle), selection.ServerRemainderDecision.AuthoritativeParentTitle, StringComparison.Ordinal))))
+                {
+                    build.Error = "Remainder comparison facts are stale.";
+                    return build;
+                }
 
                 ScraperMedia media;
                 try
@@ -3127,6 +3522,50 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 var sourceEpisodes = CompositeSeasonMatchService.GetSourceEpisodes(media);
                 var requestSource = CompositeSeasonMatchService.GetSource(
                     scraper.ProviderId, media, selection.CandidateId);
+                if (requestSource == null || !requestSource.IsValid)
+                {
+                    build.Error = "The selected source could not be verified.";
+                    return build;
+                }
+                if (!hasInitialSelection)
+                {
+                    // A recursive selection cannot establish its own lock. The
+                    // first ordinary, server-resolved segment is the only
+                    // operation authority for all later remainder evidence.
+                    if (selection.ServerRemainderDecision != null)
+                    {
+                        build.Error = "Remainder evidence has no authoritative first segment.";
+                        return build;
+                    }
+                    firstResolvedProviderId = requestSource.ProviderId;
+                    hasInitialSelection = true;
+                }
+                if (!usedRemainderLookups.Add(selection.Site + "\u001f" + selection.CandidateId) ||
+                    !usedRemainderStableIds.Add(requestSource.ProviderId + "\u001f" + requestSource.MediaId))
+                {
+                    build.Error = "Composite selections must not replay a source.";
+                    return build;
+                }
+                if (selection.ServerRemainderDecision != null &&
+                    (!string.Equals(firstResolvedProviderId, selection.ServerRemainderDecision.ProviderLock, StringComparison.OrdinalIgnoreCase) ||
+                     !string.Equals(selection.Site, firstResolvedProviderId, StringComparison.OrdinalIgnoreCase) ||
+                     !string.Equals(requestSource.ProviderId, firstResolvedProviderId, StringComparison.OrdinalIgnoreCase) ||
+                     !string.Equals(requestSource.ProviderId, selection.ServerRemainderDecision.StableProviderId, StringComparison.OrdinalIgnoreCase) ||
+                     !string.Equals(requestSource.MediaId, selection.ServerRemainderDecision.StableMediaId, StringComparison.OrdinalIgnoreCase) ||
+                     sourceEpisodes.Count != selection.ServerRemainderDecision.VerifiedSourceEpisodeCount ||
+                     !SourceEpisodesEqual(sourceEpisodes, selection.ServerRemainderDecision.VerifiedSourceEpisodes) ||
+                     selection.ServerRemainderDecision.ActiveLogicalSeasonNumber != activeLogicalSeason.GetValueOrDefault() ||
+                     ((string.Equals(selection.ServerRemainderDecision.DecisionKind, DanmuRemainderDecisionKinds.Metadata, StringComparison.Ordinal) ||
+                       string.Equals(selection.ServerRemainderDecision.DecisionKind, DanmuRemainderDecisionKinds.MetadataCountWarning, StringComparison.Ordinal) ||
+                       string.Equals(selection.ServerRemainderDecision.DecisionKind, DanmuRemainderDecisionKinds.LogicalSeason, StringComparison.Ordinal)) &&
+                      SourceMetadata.MergeDetailWithSnapshot(CompositeSeasonMatchService.GetSourceMetadata(media), selectionEvidence.SourceMetadata)?.Year != selection.ServerRemainderDecision.SourceYear)))
+                {
+                    build.Error = "Remainder source inventory or stable identity changed.";
+                    return build;
+                }
+                if (selection.ServerRemainderDecision != null && string.Equals(selection.ServerRemainderDecision.DecisionKind,
+                        DanmuRemainderDecisionKinds.LogicalSeason, StringComparison.Ordinal))
+                    activeLogicalSeason = selection.ServerRemainderDecision.LogicalSeasonNumber;
                 foreach (var sourceEpisodeName in CompositeSeasonMatchService.GetSourceEpisodeNames(
                              media, requestSource))
                 {
@@ -3236,6 +3675,7 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 ServerSourceEpisodes = CloneCompositeSourceEpisodes(selection.ServerSourceEpisodes),
                 ServerConsideredLocalEpisodeItemIds =
                     (selection.ServerConsideredLocalEpisodeItemIds ?? new List<string>()).ToList(),
+                ServerRemainderDecision = selection.ServerRemainderDecision?.Clone(),
             };
         }
 
@@ -3297,6 +3737,7 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                         StringComparison.OrdinalIgnoreCase)) ??
                     (matching.Count == 1 ? matching[0] : null);
                 group.AlignmentIntent = selection?.AlignmentIntent ?? string.Empty;
+                group.EpisodeCountMismatchWarning = selection?.ServerRemainderDecision?.EpisodeCountMismatchWarning == true;
             }
         }
 

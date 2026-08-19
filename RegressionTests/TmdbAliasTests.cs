@@ -41,6 +41,7 @@ namespace Emby.Plugin.Danmu.RegressionTests
             ExercisesTmdbClientFallbackCachingAndCancellation();
             PreservesOrdinaryScoresForContradictoryEvidence();
             ScoresSeasonEvidenceWithExactIndependentChannels();
+            ScoresContinuousSeasonAndParentTitleEvidence();
             ScoresLiveOnePunchManThirdSeasonAliasFallback();
             ScoresBookwormFourthSeasonDespiteAuthoritativeCountDifference();
             ScoresOnlyValidatedShortParentAliasExtensions();
@@ -179,8 +180,8 @@ namespace Emby.Plugin.Danmu.RegressionTests
                    TmdbAliasClient.GetJapaneseOriginalPrimaryTitle(englishDetails, false) == "本好きの下剋上" &&
                    TmdbAliasClient.GetLocalizedPrimaryTitle(japaneseDetails, false) == "本好きの下剋上",
                 "fallback rounds must use en-US primary first, then Japanese original or ja-JP primary data");
-            Assert(TmdbAliasClient.UserAgent == "DanmuPlus/2.0.5r1",
-                "TMDB requests must identify the 2.0.5r1 build");
+            Assert(TmdbAliasClient.UserAgent == "DanmuPlus/2.0.7r1",
+                "TMDB requests must identify the 2.0.7r1 build");
         }
 
         private static void ExercisesTmdbClientFallbackCachingAndCancellation()
@@ -351,9 +352,8 @@ namespace Emby.Plugin.Danmu.RegressionTests
             Assert(correct.Score == 1 && bare.Score == 0.60 && second.Score == 0.60 &&
                    youkuSecond.Score == 0.60,
                 "Season weights must be parent 60, whole-remainder Season 20, exact year 20, and episode count 0");
-            Assert(extraThirdKeyword.KeywordScore > 0 && extraThirdKeyword.KeywordScore < 1 &&
-                   extraThirdKeyword.Score < 1,
-                "an equal numeric Season marker must not erase additional remainder keywords or receive the full 20-point Season score");
+            Assert(extraThirdKeyword.KeywordScore == 0 && extraThirdKeyword.Score == 0.80,
+                "a pure generic target must compare as empty against additional descriptive remainder text");
 
             var splitChannels = ScoreOnePunchMan("split", "一拳超人", 2025, 12, "第三季");
             Assert(splitChannels.Score == 0.80 && splitChannels.ParentTitleScore == 1 &&
@@ -441,6 +441,129 @@ namespace Emby.Plugin.Danmu.RegressionTests
             Assert(wrongTargetVariant.KeywordScore == targetVariantBaseline.KeywordScore &&
                    wrongTargetVariant.Score == targetVariantBaseline.Score,
                 "a target Season-title variant with an explicit number conflicting with expected S3 must be excluded from similarity scoring");
+        }
+
+        private static void ScoresContinuousSeasonAndParentTitleEvidence()
+        {
+            const string tangParent = "唐朝诡事录";
+            var prefixInsertion = ScoreNamedSeason(
+                "prefix-insertion", tangParent + "之西行", tangParent, "第2季：西行", 2);
+            var exact = ScoreNamedSeason(
+                "exact", tangParent + "西行", tangParent, "第2季：西行", 2);
+            var substitution = ScoreNamedSeason(
+                "substitution", tangParent + "东行", tangParent, "第2季：西行", 2);
+            var reordered = ScoreNamedSeason(
+                "reordered", tangParent + "行西", tangParent, "第2季：西行", 2);
+            var disjoint = ScoreNamedSeason(
+                "disjoint", tangParent + "北斗", tangParent, "第2季：西行", 2);
+            var pureMarker = ScoreNamedSeason(
+                "pure-marker", tangParent + "第2季", tangParent, "第2季：西行", 2);
+            var wrongMarker = ScoreNamedSeason(
+                "wrong-marker", tangParent + "第3季：西行", tangParent, "第2季：西行", 2);
+
+            Assert(prefixInsertion.ParentTitleScore == 1 &&
+                   prefixInsertion.KeywordScore == 0.6667 &&
+                   prefixInsertion.MatchScore == 0.9333,
+                "西行 / 之西行 must receive proportional 2/3 Season evidence without deleting 之");
+            Assert(exact.KeywordScore == 1 && exact.MatchScore == 1 &&
+                   substitution.KeywordScore == 0.5 && substitution.MatchScore == 0.9 &&
+                   DanmuMatchScorer.SelectAutoCandidate(new[] { substitution })?.Id == "substitution",
+                "exact named Seasons must retain 20 points and a unique 90-point substitution must remain auto-selectable");
+            Assert(reordered.KeywordScore == 0 && disjoint.KeywordScore == 0 &&
+                   reordered.MatchScore == 0.8 && disjoint.MatchScore == 0.8,
+                "reordered and disjoint two-character Season names must receive zero edit similarity");
+            Assert(pureMarker.KeywordScore == 0,
+                "a pure-marker/named pair must receive zero Season evidence, actual=" + pureMarker.KeywordScore);
+            Assert(wrongMarker.KeywordScore == 0,
+                "a conflicting explicit Season marker must receive zero Season evidence, actual=" + wrongMarker.KeywordScore);
+
+            var correctMarkersDifferentNames = DanmuMatchScorer.Score(new ScraperSearchInfo
+            {
+                Id = "correct-markers-different-names",
+                Name = tangParent + " Season 2 东行",
+                Category = "动漫",
+                Year = 2024,
+            }, "dandan", "DandanPlay", 0, tangParent, "第2季：西行", 2024, 0,
+                null, null, false, 2);
+            Assert(correctMarkersDifferentNames.KeywordScore == 0.5 &&
+                   correctMarkersDifferentNames.MatchScore == 0.9,
+                "shared correct marker text must be removed before comparing 西行 / 东行");
+
+            var firstSeasonBare = DanmuMatchScorer.Score(new ScraperSearchInfo
+            {
+                Id = "first-season-empty",
+                Name = tangParent,
+                Category = "动漫",
+                Year = 2024,
+            }, "dandan", "DandanPlay", 0, tangParent, "第一季", 2024, 0,
+                null, null, false, 1);
+            Assert(firstSeasonBare.KeywordScore == 1 && firstSeasonBare.MatchScore == 1,
+                "the established Season 1 empty/empty residual exception must remain full credit");
+
+            const string localBookworm = "爱书的下克上：为了成为图书管理员不择手段！";
+            const string sourceBookworm = "小书痴的下克上 〜为了成为图书管理员而不择手段〜";
+            var bookworm = DanmuMatchScorer.Score(new ScraperSearchInfo
+            {
+                Id = "bookworm-continuous-parent",
+                Name = sourceBookworm,
+                Category = "动漫",
+            }, "dandan", "DandanPlay", 0, localBookworm, "完全不同", 0, 0);
+            var emptyParent = DanmuMatchScorer.Score(new ScraperSearchInfo
+            {
+                Id = "empty-parent",
+                Name = sourceBookworm,
+                Category = "动漫",
+            }, "dandan", "DandanPlay", 0, string.Empty, "完全不同", 0, 0);
+            var emptyParentExactSeason = DanmuMatchScorer.Score(new ScraperSearchInfo
+            {
+                Id = "empty-parent-exact-season",
+                Name = "西行",
+                Category = "动漫",
+                Year = 2024,
+            }, "dandan", "DandanPlay", 0, string.Empty, "西行", 2024, 0);
+            var disjointParent = DanmuMatchScorer.Score(new ScraperSearchInfo
+            {
+                Id = "disjoint-parent",
+                Name = "北斗神拳",
+                Category = "动漫",
+            }, "dandan", "DandanPlay", 0, "唐朝诡事录", "完全不同", 0, 0);
+            Assert(DanmuMatchScorer.Normalize(localBookworm).Length == 19 &&
+                   DanmuMatchScorer.Normalize(sourceBookworm).Length == 21 &&
+                   bookworm.ParentTitleScore == 0.8571,
+                "the normalized Bookworm parent pair must have distance 3/max length 21 and score 0.8571");
+            Assert(emptyParent.ParentTitleScore == 0 && disjointParent.ParentTitleScore == 0,
+                "empty and disjoint parent-title endpoints must remain zero");
+            Assert(emptyParentExactSeason.ParentTitleScore == 0 &&
+                   emptyParentExactSeason.KeywordScore == 1 &&
+                   emptyParentExactSeason.MatchScore == 0.4,
+                "an empty parent set must not discard the source channel's existing Season evidence");
+
+            var movie = DanmuMatchScorer.ScoreMovie(new ScraperSearchInfo
+            {
+                Id = "movie-metric-isolation",
+                Name = "行西",
+                Category = "电影",
+                Year = 2024,
+            }, "dandan", "DandanPlay", 0, "西行", 2024);
+            Assert(movie.TitleScore == 0 && movie.MatchScore == 0.18,
+                "Movie scoring must retain the existing short-string Jaro-Winkler result and 82/18 weights");
+        }
+
+        private static DanmuMatchCandidate ScoreNamedSeason(
+            string id,
+            string sourceTitle,
+            string parentTitle,
+            string seasonTitle,
+            int expectedSeasonNumber)
+        {
+            return DanmuMatchScorer.Score(new ScraperSearchInfo
+            {
+                Id = id,
+                Name = sourceTitle,
+                Category = "动漫",
+                Year = 2024,
+            }, "dandan", "DandanPlay", 0, parentTitle, seasonTitle, 2024, 0,
+                null, null, false, expectedSeasonNumber);
         }
 
         private static DanmuMatchCandidate ScoreOnePunchMan(

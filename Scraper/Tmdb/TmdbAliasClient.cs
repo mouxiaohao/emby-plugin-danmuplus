@@ -113,7 +113,7 @@ namespace Emby.Plugin.Danmu.Scraper.Tmdb
     {
         private const string ApiBaseUrl = "https://api.themoviedb.org/3";
         private const int RequestTimeoutMs = 10000;
-        internal const string UserAgent = "DanmuPlus/2.0.5r1";
+        internal const string UserAgent = "DanmuPlus/2.0.7r1";
         private const int MaximumCachedResponses = 128;
         private static readonly TimeSpan SuccessfulCacheLifetime = TimeSpan.FromHours(24);
         private static readonly TimeSpan EmptyCacheLifetime = TimeSpan.FromHours(1);

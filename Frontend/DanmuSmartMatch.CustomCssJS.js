@@ -1,19 +1,17 @@
 ﻿/*
  * Emby.CustomCssJS: 电视剧/季/集/电影智能匹配并一键下载弹幕
- * 适用于 Emby 4.9.x + 本方案配套的 Emby.Plugin.Danmu 2.0.5r1 DLL
+ * 适用于 Emby 4.9.x + 本方案配套的 Emby.Plugin.Danmu 2.0.7r1 DLL
  */
 (function () {
     "use strict";
 
-    // V28 refreshes the installed UI together with the V22 mapping contract.
-    var INSTALL_FLAG = "__embyDanmuSmartMenuV28";
+    // V33 conditions the server-authoritative ignored-scope notice while retaining V22.
+    var INSTALL_FLAG = "__embyDanmuSmartMenuV33";
     var MAPPING_PROTOCOL_VERSION = 22;
     var DEFAULT_ZERO_OFFSET = "DefaultZeroOffset";
     var EXPLICIT_ANCHOR = "ExplicitAnchor";
     var BUTTON_ID = "danmu-bulk-download";
     var activeDialogs = [];
-    var dialogHistoryGeneration = 0;
-    var ignoredDialogHistoryPops = 0;
 
     if (window[INSTALL_FLAG]) {
         return;
@@ -393,13 +391,13 @@
         var style = document.createElement("style");
         style.id = "danmu-smart-style";
         style.textContent = [
-            ".danmuSmartOverlay{position:fixed;inset:0;z-index:100001;background:rgba(0,0,0,.7);display:flex;align-items:center;justify-content:center;padding:1rem}",
-            ".danmuSmartCard{width:min(54rem,100%);max-height:min(48rem,92vh);display:flex;flex-direction:column;background:#202020;color:#fff;border-radius:.55rem;box-shadow:0 10px 40px rgba(0,0,0,.6);overflow:hidden}",
+            ".danmuSmartOverlay{position:fixed;inset:0;z-index:100001;background:rgba(0,0,0,.7);display:flex;align-items:center;justify-content:center;padding:1rem;overflow:hidden;overscroll-behavior-y:contain}",
+            ".danmuSmartCard{width:min(54rem,100%);max-height:min(48rem,92vh);display:flex;flex-direction:column;background:#202020;color:#fff;border-radius:.55rem;box-shadow:0 10px 40px rgba(0,0,0,.6);overflow:hidden;overscroll-behavior-y:contain}",
             ".danmuSmartHeader{display:flex;align-items:center;gap:1rem;padding:1rem 1.2rem;border-bottom:1px solid rgba(255,255,255,.14)}",
             ".danmuSmartTitle{font-size:1.25rem;font-weight:600;flex:1}",
             ".danmuSmartClose,.danmuSmartButton{border:0;border-radius:.35rem;color:#fff;cursor:pointer}",
             ".danmuSmartClose{background:transparent;font-size:1.7rem;padding:.1rem .45rem}",
-            ".danmuSmartBody{padding:1rem 1.2rem;overflow:auto;line-height:1.5}",
+            ".danmuSmartBody{padding:1rem 1.2rem;flex:1 1 auto;min-height:0;overflow:auto;overscroll-behavior-y:contain;line-height:1.5}",
             ".danmuSmartFooter{display:flex;align-items:center;justify-content:flex-end;gap:.7rem;padding:.9rem 1.2rem;border-top:1px solid rgba(255,255,255,.14)}",
             ".danmuSmartButton{background:#555;padding:.65rem 1rem;font-size:.95rem}",
             ".danmuSmartButton.primary{background:#00a4dc}.danmuSmartButton.danger{background:#c62828}.danmuSmartButton:disabled{opacity:.5;cursor:default}",
@@ -428,6 +426,50 @@
         document.head.appendChild(style);
     }
 
+    function topmostCommandDialog() {
+        for (var index = activeDialogs.length - 1; index >= 0; index--) {
+            var dialog = activeDialogs[index];
+            if (dialog.overlay && dialog.overlay.isConnected) {
+                return dialog.backMode === "android-command" ? dialog : null;
+            }
+        }
+        return null;
+    }
+
+    function commandBackListener(event) {
+        if (!event || !event.detail || event.detail.command !== "back") return;
+        var dialog = topmostCommandDialog();
+        if (!dialog) return;
+        if (!event.defaultPrevented) {
+            if (typeof event.preventDefault !== "function") return;
+            try {
+                event.preventDefault();
+            } catch (_cancelError) {
+                return;
+            }
+        }
+        if (!event.defaultPrevented) return;
+        try {
+            dialog.handleCommandBack();
+        } catch (_handleError) {
+            if (window.console && typeof window.console.error === "function") {
+                window.console.error("[Danmu Smart Match] android-command-handler-failed");
+            }
+        }
+    }
+
+    function hostPopStateListener() {
+        activeDialogs.slice().reverse().forEach(function (dialog) {
+            if (dialog.overlay && dialog.overlay.isConnected &&
+                typeof dialog.disposeFromHostNavigation === "function") {
+                dialog.disposeFromHostNavigation();
+            }
+        });
+    }
+
+    document.addEventListener("command", commandBackListener, true);
+    if (window.addEventListener) window.addEventListener("popstate", hostPopStateListener);
+
     function openDialog(title) {
         ensureStyles();
         var overlay = document.createElement("div");
@@ -454,8 +496,7 @@
         document.body.appendChild(overlay);
         var disposed = false;
         var backHandler = null;
-        var historyGuardActive = false;
-        var historyToken = "danmu-smart-" + (++dialogHistoryGeneration);
+        var backMode = isAndroidCommandEnvironment(window.navigator) ? "android-command" : "desktop";
         var dialog = {
             overlay: overlay,
             title: heading,
@@ -472,14 +513,17 @@
             candidateDetailGeneration: 0,
             temporaryRangeCandidates: {},
             compositeDraft: { exclusions: {}, removedRuns: {} },
+            navigationContexts: [],
+            presentationAnchors: {},
+            backMode: backMode,
             close: function () {
-                return dialog.closable ? dispose(false) : false;
+                return dialog.closable ? dispose() : false;
             },
-            forceClose: function () { return dispose(false); },
+            forceClose: function () { return dispose(); },
             setBackHandler: function (handler) {
                 backHandler = typeof handler === "function" ? handler : null;
             },
-            handleAndroidBack: function () { return handleBack(false); }
+            handleCommandBack: function () { return handleBack(); }
         };
         function isTopmost() {
             for (var index = activeDialogs.length - 1; index >= 0; index--) {
@@ -495,73 +539,17 @@
                 event.stopPropagation();
             }
         }
-        function hasOwnHistoryGuard() {
-            return Boolean(historyGuardActive && window.history && window.history.state &&
-                window.history.state.__danmuSmartDialog === historyToken);
-        }
-        function installHistoryGuard() {
-            if (disposed || historyGuardActive || !window.history ||
-                typeof window.history.pushState !== "function") {
-                return false;
-            }
-            try {
-                var state = Object.assign({}, window.history.state || {});
-                state.__danmuSmartDialog = historyToken;
-                window.history.pushState(state, "", window.location.href);
-                historyGuardActive = true;
-                return true;
-            } catch (_error) {
-                return false;
-            }
-        }
-        function handleBack(fromHistory) {
+        function handleBack() {
             if (!isTopmost()) return false;
-            if (fromHistory) historyGuardActive = false;
-            if (dialog.androidBackLocked) {
-                if (fromHistory) installHistoryGuard();
-                return true;
-            }
-            if (!dialog.closable) {
-                if (fromHistory) installHistoryGuard();
-                return true;
-            }
+            if (dialog.androidBackLocked) return true;
+            if (!dialog.closable) return true;
             if (backHandler) {
                 backHandler();
-                if (fromHistory) installHistoryGuard();
                 return true;
             }
-            return dispose(Boolean(fromHistory));
+            return dispose();
         }
-        function popStateListener() {
-            if (ignoredDialogHistoryPops > 0 && isTopmost()) {
-                return;
-            }
-            handleBack(true);
-        }
-        function ignoreNextPopState() {
-            ignoredDialogHistoryPops++;
-            var fallbackTimer = 0;
-            function consumeIgnoredPop() {
-                ignoredDialogHistoryPops = Math.max(0, ignoredDialogHistoryPops - 1);
-                if (window.removeEventListener) {
-                    window.removeEventListener("popstate", consumeIgnoredPop);
-                }
-                if (fallbackTimer && window.clearTimeout) window.clearTimeout(fallbackTimer);
-            }
-            if (window.addEventListener) {
-                window.addEventListener("popstate", consumeIgnoredPop);
-                if (window.setTimeout) fallbackTimer = window.setTimeout(consumeIgnoredPop, 1000);
-            } else {
-                ignoredDialogHistoryPops = Math.max(0, ignoredDialogHistoryPops - 1);
-            }
-        }
-        function backButtonListener(event) {
-            if (handleBack(false)) {
-                event.preventDefault();
-                event.stopPropagation();
-            }
-        }
-        function dispose(fromHistory) {
+        function dispose() {
             if (disposed) return false;
             disposed = true;
             cancelDialogSearch(dialog, false);
@@ -569,26 +557,17 @@
                 dialog.restorePendingCompositeRematch();
             }
             dialog.compositeDraft = { exclusions: {}, removedRuns: {} };
+            clearNavigationContexts(dialog);
             document.removeEventListener("keydown", escapeListener);
-            document.removeEventListener("backbutton", backButtonListener);
-            if (window.removeEventListener) window.removeEventListener("popstate", popStateListener);
             var index = activeDialogs.indexOf(dialog);
             if (index >= 0) activeDialogs.splice(index, 1);
             overlay.remove();
-            if (!fromHistory && hasOwnHistoryGuard() &&
-                typeof window.history.back === "function") {
-                historyGuardActive = false;
-                ignoreNextPopState();
-                window.history.back();
-            }
             return true;
         }
         activeDialogs.push(dialog);
+        dialog.disposeFromHostNavigation = function () { return dispose(); };
         close.addEventListener("click", function () { dialog.close(); });
         document.addEventListener("keydown", escapeListener);
-        document.addEventListener("backbutton", backButtonListener);
-        if (window.addEventListener) window.addEventListener("popstate", popStateListener);
-        installHistoryGuard();
         return dialog;
     }
 
@@ -731,25 +710,47 @@
         return ids;
     }
 
-    function scopeSummaryLine(season) {
+    function ignoredScopeCounts(season) {
+        var counts = {
+            parentZero: normalizeIgnoredCount(value(
+                season, "IgnoredParentZeroEpisodeCount", "ignoredParentZeroEpisodeCount", null)),
+            otherSeason: normalizeIgnoredCount(value(
+                season, "IgnoredOtherSeasonEpisodeCount", "ignoredOtherSeasonEpisodeCount", null)),
+            unknownParent: normalizeIgnoredCount(value(
+                season, "IgnoredUnknownParentEpisodeCount", "ignoredUnknownParentEpisodeCount", null)),
+            invalid: normalizeIgnoredCount(value(
+                season, "IgnoredInvalidEpisodeCount", "ignoredInvalidEpisodeCount", null))
+        };
+        counts.total = counts.parentZero + counts.otherSeason + counts.unknownParent + counts.invalid;
+        return counts;
+    }
+
+    function normalizeIgnoredCount(raw) {
+        var rawType = typeof raw;
+        if (rawType !== "number" && rawType !== "string") return 0;
+        if (rawType === "string" && raw.trim() === "") return 0;
+        var count = Number(raw);
+        return isFinite(count) && count > 0 ? Math.floor(count) : 0;
+    }
+
+    function scopeSummaryLine(season, normalizedIgnoredCounts) {
         var displayed = Math.max(0, Number(value(season, "DisplayedEpisodeCount", "displayedEpisodeCount", 0)) || 0);
         var eligible = Math.max(0, Number(value(season, "EligibleEpisodeCount", "eligibleEpisodeCount", 0)) || 0);
-        var parentZero = Math.max(0, Number(value(season, "IgnoredParentZeroEpisodeCount", "ignoredParentZeroEpisodeCount", 0)) || 0);
-        var other = Math.max(0, Number(value(season, "IgnoredOtherSeasonEpisodeCount", "ignoredOtherSeasonEpisodeCount", 0)) || 0);
-        var unknown = Math.max(0, Number(value(season, "IgnoredUnknownParentEpisodeCount", "ignoredUnknownParentEpisodeCount", 0)) || 0);
-        var invalid = Math.max(0, Number(value(season, "IgnoredInvalidEpisodeCount", "ignoredInvalidEpisodeCount", 0)) || 0);
-        var ignored = parentZero + other + unknown + invalid;
+        var counts = normalizedIgnoredCounts || ignoredScopeCounts(season);
+        var ignored = counts.total;
         if (!displayed && !eligible && !ignored) return "";
         var parts = ["显示 " + displayed + " 集", "参与匹配 " + eligible + " 集"];
         if (ignored) {
             var details = [];
-            if (parentZero) details.push("S00 " + parentZero + " 集");
-            if (other) details.push("其他季 " + other + " 集");
-            if (unknown) details.push("季号未知 " + unknown + " 集");
-            if (invalid) details.push("标识无效 " + invalid + " 集");
-            parts.push("只读忽略 " + ignored + " 集（" + details.join("，") + "）");
+            if (counts.parentZero) details.push("S00 " + counts.parentZero + " 集");
+            if (counts.otherSeason) details.push("其他季 " + counts.otherSeason + " 集");
+            if (counts.unknownParent) details.push("季号未知 " + counts.unknownParent + " 集");
+            if (counts.invalid) details.push("标识无效 " + counts.invalid + " 集");
+            parts.push("只读忽略 " + ignored + " 集（" + details.join("，") +
+                "）。忽略项不可选择，也不会进入下载。");
+            return parts.join("；");
         }
-        return parts.join("；");
+        return parts.join("；") + "。";
     }
 
     function nonNegativeCount(raw) {
@@ -1494,6 +1495,12 @@
         return title + (title && year ? "（" + year + "）" : year);
     }
 
+    // This is a server-rebuilt response flag, never a candidate-count or DOM
+    // inference. Both names are accepted only for normal serializer casing.
+    function episodeCountMismatchWarning(group) {
+        return Boolean(value(group, "EpisodeCountMismatchWarning", "episodeCountMismatchWarning", false));
+    }
+
     function sourceEpisodePublicLabel(mapping, fallbackNumber) {
         var verified = boundedText(value(mapping, "SourceDisplayLabel", "sourceDisplayLabel", ""));
         if (verified) return "来源 " + verified;
@@ -1613,6 +1620,7 @@
                         origin: value(group, "MatchOrigin", "matchOrigin", ""),
                         MatchScore: value(group, "MatchScore", "matchScore", null),
                         ScoreOrigin: value(group, "ScoreOrigin", "scoreOrigin", ""),
+                        EpisodeCountMismatchWarning: episodeCountMismatchWarning(group),
                         mappings: [], episodes: episodes, index: sequence });
                     sequence += episodes.length;
                     return;
@@ -1658,13 +1666,15 @@
             if (mappingScore === null) mappingScore = explicitMatchScore(previewGroup);
             var scoreOrigin = value(mapping, "ScoreOrigin", "scoreOrigin", "") ||
                 value(previewGroup, "ScoreOrigin", "scoreOrigin", "");
+            var countWarning = episodeCountMismatchWarning(previewGroup);
             var key = sourceKey(value(mapping, "Source", "source", {})) + "\u001f" + normalizeDecisionCode(mappingOrigin) +
                 "\u001f" + String(mappingScore === null || mappingScore === undefined ? "" : mappingScore) +
-                "\u001f" + normalizeDecisionCode(scoreOrigin);
+                "\u001f" + normalizeDecisionCode(scoreOrigin) + "\u001f" + (countWarning ? "count-warning" : "");
             if (!current || current.key !== key) {
                 current = { kind: "mapped", key: key, source: value(mapping, "Source", "source", {}),
                     origin: mappingOrigin, MatchScore: mappingScore,
                     ScoreOrigin: scoreOrigin,
+                    EpisodeCountMismatchWarning: countWarning,
                     sourceMetadata: value(mapping, "SourceMetadata", "sourceMetadata",
                         value(previewGroup, "SourceMetadata", "sourceMetadata", null)),
                     mappings: [], episodes: [], index: index };
@@ -2064,6 +2074,265 @@
 
     function wait(milliseconds) {
         return new Promise(function (resolve) { window.setTimeout(resolve, milliseconds); });
+    }
+
+    function isAndroidCommandEnvironment(navigatorObject) {
+        try {
+            var userAgentData = navigatorObject && navigatorObject.userAgentData;
+            var platform = userAgentData && userAgentData.platform;
+            if (typeof platform === "string" && platform.trim().toLowerCase() === "android") return true;
+        } catch (_platformError) {
+            // A throwing or malformed identity signal is absent, not Android evidence.
+        }
+        try {
+            var userAgent = navigatorObject && navigatorObject.userAgent;
+            return typeof userAgent === "string" &&
+                /(^|[^a-z])android([^a-z]|$)/i.test(userAgent.trim());
+        } catch (_userAgentError) {
+            return false;
+        }
+    }
+
+    function bodyContains(body, element) {
+        while (element) {
+            if (element === body) return true;
+            element = element.parentElement;
+        }
+        return false;
+    }
+
+    function dialogContainsTrigger(dialog, trigger) {
+        return Boolean(dialog && trigger &&
+            (bodyContains(dialog.body, trigger) || bodyContains(dialog.footer, trigger) ||
+                bodyContains(dialog.overlay, trigger)));
+    }
+
+    function presentationAnchorToken(dialog, kind, identity) {
+        var registry = dialog.presentationAnchors || (dialog.presentationAnchors = {});
+        var key = kind + "\u0000" + String(identity || "");
+        if (!registry[key]) {
+            dialog.presentationAnchorGeneration = (dialog.presentationAnchorGeneration || 0) + 1;
+            registry[key] = "nav-" + dialog.presentationAnchorGeneration.toString(36);
+        }
+        return registry[key];
+    }
+
+    function markPresentationAnchor(dialog, element, kind, identity) {
+        if (!dialog || !element) return element;
+        element.dataset.danmuNavAnchor = presentationAnchorToken(dialog, kind, identity);
+        element.dataset.danmuNavKind = kind;
+        return element;
+    }
+
+    function findPresentationAnchor(body, token) {
+        if (!body || !token) return null;
+        var found = null;
+        function visit(node) {
+            if (found || !node) return;
+            if (node.dataset && node.dataset.danmuNavAnchor === token) {
+                found = node;
+                return;
+            }
+            var children = node.children;
+            var childCount = children ? children.length : 0;
+            for (var index = 0; index < childCount && !found; index++) {
+                visit(children[index]);
+            }
+        }
+        visit(body);
+        return found;
+    }
+
+    function anchorViewportOffset(body, element) {
+        return Number(element && element.offsetTop || 0) - Number(body && body.scrollTop || 0);
+    }
+
+    function enclosingPresentationAnchor(element, kind) {
+        while (element) {
+            if (element.dataset && element.dataset.danmuNavKind === kind) return element;
+            element = element.parentElement;
+        }
+        return null;
+    }
+
+    function presentationRows(body) {
+        var rows = [];
+        function visit(node) {
+            var children = node && node.children;
+            var childCount = children ? children.length : 0;
+            for (var index = 0; index < childCount; index++) {
+                var child = children[index];
+                if (child.dataset && child.dataset.danmuNavKind === "row") rows.push(child);
+                visit(child);
+            }
+        }
+        visit(body);
+        return rows;
+    }
+
+    function parentNavigationSample(dialog, trigger, options) {
+        if (!dialog || !dialog.body) return null;
+        options = options || {};
+        var action = options.action || trigger;
+        var row = options.row || enclosingPresentationAnchor(action, "row") || enclosingPresentationAnchor(trigger, "row");
+        var section = options.section || enclosingPresentationAnchor(row || trigger, "section");
+        var neighbor = options.neighbor || null;
+        if (!neighbor && row) {
+            var rows = presentationRows(dialog.body);
+            var rowIndex = rows.indexOf(row);
+            neighbor = rowIndex > 0 ? rows[rowIndex - 1] :
+                (rowIndex >= 0 && rowIndex + 1 < rows.length ? rows[rowIndex + 1] : null);
+        }
+        var body = dialog.body;
+        function record(element) {
+            return element && bodyContains(body, element) && element.dataset && element.dataset.danmuNavAnchor
+                ? { token: element.dataset.danmuNavAnchor, viewportOffset: anchorViewportOffset(body, element) }
+                : null;
+        }
+        return {
+            rawOffset: Number(body.scrollTop || 0),
+            action: record(action),
+            row: record(row),
+            section: record(section),
+            neighbor: record(neighbor)
+        };
+    }
+
+    function captureParentNavigation(dialog, trigger, renderParent, options, geometrySample) {
+        if (!dialog || !dialog.body || typeof renderParent !== "function") return null;
+        var sample = geometrySample || parentNavigationSample(dialog, trigger, options);
+        if (!sample) return null;
+        var context = {
+            renderParent: renderParent,
+            rawOffset: sample.rawOffset,
+            action: sample.action,
+            row: sample.row,
+            section: sample.section,
+            neighbor: sample.neighbor
+        };
+        (dialog.navigationContexts || (dialog.navigationContexts = [])).push(context);
+        return context;
+    }
+
+    function sameNavigationSampleTargets(left, right) {
+        var names = ["action", "row", "section"];
+        for (var index = 0; index < names.length; index++) {
+            var leftAnchor = left && left[names[index]];
+            var rightAnchor = right && right[names[index]];
+            if (Boolean(leftAnchor) !== Boolean(rightAnchor) ||
+                (leftAnchor && leftAnchor.token !== rightAnchor.token)) return false;
+        }
+        return true;
+    }
+
+    function armParentNavigationTrigger(dialog, trigger, optionsProvider) {
+        function optionsNow() {
+            return typeof optionsProvider === "function" ? optionsProvider() : (optionsProvider || {});
+        }
+        function clearPending() {
+            if (dialog.pendingNavigationActivation &&
+                dialog.pendingNavigationActivation.trigger === trigger) {
+                dialog.pendingNavigationActivation = null;
+            }
+        }
+        function arm(event) {
+            if (!dialogContainsTrigger(dialog, trigger) || (event && event.isTrusted === false)) {
+                clearPending();
+                return;
+            }
+            var options = optionsNow();
+            var sample = options && parentNavigationSample(dialog, trigger, options);
+            if (!sample) {
+                clearPending();
+                return;
+            }
+            dialog.pendingNavigationActivation = { trigger: trigger, sample: sample };
+        }
+        function armPointer(event) {
+            var type = String(event && event.pointerType || "mouse").toLowerCase();
+            if (type === "mouse" || type === "pen" || type === "touch") arm(event);
+            else clearPending();
+        }
+        function armKey(event) {
+            var key = event && event.key;
+            if (key === "Enter" || key === " " || key === "Spacebar") arm(event);
+        }
+        if (typeof window.PointerEvent === "function") {
+            trigger.addEventListener("pointerdown", armPointer, { passive: true });
+            trigger.addEventListener("pointercancel", clearPending, { passive: true });
+        } else if (isAndroidCommandEnvironment(window.navigator)) {
+            trigger.addEventListener("touchstart", arm, { passive: true });
+            trigger.addEventListener("touchcancel", clearPending, { passive: true });
+        } else {
+            trigger.addEventListener("mousedown", arm, { passive: true });
+        }
+        trigger.addEventListener("keydown", armKey, { passive: true });
+        trigger.addEventListener("contextmenu", clearPending, { passive: true });
+        trigger.addEventListener("dragstart", clearPending, { passive: true });
+        trigger.addEventListener("blur", clearPending, { passive: true });
+        return function (renderParent, clickEvent) {
+            var pending = dialog.pendingNavigationActivation;
+            dialog.pendingNavigationActivation = null;
+            if (!dialogContainsTrigger(dialog, trigger)) return null;
+            var options = optionsNow();
+            if (!options) return null;
+            var current = parentNavigationSample(dialog, trigger, options);
+            var sample = clickEvent && clickEvent.isTrusted === false ? current :
+                (pending && pending.trigger === trigger &&
+                sameNavigationSampleTargets(pending.sample, current) ? pending.sample : current);
+            return captureParentNavigation(dialog, trigger, renderParent, options, sample);
+        };
+    }
+
+    function resetSecondaryViewport(dialog) {
+        if (dialog && dialog.body) dialog.body.scrollTop = 0;
+    }
+
+    function restoreParentViewport(dialog, context) {
+        if (!dialog || !dialog.body || !context) return "none";
+        var body = dialog.body;
+        var choices = ["action", "row", "section", "neighbor"];
+        for (var index = 0; index < choices.length; index++) {
+            var choice = choices[index];
+            var saved = context[choice];
+            var element = saved && findPresentationAnchor(body, saved.token);
+            if (element) {
+                body.scrollTop = Math.max(0, Number(element.offsetTop || 0) - saved.viewportOffset);
+                return choice;
+            }
+        }
+        var maximum = Math.max(0, Number(body.scrollHeight || 0) - Number(body.clientHeight || 0));
+        body.scrollTop = maximum > 0 ? Math.max(0, Math.min(maximum, context.rawOffset)) : 0;
+        return maximum > 0 ? "raw" : "zero";
+    }
+
+    function returnFromChild(dialog) {
+        var stack = dialog && dialog.navigationContexts;
+        var context = stack && stack.length ? stack[stack.length - 1] : null;
+        if (!context) return false;
+        context.renderParent();
+        restoreParentViewport(dialog, context);
+        stack.pop();
+        return true;
+    }
+
+    function abandonNavigationContext(dialog, context) {
+        var stack = dialog && dialog.navigationContexts;
+        if (!stack || !stack.length || stack[stack.length - 1] !== context) return false;
+        stack.pop();
+        return true;
+    }
+
+    function restoreFailedTransition(dialog, context) {
+        var stack = dialog && dialog.navigationContexts;
+        return Boolean(stack && stack.length && stack[stack.length - 1] === context && returnFromChild(dialog));
+    }
+
+    function clearNavigationContexts(dialog) {
+        if (dialog) {
+            dialog.navigationContexts = [];
+            dialog.pendingNavigationActivation = null;
+        }
     }
 
     async function submitSeriesSelections(dialog, seasons, selections) {
@@ -2504,6 +2773,8 @@
     function renderCompositeSeasonSummary(dialog, item, season, seasonIndex, seasons, selections, keywords) {
         var container = document.createElement("div");
         container.className = "danmuCompositeSeason";
+        var compositeSeasonKey = seasonSelectionKey(season);
+        markPresentationAnchor(dialog, container, "section", "season-section:" + compositeSeasonKey);
         var header = document.createElement("div");
         header.className = "danmuCompositeHeader";
         header.textContent = seasonLibraryContextLine(season);
@@ -2524,11 +2795,11 @@
         if (scopeLine) {
             var scope = document.createElement("div");
             scope.className = "danmuSeasonScopeSummary";
-            scope.textContent = scopeLine + "。忽略项不可选择，也不会进入下载。";
+            scope.textContent = scopeLine;
             container.appendChild(scope);
         }
         var groups = compositeVirtualGroups(season, selections);
-        async function rebuildWithoutGroup(group, reopenPicker) {
+        async function rebuildWithoutGroup(group, reopenPicker, transitionContext) {
             var rematchDraft = reopenPicker
                 ? captureCompositeRematchDraft(dialog, seasons, seasonIndex, selections, keywords) : null;
             var excludedBefore = compositeExcludedItemIds(dialog, season);
@@ -2562,7 +2833,7 @@
                         return;
                     }
                     restoreCompositeRematchDraft(dialog, rematchDraft, seasons, seasonIndex, selections, keywords);
-                    renderSeriesPicker(dialog, item, seasons, selections, keywords);
+                    restoreFailedTransition(dialog, transitionContext);
                     notify("未能打开重新匹配范围，已恢复原映射。", true);
                     return;
                 }
@@ -2570,7 +2841,7 @@
             } catch (error) {
                 if (rematchDraft) {
                     restoreCompositeRematchDraft(dialog, rematchDraft, seasons, seasonIndex, selections, keywords);
-                    renderSeriesPicker(dialog, item, seasons, selections, keywords);
+                    restoreFailedTransition(dialog, transitionContext);
                     notify("更新虚拟季失败：" + publicErrorMessage(error), true);
                     return;
                 }
@@ -2590,6 +2861,11 @@
         groups.forEach(function (group, groupIndex) {
             var card = document.createElement("div");
             card.className = "danmuVirtualSeason " + (group.kind === "unmatched" ? "unmatched" : "matched");
+            var groupNavigationKey = compositeSeasonKey + "::" +
+                (group.episodes || []).map(function (episode) {
+                    return value(episode, "ItemId", "itemId", "");
+                }).join(",");
+            markPresentationAnchor(dialog, card, "row", "composite-run:" + groupNavigationKey);
             var main = document.createElement("div");
             var title = document.createElement("div");
             title.className = "danmuVirtualSeasonTitle";
@@ -2614,13 +2890,26 @@
             if (!groupScore && group.kind === "mapped" && group.mappings.length) groupScore = matchScoreLine(group.mappings[0]);
             if (groupScore) detail.textContent += " · " + groupScore;
             main.append(title, detail);
+            if (group.kind === "mapped" && episodeCountMismatchWarning(group)) {
+                var countWarning = document.createElement("div");
+                countWarning.className = "danmuEpisodeShortfallNotice";
+                countWarning.textContent = "本地与来源集数不一致";
+                main.appendChild(countWarning);
+            }
             card.appendChild(main);
             appendCompositeMappingDetails(card, group);
             if (group.kind === "unmatched") {
                 var match = document.createElement("button");
                 match.className = "danmuSmartButton";
                 match.textContent = "手动匹配";
-                match.addEventListener("click", function () {
+                markPresentationAnchor(dialog, match, "action", "composite-action:" + groupNavigationKey + ":match");
+                var beginMatchNavigation = armParentNavigationTrigger(dialog, match,
+                    function () { return { row: card, section: container }; });
+                match.addEventListener("click", function (event) {
+                    var transitionContext = beginMatchNavigation(function () {
+                        renderSeriesPicker(dialog, item, seasons, selections, keywords);
+                    }, event);
+                    if (!transitionContext) return;
                     renderCompositeGroupPicker(dialog, item, season, seasonIndex, seasons, selections, keywords, group);
                 });
                 card.appendChild(match);
@@ -2630,8 +2919,15 @@
                 var rematch = document.createElement("button");
                 rematch.className = "danmuSmartButton";
                 rematch.textContent = "重新匹配";
-                rematch.addEventListener("click", function () {
-                    return rebuildWithoutGroup(group, true);
+                markPresentationAnchor(dialog, rematch, "action", "composite-action:" + groupNavigationKey + ":rematch");
+                var beginRematchNavigation = armParentNavigationTrigger(dialog, rematch,
+                    function () { return { row: card, section: container }; });
+                rematch.addEventListener("click", function (event) {
+                    var transitionContext = beginRematchNavigation(function () {
+                        renderSeriesPicker(dialog, item, seasons, selections, keywords);
+                    }, event);
+                    if (!transitionContext) return;
+                    return rebuildWithoutGroup(group, true, transitionContext);
                 });
                 var remove = document.createElement("button");
                 remove.className = "danmuSmartButton";
@@ -2647,7 +2943,16 @@
                 var mappedRematch = document.createElement("button");
                 mappedRematch.className = "danmuSmartButton";
                 mappedRematch.textContent = "重新匹配";
-                mappedRematch.addEventListener("click", function () { return rebuildWithoutGroup(group, true); });
+                markPresentationAnchor(dialog, mappedRematch, "action", "composite-action:" + groupNavigationKey + ":rematch");
+                var beginMappedRematchNavigation = armParentNavigationTrigger(dialog, mappedRematch,
+                    function () { return { row: card, section: container }; });
+                mappedRematch.addEventListener("click", function (event) {
+                    var transitionContext = beginMappedRematchNavigation(function () {
+                        renderSeriesPicker(dialog, item, seasons, selections, keywords);
+                    }, event);
+                    if (!transitionContext) return;
+                    return rebuildWithoutGroup(group, true, transitionContext);
+                });
                 var mappedRemove = document.createElement("button");
                 mappedRemove.className = "danmuSmartButton";
                 mappedRemove.textContent = "移除";
@@ -2723,7 +3028,7 @@
                 restoreCompositeRematchDraft(dialog, rematchDraft, seasons, seasonIndex, selections, keywords);
                 dialog.restorePendingCompositeRematch = null;
             }
-            renderSeriesPicker(dialog, item, seasons, selections, keywords);
+            if (!returnFromChild(dialog)) renderSeriesPicker(dialog, item, seasons, selections, keywords);
         }
         dialog.restorePendingCompositeRematch = rematchDraft ? function () {
             restoreCompositeRematchDraft(dialog, rematchDraft, seasons, seasonIndex, selections, keywords);
@@ -2938,7 +3243,8 @@
                 seasons[seasonIndex] = confirmed;
                 clearCompositeSelectionStore(selections, season);
                 dialog.restorePendingCompositeRematch = null;
-                renderSeriesPicker(dialog, item, seasons, selections, keywords);
+                rematchDraft = null;
+                returnToOverview();
             } catch (error) {
                 var store = selections.__compositeSelections || (selections.__compositeSelections = {});
                 store[seasonSelectionKey(season)] = previousSelections;
@@ -2949,6 +3255,7 @@
         });
         appendPreDownloadFooter(dialog);
         dialog.footer.append(back, save);
+        resetSecondaryViewport(dialog);
         if (automaticRangeSearch) searchCurrentGroup(true);
     }
 
@@ -3013,7 +3320,9 @@
             var selection = manualKeyword || parentRematch ? null : selections[selectionKey];
             var block = document.createElement("div");
             block.className = "danmuSeasonSummary " + (selection ? "matched" : "unmatched");
+            markPresentationAnchor(dialog, block, "section", "season-section:" + selectionKey);
             var main = document.createElement("div");
+            markPresentationAnchor(dialog, main, "row", "season-row:" + selectionKey);
             var title = document.createElement("div");
             title.className = "danmuSeasonSummaryTitle";
             title.textContent = seasonLibraryContextLine(season);
@@ -3040,14 +3349,21 @@
             manual.textContent = parentRematch
                 ? "重新匹配"
                 : (isProviderIdMatch(season) ? "重新智能匹配" : "查看候选");
-            manual.addEventListener("click", async function () {
+            markPresentationAnchor(dialog, manual, "action", "season-action:" + selectionKey + ":candidates");
+            var beginSeasonNavigation = armParentNavigationTrigger(dialog, manual,
+                function () { return { row: main, section: block }; });
+            manual.addEventListener("click", async function (event) {
+                var transitionContext = beginSeasonNavigation(function () {
+                    renderSeriesPicker(dialog, item, seasons, selections, keywords);
+                }, event);
+                if (!transitionContext) return;
                 if (parentRematch) {
                     try {
                         var parentParameters = parentTitleRematchParameters(season);
                         var parentRefreshed = await runDialogSearch(
                             dialog, parentParameters.seriesId || item.Id, "provider-search", parentParameters,
                             "正在使用父剧标题重新匹配本季候选…", function (status, error) {
-                                renderSeriesPicker(dialog, item, seasons, selections, keywords);
+                                restoreFailedTransition(dialog, transitionContext);
                                 notify(status === "cancelled" ? "已取消父剧标题重新匹配。" :
                                     "父剧标题重新匹配失败：" + publicErrorMessage(error), true);
                             });
@@ -3067,12 +3383,12 @@
                         if (item.Type === "Season") {
                             renderCandidatePicker(dialog, item, parentRefreshedSeason, "");
                         } else if (parentTitleRematchAvailable(parentRefreshedSeason)) {
-                            renderSeriesPicker(dialog, item, seasons, selections, keywords);
+                            restoreFailedTransition(dialog, transitionContext);
                         } else {
                             renderSeriesSeasonPicker(dialog, item, seasons, seasonIndex, selections, keywords);
                         }
                     } catch (error) {
-                        renderSeriesPicker(dialog, item, seasons, selections, keywords);
+                        restoreFailedTransition(dialog, transitionContext);
                         notify("父剧标题重新匹配失败：" + publicErrorMessage(error), true);
                     }
                     return;
@@ -3086,7 +3402,7 @@
                     var refreshed = await runDialogSearch(
                         dialog, parameters.seriesId || item.Id, "provider-search", rematchParameters(parameters),
                         "正在请求服务器重新智能匹配…", function (status, error) {
-                            renderSeriesPicker(dialog, item, seasons, selections, keywords);
+                            restoreFailedTransition(dialog, transitionContext);
                             notify(status === "cancelled" ? "已取消重新智能匹配。" :
                                 "重新智能匹配失败：" + publicErrorMessage(error), true);
                         });
@@ -3096,7 +3412,7 @@
                     seasons[seasonIndex] = refreshedSeason;
                     renderSeriesSeasonPicker(dialog, item, seasons, seasonIndex, selections, keywords);
                 } catch (error) {
-                    renderSeriesPicker(dialog, item, seasons, selections, keywords);
+                    restoreFailedTransition(dialog, transitionContext);
                     notify("重新智能匹配失败：" + publicErrorMessage(error), true);
                 }
             });
@@ -3134,9 +3450,10 @@
 
     function renderSeriesSeasonPicker(dialog, item, seasons, seasonIndex, selections, keywords) {
         dialog.androidBackLocked = false;
-        dialog.setBackHandler(function () {
-            renderSeriesPicker(dialog, item, seasons, selections, keywords);
-        });
+        function returnToParent() {
+            if (!returnFromChild(dialog)) renderSeriesPicker(dialog, item, seasons, selections, keywords);
+        }
+        dialog.setBackHandler(returnToParent);
         var season = seasons[seasonIndex];
         var selectionKey = seasonSelectionKey(season);
         var candidates = seasonCandidates(season);
@@ -3266,9 +3583,7 @@
         var back = document.createElement("button");
         back.className = "danmuSmartButton";
         back.textContent = "返回总览";
-        back.addEventListener("click", function () {
-            renderSeriesPicker(dialog, item, seasons, selections, keywords);
-        });
+        back.addEventListener("click", returnToParent);
         var save = document.createElement("button");
         save.className = "danmuSmartButton primary";
         save.textContent = "保存本季选择";
@@ -3290,7 +3605,7 @@
                 if (!confirmed) return;
                 seasons[seasonIndex] = confirmed;
                 delete selections[selectionKey];
-                renderSeriesPicker(dialog, item, seasons, selections, keywords);
+                returnToParent();
             } catch (error) {
                 renderSeriesSeasonPicker(dialog, item, seasons, seasonIndex, selections, keywords);
                 notify("季度解析失败：" + publicErrorMessage(error), true);
@@ -3298,6 +3613,7 @@
         });
         appendPreDownloadFooter(dialog);
         dialog.footer.append(back, save);
+        resetSecondaryViewport(dialog);
     }
 
     function renderCandidatePicker(dialog, item, season, keyword) {
@@ -3322,11 +3638,12 @@
         dialog.footer.replaceChildren();
         var manualKeyword = isManualKeyword(season);
 
+        var scopeLine = scopeSummaryLine(season);
         var summary = document.createElement("p");
         summary.textContent = seasonLibraryContextLine(season) + "。请选择正确项目；服务器会先解析逐集映射并显示未匹配区间。" +
             (!manualKeyword && isProviderIdMatch(season) && hasBackendMatch(season) ? "　✓ 匹配成功" : "") +
             (!manualKeyword && backendDecisionLine(season) ? "　" + backendDecisionLine(season) : "") +
-            (scopeSummaryLine(season) ? "　" + scopeSummaryLine(season) : "");
+            (scopeLine ? "　" + scopeLine : "");
         dialog.body.appendChild(summary);
         var diagnosticsText = searchDiagnosticsLine(season);
         if (diagnosticsText) {
@@ -3452,6 +3769,7 @@
                 notify("季度解析失败：" + publicErrorMessage(error), true);
             }
         });
+        resetSecondaryViewport(dialog);
     }
 
     function renderCompositeTargetPicker(dialog, item, season) {
@@ -3503,7 +3821,11 @@
         dialog.androidBackLocked = false;
         dialog.body.replaceChildren();
         dialog.footer.replaceChildren();
-        dialog.setBackHandler(function () { renderItemCandidatePicker(dialog, item, target, keyword); });
+        function returnToParent() {
+            dialog.preDownloadRecovery = null;
+            if (!returnFromChild(dialog)) renderItemCandidatePicker(dialog, item, target, keyword);
+        }
+        dialog.setBackHandler(returnToParent);
 
         var summary = document.createElement("p");
         summary.textContent = itemEpisodeSummary(item, target) + "。" +
@@ -3535,7 +3857,7 @@
         var back = document.createElement("button");
         back.className = "danmuSmartButton";
         back.textContent = "返回候选列表";
-        back.addEventListener("click", function () { renderItemCandidatePicker(dialog, item, target, keyword); });
+        back.addEventListener("click", returnToParent);
         var start = document.createElement("button");
         start.className = "danmuSmartButton primary";
         start.textContent = "绑定并下载本集弹幕";
@@ -3555,16 +3877,18 @@
         });
         appendPreDownloadFooter(dialog);
         dialog.footer.append(back, start);
+        resetSecondaryViewport(dialog);
     }
 
-    async function resolveSelectedCandidateDetail(dialog, item, target, candidate, keyword, manual) {
+    async function resolveSelectedCandidateDetail(dialog, item, target, candidate, keyword, manual, transitionContext) {
         var detail = await runDialogSearch(
             dialog, item.Id, "detail-resolution", {
                 site: value(candidate, "Site", "site", ""),
                 candidateId: value(candidate, "Id", "id", ""),
                 selectionEvidenceToken: value(candidate, "SelectionEvidenceToken", "selectionEvidenceToken", "")
             }, "正在解析所选候选的来源剧集…", function (status, error) {
-                renderItemCandidatePicker(dialog, item, target, keyword);
+                dialog.preDownloadRecovery = null;
+                restoreFailedTransition(dialog, transitionContext);
                 notify(status === "cancelled" ? "已取消来源剧集解析。" :
                     "来源剧集解析失败：" + publicErrorMessage(error), true);
             }, "GetSelectedCandidatePreview");
@@ -3572,7 +3896,8 @@
         var status = String(value(detail, "Status", "status", "") || "").toLowerCase();
         var episodes = selectedCandidateEpisodes(detail);
         if (status !== "ready" || !episodes.length) {
-            renderItemCandidatePicker(dialog, item, target, keyword);
+            dialog.preDownloadRecovery = null;
+            restoreFailedTransition(dialog, transitionContext);
             notify(value(detail, "Message", "message", "所选候选没有可用的来源剧集。"), true);
             return null;
         }
@@ -3591,7 +3916,11 @@
         dialog.androidBackLocked = false;
         dialog.body.replaceChildren();
         dialog.footer.replaceChildren();
-        dialog.setBackHandler(function () { renderItemCandidatePicker(dialog, item, target, keyword); });
+        function returnToParent() {
+            dialog.preDownloadRecovery = null;
+            if (!returnFromChild(dialog)) renderItemCandidatePicker(dialog, item, target, keyword);
+        }
+        dialog.setBackHandler(returnToParent);
 
         var summary = document.createElement("p");
         summary.textContent = movieCandidateHeading(candidate, detail,
@@ -3621,7 +3950,7 @@
         var back = document.createElement("button");
         back.className = "danmuSmartButton";
         back.textContent = "返回候选列表";
-        back.addEventListener("click", function () { renderItemCandidatePicker(dialog, item, target, keyword); });
+        back.addEventListener("click", returnToParent);
         var start = document.createElement("button");
         start.className = "danmuSmartButton primary";
         start.textContent = "绑定并下载所选正片弹幕";
@@ -3640,28 +3969,34 @@
         });
         appendPreDownloadFooter(dialog);
         dialog.footer.append(back, start);
+        resetSecondaryViewport(dialog);
     }
 
-    async function resolveSelectedMovieParts(dialog, item, target, candidate, keyword, manual) {
+    async function resolveSelectedMovieParts(dialog, item, target, candidate, keyword, manual, transitionContext) {
         var detail = await runDialogSearch(
             dialog, item.Id, "detail-resolution", {
                 site: value(candidate, "Site", "site", ""),
                 candidateId: value(candidate, "Id", "id", ""),
                 selectionEvidenceToken: value(candidate, "SelectionEvidenceToken", "selectionEvidenceToken", "")
             }, "正在验证电影正片版本…", function (status, error) {
-                renderItemCandidatePicker(dialog, item, target, keyword);
+                dialog.preDownloadRecovery = null;
+                restoreFailedTransition(dialog, transitionContext);
                 notify(status === "cancelled" ? "已取消正片版本解析。" :
                     "正片版本解析失败：" + publicErrorMessage(error), true);
             }, "GetSelectedCandidatePreview");
         if (!detail) return;
         if (String(value(detail, "Status", "status", "")).toLowerCase() !== "ready") {
-            renderItemCandidatePicker(dialog, item, target, keyword);
+            dialog.preDownloadRecovery = null;
+            restoreFailedTransition(dialog, transitionContext);
             notify(value(detail, "Message", "message", "电影候选无法验证。"), true);
             return;
         }
         var parts = moviePartChoices(detail);
         if (parts.length <= 1) {
             var defaultToken = parts.length ? value(parts[0], "Token", "token", "") : "";
+            dialog.preDownloadRecovery = function () {
+                restoreFailedTransition(dialog, transitionContext);
+            };
             renderSingleTargetProgress(dialog, item, target, candidate, null, null, manual, defaultToken);
             return;
         }
@@ -3712,6 +4047,7 @@
         dialog.body.appendChild(search);
 
         var list = document.createElement("div");
+        markPresentationAnchor(dialog, list, "section", "item-candidates:" + item.Type);
         if (!candidates.length) {
             var empty = document.createElement("p");
             empty.className = "danmuMuted";
@@ -3721,6 +4057,10 @@
         candidates.forEach(function (candidate, index) {
             var row = document.createElement("label");
             row.className = "danmuCandidate";
+            var candidateNavigationKey = [item.Type, value(candidate, "Site", "site", ""),
+                value(candidate, "Id", "id", ""),
+                value(candidate, "SelectionEvidenceToken", "selectionEvidenceToken", "")].join("::");
+            markPresentationAnchor(dialog, row, "row", "item-row:" + candidateNavigationKey);
             var radio = document.createElement("input");
             radio.type = "radio";
             radio.name = "danmuItemCandidateChoice";
@@ -3730,6 +4070,7 @@
                 value(selected, "Site", "site", "") === value(candidate, "Site", "site", ""));
             var main = document.createElement("div");
             main.className = "danmuCandidateMain";
+            markPresentationAnchor(dialog, main, "action", "item-action:" + candidateNavigationKey);
             var title = document.createElement("div");
             title.className = "danmuCandidateTitle";
             title.textContent = isEpisode
@@ -3795,12 +4136,22 @@
         start.className = "danmuSmartButton primary";
         start.textContent = isEpisode ? "解析所选候选的来源剧集" : "绑定并下载电影弹幕";
         start.disabled = !candidates.length;
-        start.addEventListener("click", function () {
+        function selectedCandidateNavigationOptions() {
+            var selectedInput = list.querySelector('input[name="danmuItemCandidateChoice"]:checked');
+            var selectedRow = selectedInput && selectedInput.parentElement;
+            return selectedRow ? { row: selectedRow, section: list, action: selectedRow.children[1] } : null;
+        }
+        var beginItemNavigation = armParentNavigationTrigger(dialog, start, selectedCandidateNavigationOptions);
+        start.addEventListener("click", function (event) {
             var checked = list.querySelector('input[name="danmuItemCandidateChoice"]:checked');
             if (!checked) {
                 notify("请选择一个候选结果。", true);
                 return;
             }
+            var transitionContext = beginItemNavigation(function () {
+                renderItemCandidatePicker(dialog, item, target, keyword);
+            }, event);
+            if (!transitionContext) return;
             var candidateIndex = Number(checked.value);
             var candidate = candidates[candidateIndex];
             var manual = !selected ||
@@ -3808,14 +4159,15 @@
                 value(selected, "Site", "site", "") !== value(candidate, "Site", "site", "");
             if (isEpisode) {
                 dialog.preDownloadRecovery = function () {
-                    renderItemCandidatePicker(dialog, item, target, keyword);
+                    restoreFailedTransition(dialog, transitionContext);
                 };
-                resolveSelectedCandidateDetail(dialog, item, target, candidate, keyword, manual);
+                resolveSelectedCandidateDetail(dialog, item, target, candidate, keyword, manual, transitionContext);
             } else {
-                resolveSelectedMovieParts(dialog, item, target, candidate, keyword, manual);
+                resolveSelectedMovieParts(dialog, item, target, candidate, keyword, manual, transitionContext);
             }
         });
         dialog.footer.appendChild(start);
+        resetSecondaryViewport(dialog);
     }
 
     async function renderSingleTargetProgress(dialog, item, target, candidate, sourceEpisodeNumber, sourceEpisodeId, manual, moviePartToken) {
@@ -3848,6 +4200,8 @@
             return;
         }
         var taskId = value(task, "TaskId", "taskId", "");
+        dialog.preDownloadRecovery = null;
+        clearNavigationContexts(dialog);
         var monitoring = false;
 
         dialog.androidBackLocked = false;
@@ -4232,6 +4586,7 @@
         targetSeasonNumber: targetSeasonNumber,
         isEligibleCompositeEpisode: isEligibleCompositeEpisode,
         eligibleCompositeEpisodes: eligibleCompositeEpisodes,
+        ignoredScopeCounts: ignoredScopeCounts,
         scopeSummaryLine: scopeSummaryLine,
         discardIncompatibleSeasonDrafts: discardIncompatibleSeasonDrafts,
         decodeApiResult: decodeApiResult,
@@ -4240,6 +4595,7 @@
         authoritativeCompositeFailureMessage: authoritativeCompositeFailureMessage,
         providerDisplayName: providerDisplayName,
         sourceMetadataPublicLabel: sourceMetadataPublicLabel,
+        episodeCountMismatchWarning: episodeCountMismatchWarning,
         localEpisodeLabel: localEpisodeLabel,
         sourceEpisodePublicLabel: sourceEpisodePublicLabel,
         closedAlignmentIntent: closedAlignmentIntent,
@@ -4264,6 +4620,7 @@
         hasBackendMatch: hasBackendMatch,
         hasCompositePlan: hasCompositePlan,
         compositeVirtualGroups: compositeVirtualGroups,
+        renderCompositeSeasonSummary: renderCompositeSeasonSummary,
         compositeRequestSelections: compositeRequestSelections,
         compositeHasDownloadableMappings: compositeHasDownloadableMappings,
         removeCompositeSelection: removeCompositeSelection,
@@ -4287,6 +4644,18 @@
         appendPreDownloadFooter: appendPreDownloadFooter,
         snapshotForceRefresh: snapshotForceRefresh,
         recoverPreDownload: recoverPreDownload,
+        isAndroidCommandEnvironment: isAndroidCommandEnvironment,
+        markPresentationAnchor: markPresentationAnchor,
+        captureParentNavigation: captureParentNavigation,
+        resetSecondaryViewport: resetSecondaryViewport,
+        restoreParentViewport: restoreParentViewport,
+        returnFromChild: returnFromChild,
+        abandonNavigationContext: abandonNavigationContext,
+        clearNavigationContexts: clearNavigationContexts,
+        navigationContextDepth: function (dialog) {
+            return dialog && dialog.navigationContexts ? dialog.navigationContexts.length : 0;
+        },
+        dialogBackMode: function (dialog) { return dialog && dialog.backMode; },
         beginCandidateDetailGeneration: beginCandidateDetailGeneration,
         appendCandidateDetailControl: appendCandidateDetailControl,
         activeDialogCount: function () { return activeDialogs.length; },

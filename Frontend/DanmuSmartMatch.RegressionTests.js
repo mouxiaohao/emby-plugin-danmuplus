@@ -8,10 +8,13 @@ function assert(condition, message) {
     if (!condition) throw new Error(message);
 }
 
+const anchorLayoutOffsets = {};
+
 class FakeElement {
     constructor(tagName) {
         this.tagName = String(tagName || "div").toUpperCase();
-        this.children = [];
+        this._children = [];
+        this.children = this._children;
         this.parentElement = null;
         this.dataset = {};
         this.style = {};
@@ -21,29 +24,40 @@ class FakeElement {
         this.textContent = "";
         this.isConnected = true;
         this.disabled = false;
+        this.scrollTop = 0;
+        this.scrollHeight = 0;
+        this.clientHeight = 0;
+        this._offsetTop = 0;
         this.classList = { contains: name => this.className.split(/\s+/).includes(name) };
     }
 
     append(...children) { children.forEach(child => this.appendChild(child)); }
     appendChild(child) {
         child.parentElement = this;
-        this.children.push(child);
+        this._children.push(child);
         return child;
     }
+
+    get offsetTop() {
+        const token = this.dataset && this.dataset.danmuNavAnchor;
+        return token && Object.prototype.hasOwnProperty.call(anchorLayoutOffsets, token)
+            ? anchorLayoutOffsets[token] : this._offsetTop;
+    }
+    set offsetTop(value) { this._offsetTop = Number(value || 0); }
     replaceChildren(...children) {
-        this.children.forEach(child => { child.parentElement = null; });
-        this.children = [];
+        this._children.forEach(child => { child.parentElement = null; });
+        this._children.splice(0, this._children.length);
         this.append(...children);
     }
     before(child) {
-        const index = this.parentElement.children.indexOf(this);
+        const index = this.parentElement._children.indexOf(this);
         child.parentElement = this.parentElement;
-        this.parentElement.children.splice(index, 0, child);
+        this.parentElement._children.splice(index, 0, child);
     }
     remove() {
         if (this.parentElement) {
-            const index = this.parentElement.children.indexOf(this);
-            if (index >= 0) this.parentElement.children.splice(index, 1);
+            const index = this.parentElement._children.indexOf(this);
+            if (index >= 0) this.parentElement._children.splice(index, 1);
         }
         this.parentElement = null;
         this.isConnected = false;
@@ -54,7 +68,11 @@ class FakeElement {
         clone.textContent = this.textContent;
         clone.dataset = Object.assign({}, this.dataset);
         clone.attributes = Object.assign({}, this.attributes);
-        if (deep) this.children.forEach(child => clone.appendChild(child.cloneNode(true)));
+        clone.scrollTop = this.scrollTop;
+        clone.scrollHeight = this.scrollHeight;
+        clone.clientHeight = this.clientHeight;
+        clone.offsetTop = this.offsetTop;
+        if (deep) this._children.forEach(child => clone.appendChild(child.cloneNode(true)));
         return clone;
     }
     setAttribute(name, value) { this.attributes[name] = String(value); }
@@ -63,13 +81,14 @@ class FakeElement {
     addEventListener(type, listener) {
         (this.listeners[type] || (this.listeners[type] = [])).push(listener);
     }
-    async dispatch(type) {
-        const event = {
+    async dispatch(type, overrides) {
+        const event = Object.assign({
             target: this,
+            isTrusted: type === "click" ? false : true,
             preventDefault: function () {},
             stopPropagation: function () {},
             stopImmediatePropagation: function () {}
-        };
+        }, overrides || {});
         await Promise.all((this.listeners[type] || []).map(listener => listener(event)));
     }
     closest() { return null; }
@@ -80,7 +99,7 @@ class FakeElement {
         const classMatch = selector.match(/^\.([A-Za-z0-9_-]+)$/);
         const checkedInputMatch = selector.match(/^input\[name="([^"]+)"\]:checked$/);
         function visit(node) {
-            node.children.forEach(child => {
+            node._children.forEach(child => {
                 if ((dataMatch && child.dataset.id === dataMatch[1]) ||
                     (classMatch && child.className.split(/\s+/).includes(classMatch[1])) ||
                     (checkedInputMatch && child.tagName === "INPUT" &&
@@ -93,6 +112,19 @@ class FakeElement {
         visit(this);
         return matches;
     }
+}
+
+function useHtmlCollectionLikeChildren(element) {
+    element.children = new Proxy({}, {
+        get: function (_target, property) {
+            if (property === "length") return element._children.length;
+            if (typeof property === "string" && /^\d+$/.test(property)) {
+                return element._children[Number(property)];
+            }
+            return undefined;
+        }
+    });
+    element._children.forEach(useHtmlCollectionLikeChildren);
 }
 
 function menuFor(id) {
@@ -111,11 +143,14 @@ const documentStub = {
     head: new FakeElement("head"),
     openedMenus: [],
     listeners: {},
-    addEventListener: function (type, listener) {
-        (this.listeners[type] || (this.listeners[type] = [])).push(listener);
+    captureListeners: {},
+    addEventListener: function (type, listener, capture) {
+        const target = capture === true ? this.captureListeners : this.listeners;
+        (target[type] || (target[type] = [])).push(listener);
     },
-    removeEventListener: function (type, listener) {
-        const listeners = this.listeners[type] || [];
+    removeEventListener: function (type, listener, capture) {
+        const target = capture === true ? this.captureListeners : this.listeners;
+        const listeners = target[type] || [];
         const index = listeners.indexOf(listener);
         if (index >= 0) listeners.splice(index, 1);
     },
@@ -140,6 +175,26 @@ const documentStub = {
         (this.listeners[type] || []).slice().forEach(listener => listener(event));
         return event;
     },
+    dispatchCommand: function (command, options) {
+        options = options || {};
+        const event = {
+            detail: { command: command },
+            cancelable: options.cancelable !== false,
+            defaultPrevented: options.defaultPrevented === true,
+            propagationStopped: false,
+            preventDefault: function () {
+                if (options.preventBehavior === "throw") throw new Error("injected prevent failure");
+                if (options.preventBehavior !== "noop" && this.cancelable) this.defaultPrevented = true;
+            },
+            stopPropagation: function () { this.propagationStopped = true; }
+        };
+        if (options.omitPreventDefault) delete event.preventDefault;
+        (this.captureListeners.command || []).slice().forEach(listener => listener(event));
+        if (!event.propagationStopped) {
+            (this.listeners.command || []).slice().forEach(listener => listener(event));
+        }
+        return event;
+    },
     createElement: tag => new FakeElement(tag),
     getElementById: function (id) {
         const all = this.body.querySelectorAll("." + id);
@@ -154,13 +209,21 @@ const apiCalls = [];
 const apiResponses = {};
 const windowListeners = {};
 const historyEntries = [{ state: null, url: "http://emby.test/web/index.html#!/item?id=series" }];
+const historyCalls = { pushState: 0, replaceState: 0, back: 0 };
 const historyStub = {
     state: null,
     pushState: function (state, _title, url) {
+        historyCalls.pushState++;
         historyEntries.push({ state: state, url: url });
         this.state = state;
     },
+    replaceState: function (state, _title, url) {
+        historyCalls.replaceState++;
+        historyEntries[historyEntries.length - 1] = { state: state, url: url };
+        this.state = state;
+    },
     back: function () {
+        historyCalls.back++;
         if (historyEntries.length > 1) historyEntries.pop();
         const current = historyEntries[historyEntries.length - 1];
         this.state = current.state;
@@ -170,6 +233,7 @@ const historyStub = {
 const context = {
     window: {
         location: { hash: "", href: "http://emby.test/web/index.html#!/item?id=series" },
+        navigator: { userAgentData: { platform: " Android " }, userAgent: "Fake Android WebView" },
         history: historyStub,
         addEventListener: function (type, listener) {
             (windowListeners[type] || (windowListeners[type] = [])).push(listener);
@@ -231,10 +295,92 @@ function fakeResponse(status, statusText, body, contentType) {
     };
 }
 
+function generatedRule(cssSource, selector) {
+    const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const match = cssSource.match(new RegExp('"' + escaped + '\\{([^"}]*)\\}"'));
+    return match ? match[1] : "";
+}
+
+function verifyDeterministicContainmentTopology(entryType, hostKind, origin, bodyState) {
+    const host = {
+        kind: hostKind,
+        route: hostKind === "detail" ? "detail-route" : "library-route",
+        scrollTop: hostKind === "detail" ? 480 : 1250,
+        virtualWindow: hostKind === "virtual-list" ? "items-120-159" : null
+    };
+    const before = Object.assign({}, host);
+    const body = {
+        clientHeight: bodyState === "short" ? 240 : 400,
+        scrollHeight: bodyState === "short" ? 180 : 1200,
+        scrollTop: bodyState === "middle" ? 400 : bodyState === "bottom" ? 800 : 0
+    };
+    const connectedOverlay = { entryType: entryType, origin: origin, body: body, isConnected: true };
+    if (bodyState === "middle") body.scrollTop = Math.min(body.scrollHeight - body.clientHeight, body.scrollTop + 80);
+    assert(host.scrollTop === before.scrollTop && host.route === before.route &&
+        host.virtualWindow === before.virtualWindow && connectedOverlay.isConnected,
+        entryType + " " + hostKind + " " + origin + " " + bodyState +
+            " fixture must preserve every modeled host state while the shared overlay is connected");
+    connectedOverlay.isConnected = false;
+    host.scrollTop += 40;
+    assert(host.scrollTop === before.scrollTop + 40,
+        "ordinary host scrolling must resume immediately after the modeled overlay closes");
+}
+
 async function main() {
-    assert((source.match(/__embyDanmuSmartMenuV28/g) || []).length === 1 &&
-        !source.includes("__embyDanmuSmartMenuV27") && !source.includes("__embyDanmuSmartMenuV26"),
-        "the sparse-alignment frontend installation flag should be V28 exactly once");
+    const styleSource = source.slice(source.indexOf("function ensureStyles"),
+        source.indexOf("function topmostCommandDialog"));
+    const overlayRule = generatedRule(styleSource, ".danmuSmartOverlay");
+    const cardRule = generatedRule(styleSource, ".danmuSmartCard");
+    const bodyRule = generatedRule(styleSource, ".danmuSmartBody");
+    assert(overlayRule.includes("overflow:hidden") &&
+        overlayRule.includes("overscroll-behavior-y:contain"),
+        "the shared overlay must clip overflow and terminate its vertical scroll chain");
+    assert(cardRule.includes("overflow:hidden") && cardRule.includes("overscroll-behavior-y:contain"),
+        "the shared card must retain clipping and terminate its vertical scroll chain");
+    assert(bodyRule.includes("padding:1rem 1.2rem") && bodyRule.includes("overflow:auto") &&
+        bodyRule.includes("flex:1 1 auto") && bodyRule.includes("min-height:0") &&
+        bodyRule.includes("overscroll-behavior-y:contain"),
+        "the shared body must remain the shrinkable native vertical scroll owner");
+    assert((styleSource.match(/\.danmuSmartOverlay\{/g) || []).length === 2 &&
+        (styleSource.match(/\.danmuSmartCard\{/g) || []).length === 2 &&
+        (styleSource.match(/\.danmuSmartBody\{/g) || []).length === 1 &&
+        !/\.danmuSmart(?:Overlay|Card|Body)[^{"]*(?:Series|Season|Episode|Movie|detailPage|Android)/i.test(styleSource),
+        "scroll containment must use only the existing shared desktop/mobile class rules, never an entry or platform selector");
+
+    const forbiddenGlobalInputListener = /(?:document|window|globalThis)\.addEventListener\(["'](?:touchmove|pointermove|wheel)["']/;
+    assert(!forbiddenGlobalInputListener.test(source) &&
+        !/touch-action\s*:\s*none/i.test(styleSource) && !/contain\s*:\s*strict/i.test(styleSource) &&
+        !/(?:^|[",}])\s*(?:html|body)\s*\{/i.test(styleSource) &&
+        !/hostScroller|scrollingElement|documentElement|window\.scroll(?:To|By|Y|X)|document\.body\.style/.test(source) &&
+        !styleSource.includes("setTimeout") && !styleSource.includes("requestAnimationFrame") &&
+        !styleSource.includes("touchmove") && !styleSource.includes("pointermove") &&
+        !styleSource.includes("wheel"),
+        "r2 containment must not own global input, lock or inspect the host, schedule restoration, or add a host-state fallback");
+    const workflowSource = source.slice(source.indexOf("function runButtonWorkflow"),
+        source.indexOf("var buttonWorkflow = runButtonWorkflow"));
+    assert(!workflowSource.includes("setTimeout") && !workflowSource.includes("requestAnimationFrame") &&
+        !workflowSource.includes("touchmove") && !workflowSource.includes("pointermove") &&
+        !workflowSource.includes("wheel") &&
+        workflowSource.indexOf("closeMenu(menu)") < workflowSource.indexOf("openDialog("),
+        "r2 must retain immediate action-sheet close/dialog opening without delayed or input-specific branches");
+
+    ["Series", "Season", "Episode", "Movie"].forEach(function (entryType) {
+        ["detail", "virtual-list"].forEach(function (hostKind) {
+            ["body", "header", "footer", "card", "backdrop"].forEach(function (origin) {
+                ["short", "top", "middle", "bottom"].forEach(function (bodyState) {
+                    verifyDeterministicContainmentTopology(entryType, hostKind, origin, bodyState);
+                });
+            });
+        });
+    });
+    // Fake DOM proves topology neutrality and lifecycle invariants only. Real CSS scroll chaining at short,
+    // middle, top, and bottom states remains a required browser/device acceptance gate.
+
+    assert((source.match(/__embyDanmuSmartMenuV33/g) || []).length === 1 &&
+        !source.includes("__embyDanmuSmartMenuV32") && !source.includes("__embyDanmuSmartMenuV31") && !source.includes("__embyDanmuSmartMenuV30") && !source.includes("__embyDanmuSmartMenuV29") && !source.includes("CarHistoryProbe") &&
+        !source.includes("CarBackChannelProbe") && !source.includes("CarCommandTraceProbe") &&
+        !source.includes("CarCommandOwnerProbe") && !source.includes("__embyDanmuHistoryModeOverride"),
+        "the formal frontend flag must be V33 exactly once with V32, V31, V30, and every diagnostic probe excluded");
     assert(!source.includes("MAPPING_PROTOCOL_GENERATION") && source.includes("var MAPPING_PROTOCOL_VERSION = 22"),
         "the sparse-alignment UI must use the backend numeric V22 mapping protocol and server-authored plan generation");
     const compositeFailure = "复合季映射需要重新确认：Selected candidate evidence expired or belongs to another Season.";
@@ -916,6 +1062,37 @@ async function main() {
         "a manual temporary season must consume only its chosen range and leave the next unmatched run visible");
     assert(hooks.compositeHasDownloadableMappings(compositeSeason, compositeSelections),
         "exact mappings or a manual virtual season must permit downloading the confirmed subset");
+    const countWarningSeason = JSON.parse(JSON.stringify(compositeSeason));
+    countWarningSeason.CompositeGroups = [{
+        IsTemporary: false, Site: "Dandan", CandidateId: "frieren-s1",
+        EpisodeCountMismatchWarning: true,
+        Episodes: countWarningSeason.CompositePlan.OrderedEpisodes.slice(0, 2)
+    }, {
+        IsTemporary: true,
+        Episodes: countWarningSeason.CompositePlan.UnmatchedRuns[0].Episodes
+    }];
+    const countWarningGroups = hooks.compositeVirtualGroups(countWarningSeason, {});
+    assert(countWarningGroups[0].EpisodeCountMismatchWarning === true &&
+        countWarningGroups[countWarningGroups.length - 1].kind === "unmatched" &&
+        !hooks.episodeCountMismatchWarning(countWarningGroups[countWarningGroups.length - 1]),
+        "only the server response flag on a mapped group may carry a remainder count warning");
+    const countWarningDialog = hooks.openDialog("remainder count warning");
+    hooks.renderCompositeSeasonSummary(countWarningDialog, { Type: "Season", Name: "Composite" },
+        countWarningSeason, 0, [countWarningSeason], {}, {});
+    const countWarningText = allVisibleText(countWarningDialog.body);
+    assert(countWarningDialog.body.querySelectorAll(".danmuEpisodeShortfallNotice").length === 1 &&
+        countWarningText.includes("本地与来源集数不一致") &&
+        !countWarningText.includes("评分") && !countWarningText.includes("匹配失败"),
+        "a sole server-authoritative mismatch must render one yellow advisory while unmatched remainder stays silent and score-free");
+    countWarningDialog.forceClose();
+    const rebuiltWarningSeason = JSON.parse(JSON.stringify(countWarningSeason));
+    rebuiltWarningSeason.CompositeGroups[0].EpisodeCountMismatchWarning = false;
+    const rebuiltWarningDialog = hooks.openDialog("remainder warning rebuilt");
+    hooks.renderCompositeSeasonSummary(rebuiltWarningDialog, { Type: "Season", Name: "Composite" },
+        rebuiltWarningSeason, 0, [rebuiltWarningSeason], {}, {});
+    assert(rebuiltWarningDialog.body.querySelectorAll(".danmuEpisodeShortfallNotice").length === 0,
+        "a rematch or authoritative rebuild without the response flag must not retain a stale mismatch warning");
+    rebuiltWarningDialog.forceClose();
     const compactSelections = hooks.compositeRequestSelections(compositeSelections, compositeSeason);
     const currentSeasonRequest = hooks.seasonRequestParameters(compositeSeason);
     assert(currentSeasonRequest.mappingProtocolVersion === 22 &&
@@ -1245,6 +1422,350 @@ async function main() {
         hooks.scopeSummaryLine(scopedS1).includes("参与匹配 12 集") &&
         hooks.scopeSummaryLine(scopedS1).includes("S00 7 集"),
         "ignored cross-season counts must remain a read-only summary");
+
+    const ignoredSafetyNotice = "忽略项不可选择，也不会进入下载。";
+    const positiveIgnoredExpected =
+        "显示 19 集；参与匹配 12 集；只读忽略 7 集（S00 7 集）。" + ignoredSafetyNotice;
+    const zeroIgnoredExpected = "显示 19 集；参与匹配 12 集。";
+    const singleBranchFailures = [];
+    function expectSingleBranch(condition, message) {
+        if (!condition) singleBranchFailures.push(message);
+    }
+    const positiveDirectSummary = hooks.scopeSummaryLine(scopedS1);
+    expectSingleBranch(positiveDirectSummary === positiveIgnoredExpected,
+        "direct positive scopeSummaryLine must return breakdown plus its immediately adjacent fixed safety suffix");
+    expectSingleBranch(typeof hooks.scopePresentationLine === "undefined" &&
+        source.indexOf("function scopePresentationLine") < 0 &&
+        (source.split(ignoredSafetyNotice).length - 1) === 1 &&
+        (source.match(/var scopeLine = scopeSummaryLine\(season\);/g) || []).length === 3,
+        "production must have one notice literal, no independent scopePresentationLine, and exactly three direct scopeSummaryLine renderer consumers");
+    const positiveIgnoredDialog = hooks.openDialog("positive ignored scope notice");
+    hooks.renderCompositeSeasonSummary(positiveIgnoredDialog,
+        { Id: "scope-series", Type: "Series", Name: "Scope Series" },
+        scopedS1, 0, [scopedS1], {}, {});
+    const positiveIgnoredText = allVisibleText(positiveIgnoredDialog.body);
+    const positiveIgnoredSummary = positiveIgnoredDialog.body.querySelector(".danmuSeasonScopeSummary");
+    assert(positiveIgnoredText.includes("只读忽略 7 集（S00 7 集）") &&
+        positiveIgnoredText.split(ignoredSafetyNotice).length === 2,
+        "a real composite render with authoritative ignored items must keep the breakdown and exactly one safety notice");
+    expectSingleBranch(positiveIgnoredSummary &&
+        positiveIgnoredSummary.textContent === positiveDirectSummary &&
+        positiveIgnoredSummary.textContent === positiveIgnoredExpected,
+        "real composite positive rendering must consume the exact direct scopeSummaryLine string");
+    positiveIgnoredDialog.forceClose();
+
+    const zeroIgnoredSeason = Object.assign({}, scopedS1, {
+        SeasonId: "scope-s1-zero-ignored",
+        IgnoredParentZeroEpisodeCount: 0,
+        IgnoredOtherSeasonEpisodeCount: 0,
+        IgnoredUnknownParentEpisodeCount: 0,
+        IgnoredInvalidEpisodeCount: 0
+    });
+    const zeroIgnoredDialog = hooks.openDialog("zero ignored scope notice");
+    hooks.renderCompositeSeasonSummary(zeroIgnoredDialog,
+        { Id: "scope-series", Type: "Series", Name: "Scope Series" },
+        zeroIgnoredSeason, 0, [zeroIgnoredSeason], {}, {});
+    const zeroIgnoredText = allVisibleText(zeroIgnoredDialog.body);
+    const zeroDirectSummary = hooks.scopeSummaryLine(zeroIgnoredSeason);
+    const zeroIgnoredSummary = zeroIgnoredDialog.body.querySelector(".danmuSeasonScopeSummary");
+    assert(zeroIgnoredText.includes("显示 19 集") &&
+        zeroIgnoredText.includes("参与匹配 12 集") &&
+        !zeroIgnoredText.includes(ignoredSafetyNotice),
+        "a real composite render with displayed/eligible scope but zero ignored counts must not show the ignored-item safety notice");
+    expectSingleBranch(zeroDirectSummary === zeroIgnoredExpected && zeroIgnoredSummary &&
+        zeroIgnoredSummary.textContent === zeroDirectSummary &&
+        !zeroDirectSummary.includes("只读忽略") && !zeroDirectSummary.includes(ignoredSafetyNotice),
+        "direct and real composite zero-ignore summaries must be the same normal string with neither ignored branch nor suffix");
+    zeroIgnoredDialog.forceClose();
+
+    const ignoredCountFieldNames = [
+        "IgnoredParentZeroEpisodeCount", "ignoredParentZeroEpisodeCount",
+        "IgnoredOtherSeasonEpisodeCount", "ignoredOtherSeasonEpisodeCount",
+        "IgnoredUnknownParentEpisodeCount", "ignoredUnknownParentEpisodeCount",
+        "IgnoredInvalidEpisodeCount", "ignoredInvalidEpisodeCount"
+    ];
+    function ignoredScopeFixture(id, fields) {
+        const fixture = JSON.parse(JSON.stringify(scopedS1));
+        fixture.SeasonId = id;
+        ignoredCountFieldNames.forEach(name => { delete fixture[name]; });
+        return Object.assign(fixture, fields || {});
+    }
+    function renderIgnoredScope(fixture, label, itemType) {
+        const dialog = hooks.openDialog(label);
+        hooks.renderCompositeSeasonSummary(dialog,
+            { Id: "scope-series", Type: itemType || "Series", Name: "Scope Series" },
+            fixture, 0, [fixture], {}, {});
+        const result = {
+            text: allVisibleText(dialog.body),
+            summary: dialog.body.querySelector(".danmuSeasonScopeSummary")
+        };
+        dialog.forceClose();
+        return result;
+    }
+
+    [
+        ["parent-zero", { IgnoredParentZeroEpisodeCount: 2 }, "只读忽略 2 集（S00 2 集）"],
+        ["other-season", { ignoredOtherSeasonEpisodeCount: 3 }, "只读忽略 3 集（其他季 3 集）"],
+        ["unknown-parent", { IgnoredUnknownParentEpisodeCount: 4 }, "只读忽略 4 集（季号未知 4 集）"],
+        ["invalid-id", { ignoredInvalidEpisodeCount: 5 }, "只读忽略 5 集（标识无效 5 集）"]
+    ].forEach(testCase => {
+        const fixture = ignoredScopeFixture("scope-" + testCase[0], testCase[1]);
+        const rendered = renderIgnoredScope(
+            fixture,
+            "ignored category " + testCase[0]);
+        assert(rendered.text.includes(testCase[2]) &&
+            rendered.text.split(ignoredSafetyNotice).length === 2,
+            "each authoritative ignored category and Pascal/camel casing must render its own breakdown and one notice: " +
+                testCase[0]);
+        const direct = hooks.scopeSummaryLine(fixture);
+        expectSingleBranch(direct.includes(testCase[2] + "。" + ignoredSafetyNotice) &&
+            rendered.summary && rendered.summary.textContent === direct,
+            "each positive category must return and render one indivisible breakdown-plus-suffix string: " +
+                testCase[0]);
+    });
+
+    const mixedIgnoredSeason = ignoredScopeFixture("scope-mixed-ignored", {
+        ignoredParentZeroEpisodeCount: 1.9,
+        IgnoredOtherSeasonEpisodeCount: "2.8",
+        ignoredUnknownParentEpisodeCount: 3.7,
+        IgnoredInvalidEpisodeCount: 4.6
+    });
+    const mixedIgnoredCounts = hooks.ignoredScopeCounts(mixedIgnoredSeason);
+    const mixedIgnoredRender = renderIgnoredScope(mixedIgnoredSeason, "mixed ignored counts");
+    const mixedIgnoredDirect = hooks.scopeSummaryLine(mixedIgnoredSeason);
+    assert(mixedIgnoredCounts.parentZero === 1 && mixedIgnoredCounts.otherSeason === 2 &&
+        mixedIgnoredCounts.unknownParent === 3 && mixedIgnoredCounts.invalid === 4 &&
+        mixedIgnoredCounts.total === 10 &&
+        mixedIgnoredRender.text.includes("只读忽略 10 集（S00 1 集，其他季 2 集，季号未知 3 集，标识无效 4 集）") &&
+        mixedIgnoredRender.text.split(ignoredSafetyNotice).length === 2,
+        "mixed Pascal/camel ignored counts must floor finite positive fractions and share one total across breakdown and notice");
+    expectSingleBranch(mixedIgnoredDirect.includes(
+        "只读忽略 10 集（S00 1 集，其他季 2 集，季号未知 3 集，标识无效 4 集）。" + ignoredSafetyNotice) &&
+        mixedIgnoredRender.summary && mixedIgnoredRender.summary.textContent === mixedIgnoredDirect,
+        "mixed authoritative counts must return and render one indivisible breakdown-plus-suffix string");
+
+    [
+        ["missing", {}],
+        ["zero", {
+            IgnoredParentZeroEpisodeCount: 0, ignoredOtherSeasonEpisodeCount: 0,
+            IgnoredUnknownParentEpisodeCount: 0, ignoredInvalidEpisodeCount: 0
+        }],
+        ["invalid", {
+            IgnoredParentZeroEpisodeCount: null, ignoredOtherSeasonEpisodeCount: "not-a-number",
+            IgnoredUnknownParentEpisodeCount: Infinity, ignoredInvalidEpisodeCount: -8
+        }],
+        ["nan-and-subunit", {
+            ignoredParentZeroEpisodeCount: NaN, IgnoredOtherSeasonEpisodeCount: 0.9,
+            ignoredUnknownParentEpisodeCount: -Infinity, IgnoredInvalidEpisodeCount: ""
+        }],
+        ["unsupported-casing", { ignoredparentzeroepisodecount: 9 }]
+    ].forEach(testCase => {
+        const fixture = ignoredScopeFixture("scope-zero-" + testCase[0], testCase[1]);
+        const counts = hooks.ignoredScopeCounts(fixture);
+        const rendered = renderIgnoredScope(fixture, "zero ignored " + testCase[0]);
+        const direct = hooks.scopeSummaryLine(fixture);
+        assert(counts.total === 0 && rendered.text.includes("显示 19 集") &&
+            rendered.text.includes("参与匹配 12 集") &&
+            !rendered.text.includes("只读忽略") && !rendered.text.includes(ignoredSafetyNotice),
+            "missing, zero, invalid, non-finite, negative, sub-unit, and unsupported-casing values must normalize to zero: " +
+                testCase[0]);
+        expectSingleBranch(direct === zeroIgnoredExpected && rendered.summary &&
+            rendered.summary.textContent === direct,
+            "zero/invalid direct and real summaries must be identical and contain no ignored branch: " + testCase[0]);
+    });
+
+    const p1Failures = [];
+    function expectP1(condition, message) {
+        if (!condition) p1Failures.push(message);
+    }
+    function nonCompositeScopeFixture(id, fields) {
+        const fixture = ignoredScopeFixture(id, fields);
+        delete fixture.CompositePlan;
+        delete fixture.CompositeGroups;
+        delete fixture.CompositeSelections;
+        fixture.RequiresCompositeMapping = false;
+        return fixture;
+    }
+    const nonCompositePositive = nonCompositeScopeFixture("scope-non-composite-positive", {
+        IgnoredParentZeroEpisodeCount: 2
+    });
+    const nonCompositeZero = nonCompositeScopeFixture("scope-non-composite-zero", {
+        IgnoredParentZeroEpisodeCount: 0,
+        IgnoredOtherSeasonEpisodeCount: 0,
+        IgnoredUnknownParentEpisodeCount: 0,
+        IgnoredInvalidEpisodeCount: 0
+    });
+
+    const nonCompositeSeriesDialog = hooks.openDialog("non-composite whole-Series ignored notice");
+    hooks.renderSeriesPicker(nonCompositeSeriesDialog,
+        { Id: "scope-series", Type: "Series", Name: "Scope Series" },
+        [nonCompositePositive], {}, {});
+    const nonCompositeSeriesPositiveText = allVisibleText(nonCompositeSeriesDialog.body);
+    const nonCompositeSeriesPositiveSummary = nonCompositeSeriesDialog.body.querySelector(
+        ".danmuSeasonSummaryDetail");
+    expectP1(nonCompositeSeriesPositiveText.includes("只读忽略 2 集（S00 2 集）") &&
+        nonCompositeSeriesPositiveText.split(ignoredSafetyNotice).length === 2,
+        "A non-composite whole-Series positive ignored count must render the notice exactly once");
+    expectSingleBranch(nonCompositeSeriesPositiveSummary &&
+        nonCompositeSeriesPositiveSummary.textContent.endsWith(
+            hooks.scopeSummaryLine(nonCompositePositive)) &&
+        hooks.scopeSummaryLine(nonCompositePositive).includes(
+            "只读忽略 2 集（S00 2 集）。" + ignoredSafetyNotice),
+        "non-composite whole-Series positive rendering must consume the exact direct scopeSummaryLine string");
+    hooks.renderSeriesPicker(nonCompositeSeriesDialog,
+        { Id: "scope-series", Type: "Series", Name: "Scope Series" },
+        [nonCompositeZero], {}, {});
+    const nonCompositeSeriesZeroText = allVisibleText(nonCompositeSeriesDialog.body);
+    const nonCompositeSeriesZeroSummary = nonCompositeSeriesDialog.body.querySelector(
+        ".danmuSeasonSummaryDetail");
+    expectP1(nonCompositeSeriesPositiveText.split(ignoredSafetyNotice).length === 2 &&
+        !nonCompositeSeriesZeroText.includes(ignoredSafetyNotice),
+        "C non-composite whole-Series positive-to-zero rerender must remove the old notice");
+    expectSingleBranch(nonCompositeSeriesZeroSummary &&
+        nonCompositeSeriesZeroSummary.textContent.endsWith(
+            hooks.scopeSummaryLine(nonCompositeZero)) &&
+        !nonCompositeSeriesZeroSummary.textContent.includes("只读忽略") &&
+        !nonCompositeSeriesZeroSummary.textContent.includes(ignoredSafetyNotice),
+        "non-composite whole-Series zero rerender must consume the direct summary and remove the whole ignored branch");
+    nonCompositeSeriesDialog.forceClose();
+
+    const nonCompositeSeasonDialog = hooks.openDialog("non-composite single-Season ignored notice");
+    hooks.renderCandidatePicker(nonCompositeSeasonDialog,
+        { Id: "scope-non-composite-positive", Type: "Season", Name: "Season 1" },
+        nonCompositePositive, "");
+    const nonCompositeSeasonPositiveText = allVisibleText(nonCompositeSeasonDialog.body);
+    const nonCompositeSeasonPositiveSummary = nonCompositeSeasonDialog.body.children[0];
+    expectP1(nonCompositeSeasonPositiveText.includes("只读忽略 2 集（S00 2 集）") &&
+        nonCompositeSeasonPositiveText.split(ignoredSafetyNotice).length === 2,
+        "B single-Season without CompositePlan positive ignored count must render the notice exactly once");
+    expectSingleBranch(nonCompositeSeasonPositiveSummary &&
+        nonCompositeSeasonPositiveSummary.textContent.endsWith(
+            hooks.scopeSummaryLine(nonCompositePositive)) &&
+        hooks.scopeSummaryLine(nonCompositePositive).includes(
+            "只读忽略 2 集（S00 2 集）。" + ignoredSafetyNotice),
+        "direct single-Season positive rendering must consume the exact direct scopeSummaryLine string");
+    hooks.renderCandidatePicker(nonCompositeSeasonDialog,
+        { Id: "scope-non-composite-zero", Type: "Season", Name: "Season 1" },
+        nonCompositeZero, "");
+    const nonCompositeSeasonZeroText = allVisibleText(nonCompositeSeasonDialog.body);
+    const nonCompositeSeasonZeroSummary = nonCompositeSeasonDialog.body.children[0];
+    expectP1(nonCompositeSeasonPositiveText.split(ignoredSafetyNotice).length === 2 &&
+        !nonCompositeSeasonZeroText.includes(ignoredSafetyNotice),
+        "C single-Season positive-to-zero rerender must remove the old notice");
+    expectSingleBranch(nonCompositeSeasonZeroSummary &&
+        nonCompositeSeasonZeroSummary.textContent.endsWith(
+            hooks.scopeSummaryLine(nonCompositeZero)) &&
+        !nonCompositeSeasonZeroSummary.textContent.includes("只读忽略") &&
+        !nonCompositeSeasonZeroSummary.textContent.includes(ignoredSafetyNotice),
+        "direct single-Season zero rerender must consume the direct summary and remove the whole ignored branch");
+    nonCompositeSeasonDialog.forceClose();
+
+    [
+        ["boolean-true", true],
+        ["boolean-false", false],
+        ["array", [2]],
+        ["numeric-string-array", ["2"]],
+        ["object", { value: 2 }],
+        ["empty-string", ""],
+        ["whitespace-string", "   "]
+    ].forEach(testCase => {
+        const counts = hooks.ignoredScopeCounts(ignoredScopeFixture(
+            "scope-reject-coercion-" + testCase[0], { IgnoredParentZeroEpisodeCount: testCase[1] }));
+        expectP1(counts.parentZero === 0 && counts.total === 0,
+            "D ignored count must reject coercive " + testCase[0] + " input as zero");
+    });
+    const numericIgnoredCounts = hooks.ignoredScopeCounts(ignoredScopeFixture(
+        "scope-accepted-number", { IgnoredParentZeroEpisodeCount: 4.9 }));
+    const numericStringIgnoredCounts = hooks.ignoredScopeCounts(ignoredScopeFixture(
+        "scope-accepted-numeric-string", { ignoredParentZeroEpisodeCount: "5.8" }));
+    expectP1(numericIgnoredCounts.parentZero === 4 && numericIgnoredCounts.total === 4 &&
+        numericStringIgnoredCounts.parentZero === 5 && numericStringIgnoredCounts.total === 5,
+        "D finite positive numbers and non-empty numeric strings must remain accepted and floored");
+    assert(p1Failures.length === 0,
+        "r1 P1 red contract failures: " + p1Failures.join(" | "));
+    assert(singleBranchFailures.length === 0,
+        "r1 single-branch red contract failures: " + singleBranchFailures.join(" | "));
+
+    const scopeS2 = ignoredScopeFixture("scope-s2", {
+        SeasonNumber: 2, SeasonName: "Season 2",
+        IgnoredOtherSeasonEpisodeCount: 0
+    });
+    scopeS2.CompositePlan.OrderedEpisodes.forEach(episode => {
+        episode.ItemId = "s2e1";
+        episode.ParentSeasonNumber = 2;
+        episode.LocalDisplayLabel = "S02E01";
+    });
+    scopeS2.CompositePlan.Mappings = scopeS2.CompositePlan.Mappings.slice(0, 1);
+    scopeS2.CompositePlan.Mappings[0].LocalEpisodeItemId = "s2e1";
+    scopeS2.CompositeSelections[0].LocalStartEpisodeItemId = "s2e1";
+    scopeS2.CompositeGroups = scopeS2.CompositeGroups.slice(0, 1);
+    scopeS2.CompositeGroups[0].Episodes[0].ItemId = "s2e1";
+    scopeS2.CompositeGroups[0].Episodes[0].ParentSeasonNumber = 2;
+    scopeS2.CompositeGroups[0].Episodes[0].LocalDisplayLabel = "S02E01";
+    const isolatedSeriesDialog = hooks.openDialog("whole-Series ignored isolation");
+    hooks.renderSeriesPicker(isolatedSeriesDialog,
+        { Id: "scope-series", Type: "Series", Name: "Scope Series" },
+        [scopedS1, scopeS2], {}, {});
+    const isolatedScopeSummaries = isolatedSeriesDialog.body.querySelectorAll(".danmuSeasonScopeSummary");
+    assert(isolatedScopeSummaries.length === 2 &&
+        allVisibleText(isolatedScopeSummaries[0]).split(ignoredSafetyNotice).length === 2 &&
+        !allVisibleText(isolatedScopeSummaries[1]).includes(ignoredSafetyNotice) &&
+        allVisibleText(isolatedSeriesDialog.body).split(ignoredSafetyNotice).length === 2,
+        "whole-Series rendering must isolate a positive ignored total to its own Season and leave a zero-total Season clean");
+    isolatedSeriesDialog.forceClose();
+
+    const rerenderIgnoredDialog = hooks.openDialog("ignored notice response rerender");
+    hooks.renderSeriesPicker(rerenderIgnoredDialog,
+        { Id: "scope-series", Type: "Series", Name: "Scope Series" }, [scopedS1], {}, {});
+    assert(allVisibleText(rerenderIgnoredDialog.body).split(ignoredSafetyNotice).length === 2,
+        "a positive ignored response must initially render exactly one safety notice");
+    hooks.renderSeriesPicker(rerenderIgnoredDialog,
+        { Id: "scope-series", Type: "Series", Name: "Scope Series" }, [zeroIgnoredSeason], {}, {});
+    assert(!allVisibleText(rerenderIgnoredDialog.body).includes(ignoredSafetyNotice),
+        "a zero ignored rematch/rebuild response must replace the old DOM without retaining its safety notice");
+    hooks.renderSeriesPicker(rerenderIgnoredDialog,
+        { Id: "scope-series", Type: "Series", Name: "Scope Series" }, [scopedS1], {}, {});
+    assert(allVisibleText(rerenderIgnoredDialog.body).split(ignoredSafetyNotice).length === 2,
+        "repeated positive rerender must still contain exactly one safety notice rather than accumulating duplicates");
+    rerenderIgnoredDialog.forceClose();
+
+    const singleScopeDialog = hooks.openDialog("single-Season ignored scope");
+    hooks.renderCompositeTargetPicker(singleScopeDialog,
+        { Id: "scope-s1", Type: "Season", Name: "Season 1" }, scopedS1);
+    const singleScopeText = allVisibleText(singleScopeDialog.body.querySelector(".danmuSeasonScopeSummary"));
+    const seriesScopeConsistencyDialog = hooks.openDialog("whole-Series ignored scope consistency");
+    hooks.renderSeriesPicker(seriesScopeConsistencyDialog,
+        { Id: "scope-series", Type: "Series", Name: "Scope Series" }, [scopedS1], {}, {});
+    const seriesScopeText = allVisibleText(
+        seriesScopeConsistencyDialog.body.querySelector(".danmuSeasonScopeSummary"));
+    assert(singleScopeText === seriesScopeText &&
+        singleScopeText.split(ignoredSafetyNotice).length === 2,
+        "single-Season and whole-Series must use the same ignored breakdown and conditional-notice render path");
+    singleScopeDialog.forceClose();
+    seriesScopeConsistencyDialog.forceClose();
+
+    assert(!positiveIgnoredText.includes("S00E01") &&
+        JSON.stringify(hooks.compositeVirtualGroups(scopedS1, {})).indexOf("s0e1") < 0 &&
+        JSON.stringify(hooks.serverCompositeRequestSelections(scopedS1)).indexOf("s0e1") < 0 &&
+        JSON.stringify(hooks.compositeRequestSelections({}, scopedS1)).indexOf("foreign-source") < 0,
+        "ignored Episodes must remain absent from selectable groups, authoritative selections, and request selections");
+    apiResponses.StartTrackedDownload = {
+        TaskId: "ignored-scope-task", Status: "completed", Completed: 1, Total: 1,
+        Succeeded: 1, Skipped: 0, Partial: 0, Failed: 0, Episodes: []
+    };
+    const ignoredDownloadCallStart = apiCalls.length;
+    const ignoredDownloadDialog = hooks.openDialog("ignored scope download safety");
+    await hooks.renderDownloadProgress(ignoredDownloadDialog, [scopedS1], {});
+    const ignoredDownloadCall = apiCalls.slice(ignoredDownloadCallStart)
+        .find(call => call.option === "StartTrackedDownload");
+    assert(ignoredDownloadCall && ignoredDownloadCall.itemId === "scope-s1" &&
+        JSON.parse(ignoredDownloadCall.parameters.compositeSelections).length === 1 &&
+        ignoredDownloadCall.parameters.compositeSelections.indexOf("s1e1") >= 0 &&
+        ignoredDownloadCall.parameters.compositeSelections.indexOf("s0e1") < 0 &&
+        ignoredDownloadCall.parameters.compositeSelections.indexOf("foreign-source") < 0,
+        "the real download request must retain the eligible S1 selection and submit zero ignored mappings");
+    ignoredDownloadDialog.forceClose();
+    delete apiResponses.StartTrackedDownload;
 
     const explicitS0 = {
         SeriesId: "scope-series", SeasonId: "scope-s0", SeasonNumber: 0, SeasonName: "Season 0",
@@ -2020,10 +2541,16 @@ async function main() {
             kind === "manual" ? allVisibleText(card).includes("手动匹配") : allVisibleText(card).includes("精确集映射"));
         const rematch = targetCard.querySelectorAll(".danmuSmartButton")
             .find(button => button.textContent === "重新匹配");
-        await rematch.dispatch("click");
+        await rematch.dispatch("click", { isTrusted: true });
         await waitUntil(() => dialog.body.querySelectorAll(".danmuCandidate").length === 1,
             entry + "/" + kind + " rematch should enter the temporary-range picker");
-        if (returnPath === "android") dialog.handleAndroidBack();
+        const detachedRematchBody = dialog.body.children[0];
+        const detachedRematchApiCount = apiCalls.length;
+        await rematch.dispatch("click", { isTrusted: true });
+        assert(dialog.body.children[0] === detachedRematchBody && apiCalls.length === detachedRematchApiCount &&
+            hooks.navigationContextDepth(dialog) === 1,
+            entry + "/" + kind + " detached rematch must not render, request, or push again");
+        if (returnPath === "android") documentStub.dispatchCommand("back");
         else await dialog.footer.children.find(button => button.textContent === "返回总览").dispatch("click");
         assert(JSON.stringify(seasons[0]) === beforeSeason &&
             JSON.stringify(fixture.selections) === beforeSelections &&
@@ -2183,59 +2710,95 @@ async function main() {
         !protectedDialog.overlay.isConnected && (documentStub.listeners.keydown || []).length === 0,
         "force close must bypass protection and shared disposal must be idempotent");
 
-    const androidDialog = hooks.openDialog("android-navigation");
+    let hostCommandCalls = 0;
+    documentStub.addEventListener("command", function () { hostCommandCalls++; });
+    const androidHistoryBaseline = Object.assign({}, historyCalls);
+    const androidHostRouteBaseline = context.window.location.href;
+    const androidDialog = hooks.openDialog("android-command-secondary");
     let returnedToParent = 0;
     androidDialog.setBackHandler(function () {
         returnedToParent++;
         androidDialog.setBackHandler(null);
     });
-    historyStub.back();
-    assert(returnedToParent === 1 && androidDialog.overlay.isConnected &&
-        historyStub.state && historyStub.state.__danmuSmartDialog,
-        "Android history back from a secondary view must return to its parent and restore the guard");
-    historyStub.back();
-    assert(!androidDialog.overlay.isConnected && hooks.activeDialogCount() === 0 &&
-        (windowListeners.popstate || []).length === 0 &&
+    const childCommand = documentStub.dispatchCommand("back");
+    assert(hooks.dialogBackMode(androidDialog) === "android-command" &&
+        returnedToParent === 1 && androidDialog.overlay.isConnected && childCommand.defaultPrevented &&
+        !childCommand.propagationStopped && hostCommandCalls === 1 &&
         (documentStub.listeners.backbutton || []).length === 0,
-        "Android history back from the top-level view must close and clean up the dialog");
+        "Android command must return a secondary view once without stopping propagation or registering backbutton");
+    const topCommand = documentStub.dispatchCommand("back");
+    assert(!androidDialog.overlay.isConnected && topCommand.defaultPrevented,
+        "Android command at the top level must close exactly one dialog");
 
-    const protectedAndroidDialog = hooks.openDialog("protected-android");
+    const protectedAndroidDialog = hooks.openDialog("protected-android-command");
     protectedAndroidDialog.closable = false;
-    historyStub.back();
-    assert(protectedAndroidDialog.overlay.isConnected &&
-        historyStub.state && historyStub.state.__danmuSmartDialog,
-        "Android history back must not dismiss a protected download view and must restore its guard");
-    protectedAndroidDialog.closable = true;
-    await documentStub.dispatchKey("Escape");
-    assert(!protectedAndroidDialog.overlay.isConnected,
-        "the existing Escape close path must remain available after protected Android back handling");
+    documentStub.dispatchCommand("back");
+    assert(protectedAndroidDialog.overlay.isConnected,
+        "a protected Android command dialog must remain open");
+    protectedAndroidDialog.forceClose();
 
-    const nativeBackDialog = hooks.openDialog("native-backbutton");
-    let nativeParentReturns = 0;
-    nativeBackDialog.setBackHandler(function () {
-        nativeParentReturns++;
-        nativeBackDialog.setBackHandler(null);
-    });
-    const childBackButton = documentStub.dispatchEvent("backbutton");
-    assert(nativeParentReturns === 1 && nativeBackDialog.overlay.isConnected &&
-        childBackButton.defaultPrevented && childBackButton.propagationStopped,
-        "a native Android backbutton event must return from a secondary view without reaching Emby");
-    const topBackButton = documentStub.dispatchEvent("backbutton");
-    assert(!nativeBackDialog.overlay.isConnected && topBackButton.defaultPrevented,
-        "a native Android backbutton event at the top level must close the smart-match dialog");
-
-    const busyBackDialog = hooks.openDialog("busy-android-back");
+    const busyBackDialog = hooks.openDialog("busy-android-command");
     hooks.setBusy(busyBackDialog, "searching");
-    historyStub.back();
-    const busyNativeBack = documentStub.dispatchEvent("backbutton");
-    assert(busyBackDialog.overlay.isConnected && busyBackDialog.androidBackLocked &&
-        historyStub.state && historyStub.state.__danmuSmartDialog &&
-        busyNativeBack.defaultPrevented && busyNativeBack.propagationStopped,
-        "history and native Android back must be consumed while a smart-match search is busy");
-    const busyClose = busyBackDialog.overlay.children[0].children[0].children[1];
-    await busyClose.dispatch("click");
-    assert(!busyBackDialog.overlay.isConnected,
-        "the top-right close button must remain effective while Android back is locked");
+    documentStub.dispatchCommand("back");
+    assert(busyBackDialog.overlay.isConnected && busyBackDialog.androidBackLocked,
+        "a busy Android command dialog must consume ownership while remaining open");
+    busyBackDialog.forceClose();
+
+    const lowerCommandDialog = hooks.openDialog("lower android-command");
+    const upperCommandDialog = hooks.openDialog("upper android-command");
+    documentStub.dispatchCommand("back");
+    assert(!upperCommandDialog.overlay.isConnected && lowerCommandDialog.overlay.isConnected,
+        "only the topmost connected Android command dialog may handle one command");
+    lowerCommandDialog.forceClose();
+
+    const noOverlayCommand = documentStub.dispatchCommand("back");
+    const nonBackDialog = hooks.openDialog("non-back command");
+    const nonBackCommand = documentStub.dispatchCommand("refresh");
+    assert(!noOverlayCommand.defaultPrevented && !nonBackCommand.defaultPrevented &&
+        nonBackDialog.overlay.isConnected,
+        "no-overlay and non-back commands must pass through unchanged");
+    nonBackDialog.forceClose();
+
+    const failedCancelDialog = hooks.openDialog("failed cancellation");
+    documentStub.dispatchCommand("back", { cancelable: false });
+    documentStub.dispatchCommand("back", { omitPreventDefault: true });
+    documentStub.dispatchCommand("back", { preventBehavior: "noop" });
+    documentStub.dispatchCommand("back", { preventBehavior: "throw" });
+    assert(failedCancelDialog.overlay.isConnected,
+        "noncancelable, ineffective, and throwing cancellation must not mutate Smart Match");
+    failedCancelDialog.forceClose();
+
+    const preexistingDialog = hooks.openDialog("preexisting cancellation");
+    documentStub.dispatchCommand("back", { defaultPrevented: true, preventBehavior: "noop" });
+    assert(!preexistingDialog.overlay.isConnected,
+        "a preexisting cancellation must still invoke the eligible handler once");
+
+    const falseHandlerDialog = hooks.openDialog("false command handler");
+    falseHandlerDialog.handleCommandBack = function () { return false; };
+    const falseHandlerCommand = documentStub.dispatchCommand("back");
+    assert(falseHandlerCommand.defaultPrevented && falseHandlerDialog.overlay.isConnected,
+        "a false handler must retain cancellation without fallback");
+    falseHandlerDialog.forceClose();
+    const throwingHandlerDialog = hooks.openDialog("throwing command handler");
+    throwingHandlerDialog.handleCommandBack = function () { throw new Error("injected command failure"); };
+    const throwingHandlerCommand = documentStub.dispatchCommand("back");
+    assert(throwingHandlerCommand.defaultPrevented && throwingHandlerDialog.overlay.isConnected,
+        "a throwing handler must retain cancellation without fallback");
+    throwingHandlerDialog.forceClose();
+    let hostPopParentCalls = 0;
+    const hostPopAndroidOne = hooks.openDialog("host pop android one");
+    const hostPopAndroidTwo = hooks.openDialog("host pop android two");
+    hostPopAndroidOne.setBackHandler(function () { hostPopParentCalls++; });
+    hostPopAndroidTwo.setBackHandler(function () { hostPopParentCalls++; });
+    (windowListeners.popstate || []).slice().forEach(listener => listener({ state: null }));
+    assert(!hostPopAndroidOne.overlay.isConnected && !hostPopAndroidTwo.overlay.isConnected &&
+        hostPopParentCalls === 0,
+        "host popstate must dispose the complete Android overlay stack without internal parent return");
+    assert(historyCalls.pushState === androidHistoryBaseline.pushState &&
+        historyCalls.replaceState === androidHistoryBaseline.replaceState &&
+        historyCalls.back === androidHistoryBaseline.back &&
+        context.window.location.href === androidHostRouteBaseline,
+        "all Android command paths must preserve the host route and perform zero dialog-owned history operations");
 
     const busyForceDialog = hooks.openDialog("busy force state");
     busyForceDialog.forceRefresh = true;
@@ -2256,7 +2819,7 @@ async function main() {
         { Id: "series-id", Type: "Series", Name: "Series" }, [], {}, {});
     assert(!completedSearchDialog.androidBackLocked,
         "rendering a completed search result must release the Android-back lock");
-    historyStub.back();
+    documentStub.dispatchCommand("back");
     assert(!completedSearchDialog.overlay.isConnected,
         "normal Android back behavior must resume after search results are rendered");
 
@@ -2271,11 +2834,11 @@ async function main() {
     hooks.renderSeriesSeasonPicker(seriesBackDialog, seriesItem, seriesSeasons, 0, {}, {});
     assert(seriesBackDialog.title.textContent.includes("手动匹配"),
         "opening a Series Season must enter the secondary candidate view");
-    historyStub.back();
+    documentStub.dispatchCommand("back");
     assert(seriesBackDialog.overlay.isConnected &&
         seriesBackDialog.title.textContent === "整部剧弹幕智能匹配",
         "Android back from a real Series Season candidate view must restore the Series overview");
-    historyStub.back();
+    documentStub.dispatchCommand("back");
     assert(!seriesBackDialog.overlay.isConnected,
         "a second Android back at the restored Series top level must close the dialog");
 
@@ -2568,8 +3131,9 @@ async function main() {
     await waitUntil(() => failedDetailDialog.body.querySelectorAll(".danmuCandidate").length === 60,
         "a failed detail request should restore candidates");
     assert(failedDetailDialog.body.querySelectorAll(".danmuCandidate").length === 60 &&
-        !failedDetailDialog.body.querySelector(".danmuBusy"),
-        "detail-resolution failure must restore the intact candidate list and release busy controls");
+        !failedDetailDialog.body.querySelector(".danmuBusy") &&
+        hooks.navigationContextDepth(failedDetailDialog) === 0,
+        "detail-resolution failure must restore the intact candidate list, release busy controls, and consume only its provisional context");
     failedDetailDialog.forceClose();
     delete apiResponses.GetSelectedCandidatePreview;
 
@@ -2806,6 +3370,500 @@ async function main() {
     await stop.dispatch("click");
     assert(stopDialog.closable && !stopDialog.footer.children.some(button => button.textContent === "关闭"),
         "force-stop should make the single-target dialog immediately closable through only × or Escape");
+
+    // r1 semantic viewport primitives: each fallback is independently observable.
+    function viewportFallbackFixture(mode) {
+        const dialog = {
+            body: new FakeElement("div"), navigationContexts: [], presentationAnchors: {},
+            presentationAnchorGeneration: 0
+        };
+        dialog.body.clientHeight = 200;
+        dialog.body.scrollHeight = 1400;
+        dialog.body.scrollTop = 700;
+        const section = hooks.markPresentationAnchor(dialog, new FakeElement("section"), "section", "section");
+        section.offsetTop = 600;
+        const neighbor = hooks.markPresentationAnchor(dialog, new FakeElement("div"), "row", "neighbor");
+        neighbor.offsetTop = 500;
+        const row = hooks.markPresentationAnchor(dialog, new FakeElement("div"), "row", "row");
+        row.offsetTop = 800;
+        const action = hooks.markPresentationAnchor(dialog, new FakeElement("button"), "action", "action");
+        action.offsetTop = 900;
+        row.appendChild(action);
+        section.append(neighbor, row);
+        dialog.body.appendChild(section);
+        hooks.captureParentNavigation(dialog, action, function () {
+            dialog.body.replaceChildren();
+            dialog.body.clientHeight = mode === "zero" ? 500 : 200;
+            dialog.body.scrollHeight = mode === "zero" ? 300 : 1200;
+            const rebuiltSection = hooks.markPresentationAnchor(dialog, new FakeElement("section"), "section", "section");
+            rebuiltSection.offsetTop = 300;
+            const rebuiltNeighbor = hooks.markPresentationAnchor(dialog, new FakeElement("div"), "row", "neighbor");
+            rebuiltNeighbor.offsetTop = 550;
+            const rebuiltRow = hooks.markPresentationAnchor(dialog, new FakeElement("div"), "row", "row");
+            rebuiltRow.offsetTop = 450;
+            const rebuiltAction = hooks.markPresentationAnchor(dialog, new FakeElement("button"), "action", "action");
+            rebuiltAction.offsetTop = 600;
+            if (mode === "action") rebuiltRow.appendChild(rebuiltAction);
+            if (mode === "action" || mode === "row") rebuiltSection.appendChild(rebuiltRow);
+            if (["action", "row", "section"].includes(mode)) dialog.body.appendChild(rebuiltSection);
+            if (mode === "neighbor") dialog.body.appendChild(rebuiltNeighbor);
+        }, { row: row, section: section, neighbor: neighbor });
+        assert(hooks.returnFromChild(dialog), mode + " fixture must consume one context");
+        return { offset: dialog.body.scrollTop, depth: hooks.navigationContextDepth(dialog) };
+    }
+    assert(viewportFallbackFixture("action").offset === 400,
+        "semantic return must prefer the rebuilt initiating action and preserve its viewport-relative offset");
+    assert(viewportFallbackFixture("row").offset === 350,
+        "when the action disappears, semantic return must use the initiating row rather than the action geometry");
+    assert(viewportFallbackFixture("section").offset === 400,
+        "when action and row disappear, semantic return must use the surviving enclosing section");
+    assert(viewportFallbackFixture("neighbor").offset === 750,
+        "when the initiating section disappears, semantic return must use the pre-recorded logical neighbor");
+    assert(viewportFallbackFixture("raw").offset === 700,
+        "when no semantic anchor survives, semantic return must retain an in-range raw offset");
+    assert(viewportFallbackFixture("zero").offset === 0,
+        "a rebuilt parent with no scrollable range must use zero");
+
+    const clampedDialog = { body: new FakeElement("div"), navigationContexts: [], presentationAnchors: {} };
+    clampedDialog.body.scrollTop = 900;
+    clampedDialog.body.scrollHeight = 1200;
+    clampedDialog.body.clientHeight = 200;
+    hooks.captureParentNavigation(clampedDialog, null, function () {
+        clampedDialog.body.replaceChildren();
+        clampedDialog.body.scrollHeight = 430;
+        clampedDialog.body.clientHeight = 200;
+    });
+    hooks.returnFromChild(clampedDialog);
+    assert(clampedDialog.body.scrollTop === 230,
+        "the numeric fallback must clamp to the rebuilt parent's final valid scroll range");
+
+    const nestedDialog = { body: new FakeElement("div"), navigationContexts: [], presentationAnchors: {} };
+    const nestedRow = hooks.markPresentationAnchor(nestedDialog, new FakeElement("div"), "row", "nested");
+    nestedDialog.body.appendChild(nestedRow);
+    const nestedOrder = [];
+    hooks.captureParentNavigation(nestedDialog, nestedRow, function () { nestedOrder.push("outer"); });
+    hooks.captureParentNavigation(nestedDialog, nestedRow, function () { nestedOrder.push("inner"); });
+    hooks.returnFromChild(nestedDialog);
+    hooks.returnFromChild(nestedDialog);
+    assert(nestedOrder.join(",") === "inner,outer" && hooks.navigationContextDepth(nestedDialog) === 0,
+        "nested navigation contexts must remain per-dialog and last-in-first-out");
+
+    // Real Series trigger: capture occurs before replacement, child starts at zero, and server order stays intact.
+    const scrollSeriesDialog = hooks.openDialog("r1 Series scroll entry");
+    const scrollSeriesSeasons = [{
+        SeriesId: "scroll-series", SeasonId: "scroll-season", SeasonNumber: 2,
+        SeriesName: "Scroll Series", SeasonName: "Season 2", Status: "not-matched",
+        Candidates: [
+            { Site: "Fake", Id: "ordered-a", Name: "First server candidate" },
+            { Site: "Fake", Id: "ordered-b", Name: "Second server candidate" }
+        ]
+    }];
+    const savedPointerEvent = context.window.PointerEvent;
+    context.window.PointerEvent = function PointerEvent() {};
+    hooks.renderSeriesPicker(scrollSeriesDialog,
+        { Id: "scroll-series", Type: "Series", Name: "Scroll Series" }, scrollSeriesSeasons, {}, {});
+    const seriesEntry = scrollSeriesDialog.body.querySelectorAll(".danmuSmartButton")
+        .find(button => button.textContent === "查看候选");
+    anchorLayoutOffsets[seriesEntry.dataset.danmuNavAnchor] = 706;
+    scrollSeriesDialog.body.scrollTop = 326;
+    useHtmlCollectionLikeChildren(scrollSeriesDialog.body);
+    assert(scrollSeriesDialog.body.children.length > 0 &&
+        scrollSeriesDialog.body.children.forEach === undefined &&
+        scrollSeriesDialog.body.children.some === undefined &&
+        scrollSeriesDialog.body.children[Symbol.iterator] === undefined,
+        "the real Series workflow fixture must expose HTMLCollection-like children without Array methods or iteration");
+    await seriesEntry.dispatch("pointerdown", { pointerType: "mouse" });
+    assert(hooks.navigationContextDepth(scrollSeriesDialog) === 0,
+        "pointer preactivation must sample geometry without entering navigation");
+    scrollSeriesDialog.body.scrollTop = 426;
+    await seriesEntry.dispatch("click", { isTrusted: true });
+    assert(scrollSeriesDialog.body.scrollTop === 0 && hooks.navigationContextDepth(scrollSeriesDialog) === 1 &&
+        scrollSeriesDialog.body.querySelectorAll(".danmuCandidateTitle").map(node => node.textContent).join("|") ===
+            "Fake · First server candidate|Fake · Second server candidate",
+        "the real Series action must synchronously enter at zero without reordering server candidates");
+    scrollSeriesDialog.body.scrollHeight = 200;
+    scrollSeriesDialog.body.clientHeight = 200;
+    await scrollSeriesDialog.footer.children.find(button => button.textContent === "返回总览").dispatch("click");
+    const restoredSeriesAction = scrollSeriesDialog.body.querySelectorAll(".danmuSmartButton")
+        .find(button => button.textContent === "查看候选");
+    assert(restoredSeriesAction && scrollSeriesDialog.body.scrollTop === 326 &&
+        hooks.navigationContextDepth(scrollSeriesDialog) === 0,
+        "pointerdown must preserve the pre-focus 326 offset for contentTop 706 through HTMLCollection-like entry and action return instead of capturing the native-focus 426 offset");
+    delete anchorLayoutOffsets[seriesEntry.dataset.danmuNavAnchor];
+    context.window.PointerEvent = savedPointerEvent;
+    scrollSeriesDialog.forceClose();
+
+    async function verifySeriesActivationTiming(name, armType, armEvent, useAndroidBack, expectedOffset, clickEvent) {
+        context.window.PointerEvent = function PointerEvent() {};
+        const dialog = hooks.openDialog("activation " + name);
+        hooks.renderSeriesPicker(dialog, { Id: "activation-series", Type: "Series", Name: "Activation" },
+            [Object.assign({}, scrollSeriesSeasons[0], { SeasonId: "activation-" + name })], {}, {});
+        const action = dialog.body.querySelectorAll(".danmuSmartButton")
+            .find(button => button.textContent === "查看候选");
+        anchorLayoutOffsets[action.dataset.danmuNavAnchor] = 706;
+        dialog.body.scrollTop = 326;
+        if (armType) await action.dispatch(armType, armEvent);
+        assert(hooks.navigationContextDepth(dialog) === 0,
+            name + " preactivation must not push a navigation context");
+        dialog.body.scrollTop = 426;
+        await action.dispatch("click", clickEvent);
+        assert(dialog.body.scrollTop === 0 && hooks.navigationContextDepth(dialog) === 1,
+            name + " click must push exactly one context and enter the child at zero");
+        const detachedBody = dialog.body.children[0];
+        const detachedApiCount = apiCalls.length;
+        await action.dispatch("click", { isTrusted: true });
+        assert(hooks.navigationContextDepth(dialog) === 1 && dialog.body.children[0] === detachedBody &&
+            apiCalls.length === detachedApiCount,
+            name + " detached second click must not push, render, or request again");
+        if (useAndroidBack) documentStub.dispatchCommand("back");
+        else await dialog.footer.children.find(button => button.textContent === "返回总览").dispatch("click");
+        assert(dialog.body.scrollTop === expectedOffset && hooks.navigationContextDepth(dialog) === 0,
+            name + " return must use the expected activation geometry");
+        delete anchorLayoutOffsets[action.dataset.danmuNavAnchor];
+        dialog.forceClose();
+    }
+    await verifySeriesActivationTiming("pointer-touch", "pointerdown", { pointerType: "touch" }, true, 326,
+        { isTrusted: true });
+    await verifySeriesActivationTiming("keyboard-enter", "keydown", { key: "Enter" }, false, 326,
+        { isTrusted: true });
+    await verifySeriesActivationTiming("keyboard-space", "keydown", { key: " " }, false, 326,
+        { isTrusted: true });
+    await verifySeriesActivationTiming("programmatic", null, null, false, 426);
+    await verifySeriesActivationTiming("untrusted-after-stale-arm", "pointerdown", { pointerType: "mouse" },
+        false, 426);
+
+    async function verifyLegacyActivation(name, navigatorIdentity, armType, syntheticType) {
+        const previousNavigator = context.window.navigator;
+        context.window.navigator = navigatorIdentity;
+        context.window.PointerEvent = undefined;
+        const dialog = hooks.openDialog("legacy " + name);
+        hooks.renderSeriesPicker(dialog, { Id: "legacy-series", Type: "Series", Name: "Legacy" },
+            [Object.assign({}, scrollSeriesSeasons[0], { SeasonId: "legacy-" + name })], {}, {});
+        const action = dialog.body.querySelectorAll(".danmuSmartButton")
+            .find(button => button.textContent === "查看候选");
+        anchorLayoutOffsets[action.dataset.danmuNavAnchor] = 706;
+        dialog.body.scrollTop = 326;
+        await action.dispatch(armType);
+        dialog.body.scrollTop = 426;
+        if (syntheticType) await action.dispatch(syntheticType);
+        await action.dispatch("click", { isTrusted: true });
+        await dialog.footer.children.find(button => button.textContent === "返回总览").dispatch("click");
+        assert(dialog.body.scrollTop === 326 && hooks.navigationContextDepth(dialog) === 0,
+            name + " legacy activation must preserve pre-focus geometry without synthesized-event overwrite");
+        delete anchorLayoutOffsets[action.dataset.danmuNavAnchor];
+        dialog.forceClose();
+        context.window.navigator = previousNavigator;
+    }
+    await verifyLegacyActivation("android-touch", { userAgent: "Android WebView" }, "touchstart", "mousedown");
+    await verifyLegacyActivation("desktop-mouse", { userAgent: "Desktop Chrome" }, "mousedown", "touchstart");
+
+    async function verifyCancelledActivation(name, pointerSupported, armType, cancelType, armEvent) {
+        context.window.PointerEvent = pointerSupported ? function PointerEvent() {} : undefined;
+        const dialog = hooks.openDialog("cancel " + name);
+        hooks.renderSeriesPicker(dialog, { Id: "cancel-series", Type: "Series", Name: "Cancel" },
+            [Object.assign({}, scrollSeriesSeasons[0], { SeasonId: "cancel-" + name })], {}, {});
+        const action = dialog.body.querySelectorAll(".danmuSmartButton")
+            .find(button => button.textContent === "查看候选");
+        dialog.body.scrollTop = 326;
+        await action.dispatch(armType, armEvent);
+        await action.dispatch(cancelType);
+        assert(hooks.navigationContextDepth(dialog) === 0,
+            name + " cancellation without click must retain zero navigation depth");
+        dialog.forceClose();
+    }
+    await verifyCancelledActivation("pointercancel", true, "pointerdown", "pointercancel", { pointerType: "mouse" });
+    await verifyCancelledActivation("touchcancel", false, "touchstart", "touchcancel");
+    await verifyCancelledActivation("contextmenu", true, "pointerdown", "contextmenu", { pointerType: "touch" });
+    await verifyCancelledActivation("dragstart", true, "pointerdown", "dragstart", { pointerType: "mouse" });
+    await verifyCancelledActivation("blur", true, "pointerdown", "blur", { pointerType: "pen" });
+    await verifyCancelledActivation("longpress-without-click", false, "touchstart", "contextmenu");
+
+    context.window.PointerEvent = function PointerEvent() {};
+    const crossDialog = hooks.openDialog("activation ownership");
+    const crossSeasons = [
+        Object.assign({}, scrollSeriesSeasons[0], { SeasonId: "activation-a", SeasonName: "Season A" }),
+        Object.assign({}, scrollSeriesSeasons[0], { SeasonId: "activation-b", SeasonName: "Season B" })
+    ];
+    hooks.renderSeriesPicker(crossDialog, { Id: "activation-series", Type: "Series", Name: "Activation" },
+        crossSeasons, {}, {});
+    const crossActions = crossDialog.body.querySelectorAll(".danmuSmartButton")
+        .filter(button => button.textContent === "查看候选");
+    anchorLayoutOffsets[crossActions[0].dataset.danmuNavAnchor] = 706;
+    anchorLayoutOffsets[crossActions[1].dataset.danmuNavAnchor] = 906;
+    crossDialog.body.scrollTop = 326;
+    await crossActions[0].dispatch("pointerdown", { pointerType: "mouse" });
+    crossDialog.body.scrollTop = 426;
+    await crossActions[1].dispatch("pointerdown", { pointerType: "mouse" });
+    await crossActions[1].dispatch("click", { isTrusted: true });
+    assert(hooks.navigationContextDepth(crossDialog) === 1,
+        "a new activation must overwrite A and B must consume exactly its own pending sample");
+    await crossDialog.footer.children.find(button => button.textContent === "返回总览").dispatch("click");
+    assert(crossDialog.body.scrollTop === 426 && hooks.navigationContextDepth(crossDialog) === 0,
+        "A armed without click must never leak its geometry into B");
+    delete anchorLayoutOffsets[crossActions[0].dataset.danmuNavAnchor];
+    delete anchorLayoutOffsets[crossActions[1].dataset.danmuNavAnchor];
+    crossDialog.forceClose();
+    context.window.PointerEvent = savedPointerEvent;
+
+    // Real successful Season save: the ordinary row becomes a composite section,
+    // so action/row anchors disappear and the stable Season section must restore it.
+    const seasonToCompositeDialog = hooks.openDialog("r1 Season save changes parent structure");
+    const seasonToComposite = {
+        SeriesId: "section-series", SeasonId: "section-season", SeasonNumber: 1,
+        SeriesName: "Section Series", SeasonName: "Season 1", Status: "not-matched",
+        MappingProtocolVersion: 22, PlanGeneration: 7341, CandidateGeneration: "section-generation",
+        Candidates: [{ Site: "Fake", Id: "section-candidate", Name: "Section candidate",
+            SelectionEvidenceToken: "section-proof" }]
+    };
+    const confirmedComposite = Object.assign({}, compositeSeason, {
+        SeriesId: seasonToComposite.SeriesId,
+        SeasonId: seasonToComposite.SeasonId,
+        SeasonNumber: seasonToComposite.SeasonNumber,
+        SeriesName: seasonToComposite.SeriesName,
+        SeasonName: seasonToComposite.SeasonName
+    });
+    const seasonToCompositeSeasons = [seasonToComposite];
+    hooks.renderSeriesPicker(seasonToCompositeDialog,
+        { Id: "section-series", Type: "Series", Name: "Section Series" },
+        seasonToCompositeSeasons, {}, {});
+    seasonToCompositeDialog.body.clientHeight = 300;
+    seasonToCompositeDialog.body.scrollHeight = 1600;
+    const ordinarySection = seasonToCompositeDialog.body.querySelector(".danmuSeasonSummary");
+    const ordinaryRow = ordinarySection.children[0];
+    const ordinaryAction = ordinarySection.querySelectorAll(".danmuSmartButton")
+        .find(button => button.textContent === "查看候选");
+    ordinarySection.offsetTop = 600;
+    ordinaryRow.offsetTop = 700;
+    ordinaryAction.offsetTop = 800;
+    seasonToCompositeDialog.body.scrollTop = 900;
+    const originalSectionViewportOffset = ordinarySection.offsetTop - seasonToCompositeDialog.body.scrollTop;
+    await ordinaryAction.dispatch("click");
+    seasonToCompositeDialog.body.querySelector(".danmuCandidate").children[0].checked = true;
+    assert(seasonToCompositeDialog.body.querySelector('input[name="danmuSeriesManualCandidate"]:checked'),
+        "the real Season-save fixture must select its rendered candidate radio");
+    apiResponses.MatchPreview = { Seasons: [confirmedComposite] };
+    await seasonToCompositeDialog.footer.children
+        .find(button => button.textContent === "保存本季选择").dispatch("click");
+    for (let attempt = 0; attempt < 12 &&
+        !seasonToCompositeDialog.body.querySelector(".danmuCompositeSeason"); attempt++) {
+        await new Promise(resolve => setImmediate(resolve));
+    }
+    const rebuiltCompositeSection = seasonToCompositeDialog.body.querySelector(".danmuCompositeSeason");
+    assert(rebuiltCompositeSection &&
+        seasonToCompositeDialog.body.querySelectorAll(".danmuSeasonSummary").length === 0 &&
+        !seasonToCompositeDialog.body.querySelectorAll(".danmuSmartButton")
+            .some(button => button.textContent === "查看候选") &&
+        rebuiltCompositeSection.offsetTop - seasonToCompositeDialog.body.scrollTop ===
+            originalSectionViewportOffset &&
+        seasonToCompositeDialog.body.scrollTop === 300 &&
+        hooks.navigationContextDepth(seasonToCompositeDialog) === 0,
+        "a successful Season save that replaces the ordinary action/row with composite content must restore through the stable Season section at its original viewport-relative offset");
+    delete apiResponses.MatchPreview;
+    seasonToCompositeDialog.forceClose();
+
+    // Real composite trigger: the immediate busy/result child is reset before its asynchronous search.
+    context.window.PointerEvent = function PointerEvent() {};
+    const scrollCompositeDialog = hooks.openDialog("r1 composite scroll entry");
+    const scrollCompositeSeasons = [groupOnlySeason];
+    hooks.renderSeriesPicker(scrollCompositeDialog,
+        { Id: "scroll-composite", Type: "Series", Name: "Composite" }, scrollCompositeSeasons, {}, {});
+    scrollCompositeDialog.body.scrollTop = 326;
+    apiResponses.MatchPreview = { Seasons: [groupOnlySeason] };
+    const compositeEntry = scrollCompositeDialog.body.querySelectorAll(".danmuSmartButton")
+        .find(button => button.textContent === "手动匹配");
+    anchorLayoutOffsets[compositeEntry.dataset.danmuNavAnchor] = 706;
+    await compositeEntry.dispatch("pointerdown", { pointerType: "mouse" });
+    assert(hooks.navigationContextDepth(scrollCompositeDialog) === 0,
+        "expanded composite pointer preactivation must remain a pending sample only");
+    scrollCompositeDialog.body.scrollTop = 426;
+    await compositeEntry.dispatch("click", { isTrusted: true });
+    assert(scrollCompositeDialog.body.scrollTop === 0 && hooks.navigationContextDepth(scrollCompositeDialog) === 1,
+        "the real temporary-range action must enter its child at zero before automatic range-search completion");
+    await waitUntil(() => scrollCompositeDialog.footer.children
+        .some(button => button.textContent === "返回总览"), "composite return action did not render");
+    const detachedCompositeBody = scrollCompositeDialog.body.children[0];
+    const detachedCompositeApiCount = apiCalls.length;
+    await compositeEntry.dispatch("click", { isTrusted: true });
+    assert(scrollCompositeDialog.body.children[0] === detachedCompositeBody &&
+        apiCalls.length === detachedCompositeApiCount && hooks.navigationContextDepth(scrollCompositeDialog) === 1,
+        "a detached composite match trigger must not render, request, or push again");
+    scrollCompositeDialog.body.scrollHeight = 1600;
+    scrollCompositeDialog.body.clientHeight = 300;
+    await scrollCompositeDialog.footer.children.find(button => button.textContent === "返回总览").dispatch("click");
+    assert(scrollCompositeDialog.body.scrollTop === 326 && hooks.navigationContextDepth(scrollCompositeDialog) === 0,
+        "expanded composite return must preserve pre-focus 326 instead of click-time 426 geometry");
+    delete anchorLayoutOffsets[compositeEntry.dataset.danmuNavAnchor];
+    scrollCompositeDialog.forceClose();
+    context.window.PointerEvent = savedPointerEvent;
+    delete apiResponses.MatchPreview;
+
+    async function verifyNestedItemEntry(type) {
+        const previousPointerEvent = context.window.PointerEvent;
+        context.window.PointerEvent = function PointerEvent() {};
+        const dialog = hooks.openDialog("r1 " + type + " nested entry");
+        const candidate = { Site: "Fake", Id: type.toLowerCase() + "-candidate", Name: "Candidate",
+            SelectionEvidenceToken: type.toLowerCase() + "-proof" };
+        const alternateCandidate = { Site: "Fake", Id: type.toLowerCase() + "-alternate", Name: "Alternate",
+            SelectionEvidenceToken: type.toLowerCase() + "-alternate-proof" };
+        const target = { ItemName: type, Candidates: [candidate, alternateCandidate] };
+        if (type === "Episode") {
+            target.ParentName = "Parent";
+            target.SeasonName = "Season";
+            target.EpisodeNumber = 3;
+        }
+        hooks.renderItemCandidatePicker(dialog,
+            { Id: type.toLowerCase() + "-item", Type: type, Name: type }, target, "");
+        const candidateRows = dialog.body.querySelectorAll(".danmuCandidate");
+        anchorLayoutOffsets[candidateRows[0].children[1].dataset.danmuNavAnchor] = 706;
+        anchorLayoutOffsets[candidateRows[1].children[1].dataset.danmuNavAnchor] = 906;
+        dialog.body.scrollTop = 326;
+        candidateRows[0].children[0].checked = true;
+        apiResponses.GetSelectedCandidatePreview = type === "Episode"
+            ? { Status: "ready", Episodes: [
+                { Id: "source-a", Number: 1, Title: "First source" },
+                { Id: "source-b", Number: 2, Title: "Second source" }
+            ] }
+            : { Status: "ready", MovieParts: [
+                { Token: "part-a", PartTitle: "First version" },
+                { Token: "part-b", PartTitle: "Second version" }
+            ] };
+        const startAction = dialog.footer.children[dialog.footer.children.length - 1];
+        await startAction.dispatch("pointerdown", { pointerType: "mouse" });
+        candidateRows[0].children[0].checked = false;
+        candidateRows[1].children[0].checked = true;
+        dialog.body.scrollTop = 426;
+        await startAction.dispatch("click", { isTrusted: true });
+        const childClass = type === "Episode" ? ".danmuSourceEpisodeChoice" : ".danmuMoviePartChoice";
+        await waitUntil(() => dialog.body.querySelectorAll(childClass).length === 2,
+            type + " nested selector did not render");
+        const detachedChild = dialog.body.children[0];
+        const detachedApiCount = apiCalls.length;
+        await startAction.dispatch("click", { isTrusted: true });
+        assert(dialog.body.scrollTop === 0 && hooks.navigationContextDepth(dialog) === 1 &&
+            dialog.body.children[0] === detachedChild && apiCalls.length === detachedApiCount &&
+            dialog.body.querySelectorAll(childClass).map(row => row.querySelector(".danmuCandidateTitle").textContent)
+                .join("|").includes("First") &&
+            dialog.body.querySelectorAll(childClass)[1].querySelector(".danmuCandidateTitle").textContent.includes("Second"),
+            type + " real candidate transition must enter at zero, preserve authoritative child order, and ignore a detached second start without render or request");
+        apiResponses.StartTrackedDownload = { TaskId: "", Status: "failed", Message: "recoverable fixture" };
+        dialog.body.querySelectorAll(childClass)[0].children[0].checked = true;
+        const submitChild = dialog.footer.children[dialog.footer.children.length - 1];
+        await submitChild.dispatch("click");
+        await waitUntil(() => dialog.body.querySelectorAll(childClass).length === 2 && dialog.closable,
+            type + " recoverable submission did not restore its child");
+        assert(hooks.navigationContextDepth(dialog) === 1,
+            type + " failed submission must retain exactly one original candidate-parent context");
+        await dialog.footer.children.find(button => button.textContent === "返回候选列表").dispatch("click");
+        assert(hooks.navigationContextDepth(dialog) === 0 && dialog.body.scrollTop === 426,
+            type + " changed checked candidate must reject the armed row sample, fall back to click-time geometry, and consume one retained context");
+        delete anchorLayoutOffsets[candidateRows[0].children[1].dataset.danmuNavAnchor];
+        delete anchorLayoutOffsets[candidateRows[1].children[1].dataset.danmuNavAnchor];
+        context.window.PointerEvent = previousPointerEvent;
+        dialog.forceClose();
+    }
+    await verifyNestedItemEntry("Episode");
+    await verifyNestedItemEntry("Movie");
+    delete apiResponses.GetSelectedCandidatePreview;
+    delete apiResponses.StartTrackedDownload;
+
+    const acceptedContextDialog = {
+        body: new FakeElement("div"), footer: new FakeElement("div"), overlay: { isConnected: false },
+        closable: true, forceRefresh: false, forceRefreshLocked: false, executionForceRefresh: null,
+        navigationContexts: [{ renderParent: function () {} }], preDownloadRecovery: function () {},
+        setBackHandler: function () {}, close: function () {}, forceClose: function () {}
+    };
+    apiResponses.StartTrackedDownload = { TaskId: "accepted-r1", Status: "completed", Episodes: [] };
+    await hooks.renderSingleTargetProgress(acceptedContextDialog,
+        { Id: "accepted-movie", Type: "Movie", Name: "Accepted" }, {},
+        { Site: "Fake", Id: "accepted-candidate", SelectionEvidenceToken: "accepted-proof" },
+        null, null, false, "accepted-part");
+    assert(hooks.navigationContextDepth(acceptedContextDialog) === 0 &&
+        acceptedContextDialog.preDownloadRecovery === null,
+        "a valid accepted TaskId must clear the now non-returnable navigation context and recovery closure");
+    delete apiResponses.StartTrackedDownload;
+
+    const directCompositeDialog = hooks.openDialog("direct composite has no parent");
+    hooks.renderCandidatePicker(directCompositeDialog,
+        { Id: "direct-composite", Type: "Season", Name: "Direct composite" }, groupOnlySeason, "");
+    assert(hooks.navigationContextDepth(directCompositeDialog) === 0,
+        "a direct Season composite target must not acquire a fictitious parent-return context");
+    const contextBeforeBusy = hooks.navigationContextDepth(directCompositeDialog);
+    hooks.setBusy(directCompositeDialog, "same-page busy");
+    assert(hooks.navigationContextDepth(directCompositeDialog) === contextBeforeBusy,
+        "setBusy and other same-page surfaces must not create navigation contexts");
+    directCompositeDialog.forceClose();
+
+    const opaqueAnchorDialog = { body: new FakeElement("div"), navigationContexts: [], presentationAnchors: {} };
+    const opaqueAnchor = hooks.markPresentationAnchor(opaqueAnchorDialog, new FakeElement("div"), "row",
+        "private-media-id-should-not-be-in-dom");
+    assert(/^nav-[0-9a-z]+$/.test(opaqueAnchor.dataset.danmuNavAnchor) &&
+        !opaqueAnchor.dataset.danmuNavAnchor.includes("private-media-id"),
+        "presentation anchors must remain opaque instead of exposing their stable logical identity");
+
+    assert(hooks.isAndroidCommandEnvironment({ userAgentData: { platform: " aNdRoId " } }) &&
+        hooks.isAndroidCommandEnvironment({ userAgent: "Mozilla/5.0 (Linux; ANDROID 15)" }) &&
+        !hooks.isAndroidCommandEnvironment({ userAgentData: { platform: 42 }, userAgent: "Desktop" }) &&
+        !hooks.isAndroidCommandEnvironment({ userAgent: "Desktop", maxTouchPoints: 10, innerWidth: 360 }),
+        "Android mode must accept only trimmed case-insensitive UA-CH or UA identity, never touch/width hints");
+    const throwingIdentity = {};
+    Object.defineProperty(throwingIdentity, "userAgentData", { get: function () { throw new Error("blocked"); } });
+    Object.defineProperty(throwingIdentity, "userAgent", { get: function () { throw new Error("blocked"); } });
+    assert(!hooks.isAndroidCommandEnvironment(throwingIdentity),
+        "throwing Android identity getters must conservatively resolve to desktop");
+
+    const androidNavigator = context.window.navigator;
+    context.window.navigator = { userAgentData: { platform: "Windows" }, userAgent: "Desktop Chrome",
+        maxTouchPoints: 10, innerWidth: 360 };
+    const desktopCounts = Object.assign({}, historyCalls);
+    const desktopX = hooks.openDialog("desktop X");
+    await desktopX.overlay.querySelector(".danmuSmartClose").dispatch("click");
+    const desktopOrdinary = hooks.openDialog("desktop ordinary close");
+    desktopOrdinary.close();
+    const desktopOne = hooks.openDialog("desktop one");
+    const desktopTwo = hooks.openDialog("desktop two");
+    assert(hooks.dialogBackMode(desktopOne) === "desktop" && hooks.dialogBackMode(desktopTwo) === "desktop" &&
+        historyCalls.pushState === desktopCounts.pushState && historyCalls.replaceState === desktopCounts.replaceState,
+        "desktop dialog open, including responsive/touch desktop, must perform zero history mutations");
+    context.window.navigator = androidNavigator;
+    assert(hooks.dialogBackMode(desktopOne) === "desktop",
+        "back mode must remain frozen for a dialog after platform identity changes");
+    const desktopBackBefore = historyCalls.back;
+    desktopTwo.forceClose();
+    documentStub.dispatchKey("Escape");
+    assert(historyCalls.back === desktopBackBefore,
+        "desktop force close and Escape must never traverse history");
+    context.window.navigator = { userAgent: "Desktop Chrome" };
+    const desktopStackOne = hooks.openDialog("desktop stack one");
+    const desktopStackTwo = hooks.openDialog("desktop stack two");
+    const hostBackBefore = historyCalls.back;
+    (windowListeners.popstate || []).slice().forEach(listener => listener({ state: null }));
+    assert(!desktopStackOne.overlay.isConnected && !desktopStackTwo.overlay.isConnected &&
+        historyCalls.back === hostBackBefore,
+        "a desktop host popstate must dispose every stacked overlay without a second traversal");
+    context.window.navigator = androidNavigator;
+
+    assert(!source.includes("CloseWatcher") && !source.includes("requestAnimationFrame") &&
+        !source.includes("window.navigation") && !source.includes("navigator.maxTouchPoints") &&
+        !source.includes("innerWidth") && !source.includes("hostScroller"),
+        "r1 must not add experimental navigation, scheduled restoration, host scrollers, or responsive/touch heuristics");
+    const commandOwnerSource = source.slice(source.indexOf("function commandBackListener"),
+        source.indexOf("function hostPopStateListener"));
+    assert((source.match(/addEventListener\("command", commandBackListener, true\)/g) || []).length === 1 &&
+        !source.includes('addEventListener("backbutton"') && !source.includes("history.pushState") &&
+        !source.includes("history.replaceState") && !source.includes("history.back") &&
+        !source.includes("dialogHistory") && !source.includes("ignoredDialogHistoryPops") &&
+        !commandOwnerSource.includes("stopPropagation") && !commandOwnerSource.includes("setTimeout") &&
+        !commandOwnerSource.includes("backbutton"),
+        "formal V33 must retain one command owner and no dialog history, Smart backbutton, cancellation, or timer fallback");
+    const activationHelperSource = source.slice(source.indexOf("function armParentNavigationTrigger"),
+        source.indexOf("function resetSecondaryViewport"));
+    assert(activationHelperSource.includes('trigger.addEventListener("pointerdown"') &&
+        activationHelperSource.includes('{ passive: true }') &&
+        !activationHelperSource.includes("document.") && !activationHelperSource.includes("window.addEventListener") &&
+        !activationHelperSource.includes("preventDefault") && !activationHelperSource.includes("stopPropagation") &&
+        !activationHelperSource.includes(".focus(") && !activationHelperSource.includes("scrollTop =") &&
+        !activationHelperSource.includes("setTimeout") && !activationHelperSource.includes("requestAnimationFrame"),
+        "preactivation sampling must stay passive and trigger-local without input ownership, focus/scroll writes, global listeners, or scheduling");
 
     console.log("Danmu smart-match frontend regression checks passed.");
 }

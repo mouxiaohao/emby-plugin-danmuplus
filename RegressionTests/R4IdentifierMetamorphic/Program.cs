@@ -175,15 +175,39 @@ namespace Emby.Plugin.Danmu.R4IdentifierMetamorphicRegression
 
             foreach (var entry in new[] { interactive, composite, automatic })
             {
-                Assert(!entry.Contains("DanmuProviderIdResolver.", StringComparison.Ordinal) &&
-                       !entry.Contains("TryGetSavedManualBinding(", StringComparison.Ordinal) &&
-                       entry.Contains("DanmuMatchSearchEngine.SearchSeasonAsync", StringComparison.Ordinal),
+                Assert(IsIdentifierFreeBatchEntry(entry),
                     "a Series/Season batch entry must search descriptively without resolving local identifiers");
             }
+            const string descriptiveSearch = "DanmuMatchSearchEngine.SearchSeasonAsync";
+            const string allowedMetadataProjection =
+                "DanmuProviderIdResolver.GetEnabledProviderIdKeys(item);";
+            Assert(IsIdentifierFreeBatchEntry(allowedMetadataProjection + descriptiveSearch),
+                "enabled-provider-key metadata projection plus descriptive search must remain allowed");
+            Assert(!IsIdentifierFreeBatchEntry(
+                    "DanmuProviderIdResolver.ResolveAsync(item);" + descriptiveSearch),
+                "every resolver operation other than enabled-provider-key metadata projection must fail the gate");
+            Assert(!IsIdentifierFreeBatchEntry(
+                    "TryGetSavedManualBinding(item);" + descriptiveSearch),
+                "saved manual binding lookup must fail the identifier-free gate");
+            Assert(!IsIdentifierFreeBatchEntry(allowedMetadataProjection),
+                "an allowed metadata projection without descriptive search must fail the gate");
             Assert(interactive.Contains("TryBuildOwnedPlanningContext", StringComparison.Ordinal) &&
                    composite.Contains("BuildCompositePlanAsync", StringComparison.Ordinal) &&
                    automatic.Contains("TryBuildAutomaticPlanningContext", StringComparison.Ordinal),
                 "interactive, composite, and automatic paths must retain the shared target coordinator boundaries");
+        }
+
+        private static bool IsIdentifierFreeBatchEntry(string entry)
+        {
+            const string allowedMetadataProjection =
+                "DanmuProviderIdResolver.GetEnabledProviderIdKeys(";
+            var source = entry ?? string.Empty;
+            var withoutAllowedMetadataProjection =
+                source.Replace(allowedMetadataProjection, string.Empty);
+            return !withoutAllowedMetadataProjection.Contains(
+                       "DanmuProviderIdResolver.", StringComparison.Ordinal) &&
+                   !source.Contains("TryGetSavedManualBinding(", StringComparison.Ordinal) &&
+                   source.Contains("DanmuMatchSearchEngine.SearchSeasonAsync", StringComparison.Ordinal);
         }
 
         private static string Slice(string source, string startMarker, string endMarker)
