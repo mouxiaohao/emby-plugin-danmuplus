@@ -376,11 +376,11 @@ async function main() {
     // Fake DOM proves topology neutrality and lifecycle invariants only. Real CSS scroll chaining at short,
     // middle, top, and bottom states remains a required browser/device acceptance gate.
 
-    assert((source.match(/__embyDanmuSmartMenuV31/g) || []).length === 1 &&
-        !source.includes("__embyDanmuSmartMenuV30") && !source.includes("__embyDanmuSmartMenuV29") && !source.includes("CarHistoryProbe") &&
+    assert((source.match(/__embyDanmuSmartMenuV32/g) || []).length === 1 &&
+        !source.includes("__embyDanmuSmartMenuV31") && !source.includes("__embyDanmuSmartMenuV30") && !source.includes("__embyDanmuSmartMenuV29") && !source.includes("CarHistoryProbe") &&
         !source.includes("CarBackChannelProbe") && !source.includes("CarCommandTraceProbe") &&
         !source.includes("CarCommandOwnerProbe") && !source.includes("__embyDanmuHistoryModeOverride"),
-        "the formal frontend flag must be V31 exactly once with V30 and every diagnostic probe excluded");
+        "the formal frontend flag must be V32 exactly once with V31, V30, and every diagnostic probe excluded");
     assert(!source.includes("MAPPING_PROTOCOL_GENERATION") && source.includes("var MAPPING_PROTOCOL_VERSION = 22"),
         "the sparse-alignment UI must use the backend numeric V22 mapping protocol and server-authored plan generation");
     const compositeFailure = "复合季映射需要重新确认：Selected candidate evidence expired or belongs to another Season.";
@@ -1062,6 +1062,37 @@ async function main() {
         "a manual temporary season must consume only its chosen range and leave the next unmatched run visible");
     assert(hooks.compositeHasDownloadableMappings(compositeSeason, compositeSelections),
         "exact mappings or a manual virtual season must permit downloading the confirmed subset");
+    const countWarningSeason = JSON.parse(JSON.stringify(compositeSeason));
+    countWarningSeason.CompositeGroups = [{
+        IsTemporary: false, Site: "Dandan", CandidateId: "frieren-s1",
+        EpisodeCountMismatchWarning: true,
+        Episodes: countWarningSeason.CompositePlan.OrderedEpisodes.slice(0, 2)
+    }, {
+        IsTemporary: true,
+        Episodes: countWarningSeason.CompositePlan.UnmatchedRuns[0].Episodes
+    }];
+    const countWarningGroups = hooks.compositeVirtualGroups(countWarningSeason, {});
+    assert(countWarningGroups[0].EpisodeCountMismatchWarning === true &&
+        countWarningGroups[countWarningGroups.length - 1].kind === "unmatched" &&
+        !hooks.episodeCountMismatchWarning(countWarningGroups[countWarningGroups.length - 1]),
+        "only the server response flag on a mapped group may carry a remainder count warning");
+    const countWarningDialog = hooks.openDialog("remainder count warning");
+    hooks.renderCompositeSeasonSummary(countWarningDialog, { Type: "Season", Name: "Composite" },
+        countWarningSeason, 0, [countWarningSeason], {}, {});
+    const countWarningText = allVisibleText(countWarningDialog.body);
+    assert(countWarningDialog.body.querySelectorAll(".danmuEpisodeShortfallNotice").length === 1 &&
+        countWarningText.includes("本地与来源集数不一致") &&
+        !countWarningText.includes("评分") && !countWarningText.includes("匹配失败"),
+        "a sole server-authoritative mismatch must render one yellow advisory while unmatched remainder stays silent and score-free");
+    countWarningDialog.forceClose();
+    const rebuiltWarningSeason = JSON.parse(JSON.stringify(countWarningSeason));
+    rebuiltWarningSeason.CompositeGroups[0].EpisodeCountMismatchWarning = false;
+    const rebuiltWarningDialog = hooks.openDialog("remainder warning rebuilt");
+    hooks.renderCompositeSeasonSummary(rebuiltWarningDialog, { Type: "Season", Name: "Composite" },
+        rebuiltWarningSeason, 0, [rebuiltWarningSeason], {}, {});
+    assert(rebuiltWarningDialog.body.querySelectorAll(".danmuEpisodeShortfallNotice").length === 0,
+        "a rematch or authoritative rebuild without the response flag must not retain a stale mismatch warning");
+    rebuiltWarningDialog.forceClose();
     const compactSelections = hooks.compositeRequestSelections(compositeSelections, compositeSeason);
     const currentSeasonRequest = hooks.seasonRequestParameters(compositeSeason);
     assert(currentSeasonRequest.mappingProtocolVersion === 22 &&
@@ -1391,6 +1422,7 @@ async function main() {
         hooks.scopeSummaryLine(scopedS1).includes("参与匹配 12 集") &&
         hooks.scopeSummaryLine(scopedS1).includes("S00 7 集"),
         "ignored cross-season counts must remain a read-only summary");
+
 
     const explicitS0 = {
         SeriesId: "scope-series", SeasonId: "scope-s0", SeasonNumber: 0, SeasonName: "Season 0",
@@ -3479,7 +3511,7 @@ async function main() {
         !source.includes("dialogHistory") && !source.includes("ignoredDialogHistoryPops") &&
         !commandOwnerSource.includes("stopPropagation") && !commandOwnerSource.includes("setTimeout") &&
         !commandOwnerSource.includes("backbutton"),
-        "formal V31 must retain one command owner and no dialog history, Smart backbutton, cancellation, or timer fallback");
+        "formal V32 must retain one command owner and no dialog history, Smart backbutton, cancellation, or timer fallback");
     const activationHelperSource = source.slice(source.indexOf("function armParentNavigationTrigger"),
         source.indexOf("function resetSecondaryViewport"));
     assert(activationHelperSource.includes('trigger.addEventListener("pointerdown"') &&

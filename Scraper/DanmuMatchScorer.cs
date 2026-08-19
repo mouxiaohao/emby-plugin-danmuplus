@@ -145,6 +145,30 @@ namespace Emby.Plugin.Danmu.Scraper
                 : (int?)null;
         }
 
+        /// <summary>Returns false when a title explicitly identifies a different
+        /// Season, or has contradictory/unparseable explicit Season evidence.
+        /// Absence of a Season marker is safe and deliberately returns true.</summary>
+        public static bool IsExplicitSeasonCompatible(IEnumerable<string> values, int expectedSeasonNumber)
+        {
+            var materialized = (values ?? Enumerable.Empty<string>()).ToList();
+            var hasMarker = materialized.Any(value => ExplicitSeasonMarkerRegex.IsMatch(value ?? string.Empty));
+            if (!hasMarker) return true;
+            if (expectedSeasonNumber == 0)
+            {
+                var zeroOnly = true;
+                foreach (var value in materialized)
+                foreach (Match match in ExplicitSeasonMarkerRegex.Matches(value ?? string.Empty))
+                {
+                    var numeric = match.Groups["number"].Success ? match.Groups["number"].Value : match.Groups["short"].Value;
+                    var isZero = int.TryParse(numeric, NumberStyles.Integer, CultureInfo.InvariantCulture, out var number) && number == 0;
+                    if (!isZero) zeroOnly = false;
+                }
+                return zeroOnly;
+            }
+            var parsed = ParseExplicitSeasonNumber(materialized);
+            return parsed.HasValue && parsed.Value == expectedSeasonNumber;
+        }
+
         public static bool IsEligibleSeasonCandidate(
             ScraperSearchInfo source,
             string seriesName,
@@ -280,6 +304,7 @@ namespace Emby.Plugin.Danmu.Scraper
                 DecisionReason = string.IsNullOrWhiteSpace(source.SearchAlias) ? string.Empty : "tmdb-alias:" + source.SearchAlias,
                 FidelityTitleEvidence = fidelityTitleEvidence,
                 SourceMetadata = CloneSourceMetadata(source),
+                ServerTitleAliases = GetSourceTitles(source).Where(title => !string.IsNullOrWhiteSpace(title)).Distinct(StringComparer.OrdinalIgnoreCase).ToList(),
             };
         }
 
@@ -329,6 +354,7 @@ namespace Emby.Plugin.Danmu.Scraper
                 DecisionReason = string.IsNullOrWhiteSpace(source.SearchAlias) ? string.Empty : "tmdb-alias:" + source.SearchAlias,
                 FidelityTitleEvidence = fidelityTitleEvidence,
                 SourceMetadata = CloneSourceMetadata(source),
+                ServerTitleAliases = GetSourceTitles(source).Where(title => !string.IsNullOrWhiteSpace(title)).Distinct(StringComparer.OrdinalIgnoreCase).ToList(),
             };
         }
 
@@ -443,6 +469,11 @@ namespace Emby.Plugin.Danmu.Scraper
                 .ToLowerInvariant();
             return WhitespaceRegex.Replace(normalized, string.Empty);
         }
+
+        public static bool IsIdentityBearingLooseTitle(string value) => IsIdentityBearingTitle(Normalize(value));
+
+        public static double GetLooseTitleSimilarity(string left, string right) =>
+            BestSimilarity(new[] { left }, new[] { right });
 
         private static int GetFidelityTitleEvidence(
             IEnumerable<string> localTitles,

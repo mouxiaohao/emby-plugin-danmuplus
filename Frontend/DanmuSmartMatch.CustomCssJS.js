@@ -1,12 +1,12 @@
-﻿/*
+/*
  * Emby.CustomCssJS: 电视剧/季/集/电影智能匹配并一键下载弹幕
- * 适用于 Emby 4.9.x + 本方案配套的 Emby.Plugin.Danmu 2.0.6r2 DLL
+ * 适用于 Emby 4.9.x + 本方案配套的 Emby.Plugin.Danmu 2.0.7 DLL
  */
 (function () {
     "use strict";
 
-    // V31 contains dialog scrolling while retaining Android command back and the V22 mapping contract.
-    var INSTALL_FLAG = "__embyDanmuSmartMenuV31";
+    // V32 adds server-authoritative remainder count warnings while retaining V22.
+    var INSTALL_FLAG = "__embyDanmuSmartMenuV32";
     var MAPPING_PROTOCOL_VERSION = 22;
     var DEFAULT_ZERO_OFFSET = "DefaultZeroOffset";
     var EXPLICIT_ANCHOR = "ExplicitAnchor";
@@ -1473,6 +1473,12 @@
         return title + (title && year ? "（" + year + "）" : year);
     }
 
+    // This is a server-rebuilt response flag, never a candidate-count or DOM
+    // inference. Both names are accepted only for normal serializer casing.
+    function episodeCountMismatchWarning(group) {
+        return Boolean(value(group, "EpisodeCountMismatchWarning", "episodeCountMismatchWarning", false));
+    }
+
     function sourceEpisodePublicLabel(mapping, fallbackNumber) {
         var verified = boundedText(value(mapping, "SourceDisplayLabel", "sourceDisplayLabel", ""));
         if (verified) return "来源 " + verified;
@@ -1592,6 +1598,7 @@
                         origin: value(group, "MatchOrigin", "matchOrigin", ""),
                         MatchScore: value(group, "MatchScore", "matchScore", null),
                         ScoreOrigin: value(group, "ScoreOrigin", "scoreOrigin", ""),
+                        EpisodeCountMismatchWarning: episodeCountMismatchWarning(group),
                         mappings: [], episodes: episodes, index: sequence });
                     sequence += episodes.length;
                     return;
@@ -1637,13 +1644,15 @@
             if (mappingScore === null) mappingScore = explicitMatchScore(previewGroup);
             var scoreOrigin = value(mapping, "ScoreOrigin", "scoreOrigin", "") ||
                 value(previewGroup, "ScoreOrigin", "scoreOrigin", "");
+            var countWarning = episodeCountMismatchWarning(previewGroup);
             var key = sourceKey(value(mapping, "Source", "source", {})) + "\u001f" + normalizeDecisionCode(mappingOrigin) +
                 "\u001f" + String(mappingScore === null || mappingScore === undefined ? "" : mappingScore) +
-                "\u001f" + normalizeDecisionCode(scoreOrigin);
+                "\u001f" + normalizeDecisionCode(scoreOrigin) + "\u001f" + (countWarning ? "count-warning" : "");
             if (!current || current.key !== key) {
                 current = { kind: "mapped", key: key, source: value(mapping, "Source", "source", {}),
                     origin: mappingOrigin, MatchScore: mappingScore,
                     ScoreOrigin: scoreOrigin,
+                    EpisodeCountMismatchWarning: countWarning,
                     sourceMetadata: value(mapping, "SourceMetadata", "sourceMetadata",
                         value(previewGroup, "SourceMetadata", "sourceMetadata", null)),
                     mappings: [], episodes: [], index: index };
@@ -2859,6 +2868,12 @@
             if (!groupScore && group.kind === "mapped" && group.mappings.length) groupScore = matchScoreLine(group.mappings[0]);
             if (groupScore) detail.textContent += " · " + groupScore;
             main.append(title, detail);
+            if (group.kind === "mapped" && episodeCountMismatchWarning(group)) {
+                var countWarning = document.createElement("div");
+                countWarning.className = "danmuEpisodeShortfallNotice";
+                countWarning.textContent = "本地与来源集数不一致";
+                main.appendChild(countWarning);
+            }
             card.appendChild(main);
             appendCompositeMappingDetails(card, group);
             if (group.kind === "unmatched") {
@@ -4556,6 +4571,7 @@
         authoritativeCompositeFailureMessage: authoritativeCompositeFailureMessage,
         providerDisplayName: providerDisplayName,
         sourceMetadataPublicLabel: sourceMetadataPublicLabel,
+        episodeCountMismatchWarning: episodeCountMismatchWarning,
         localEpisodeLabel: localEpisodeLabel,
         sourceEpisodePublicLabel: sourceEpisodePublicLabel,
         closedAlignmentIntent: closedAlignmentIntent,
@@ -4580,6 +4596,7 @@
         hasBackendMatch: hasBackendMatch,
         hasCompositePlan: hasCompositePlan,
         compositeVirtualGroups: compositeVirtualGroups,
+        renderCompositeSeasonSummary: renderCompositeSeasonSummary,
         compositeRequestSelections: compositeRequestSelections,
         compositeHasDownloadableMappings: compositeHasDownloadableMappings,
         removeCompositeSelection: removeCompositeSelection,

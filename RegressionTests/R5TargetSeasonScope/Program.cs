@@ -358,11 +358,102 @@ namespace Emby.Plugin.Danmu.R5TargetSeasonScopeRegression
             selection.ServerConsideredLocalEpisodeItemIds.Reverse();
             var consideredOrderChanged = SeasonPlanningContextBuilder.CreatePlanFingerprint(
                 context, new[] { selection }, firstPlan);
+            selection.ServerConsideredLocalEpisodeItemIds.Reverse();
+            selection.ServerRemainderDecision = new DanmuRemainderDecisionEvidence
+            {
+                DecisionKind = DanmuRemainderDecisionKinds.MetadataCountWarning,
+                Stage = DanmuRemainderDecisionStages.Metadata,
+                ComparisonYear = 2026,
+                SourceYear = 2026,
+                SimilarCandidateCount = 1,
+                MatchingTupleCount = 0,
+                LocalEpisodeCount = 2,
+                VerifiedSourceEpisodeCount = 12,
+                VerifiedSourceEpisodes = Enumerable.Range(1, 12).Select(index => new CompositeSeasonSourceEpisode { EpisodeId = "ep-" + index, CommentId = "comment-" + index, EpisodeNumber = index, SourceOrdinal = index }).ToList(),
+                LogicalSeasonNumber = 2,
+                StableProviderId = "test",
+                ProviderLock = "test",
+                StableMediaId = "stable-media",
+                RunStartItemId = scope.EligibleEpisodes[0].ItemId,
+                RunItemIds = scope.EligibleEpisodes.Select(item => item.ItemId).ToList(),
+                PlanGeneration = 7,
+                EpisodeCountMismatchWarning = true,
+            };
+            Assert(selection.ServerRemainderDecision.IsValid(),
+                "a metadata-count-warning remainder proof must require verified inventory, stable identity, and a complete local run");
+            var evidenceRegistry = new DanmuCandidateEvidenceRegistry();
+            var remainderToken = evidenceRegistry.RegisterRemainder(
+                context.SeasonId, "test", "lookup", 0.9, null, selection.ServerRemainderDecision);
+            selection.ServerRemainderDecision.StableMediaId = "caller-mutation";
+            Assert(!string.IsNullOrWhiteSpace(remainderToken) &&
+                   evidenceRegistry.TryResolve(remainderToken, context.SeasonId, "test", "lookup", out var registeredRemainder) &&
+                   registeredRemainder.RemainderDecision?.StableMediaId == "stable-media" &&
+                   registeredRemainder.RemainderDecision?.ProviderLock == "test",
+                "remainder evidence must clone the server-owned provider lock with the target-bound identity");
+            Assert(typeof(DanmuCompositeSeasonSelection).GetProperty("ServerRemainderDecision")
+                       .GetCustomAttributes(false).Any(attribute =>
+                           attribute.GetType().Name == "JsonIgnoreAttribute"),
+                "a browser selection must not author recursive decision evidence");
+            selection.ServerRemainderDecision.StableMediaId = "stable-media";
+            var remainderDecisionChanged = SeasonPlanningContextBuilder.CreatePlanFingerprint(
+                context, new[] { selection }, firstPlan);
+            selection.ServerRemainderDecision.ProviderLock = "other-provider";
+            var providerLockChanged = SeasonPlanningContextBuilder.CreatePlanFingerprint(
+                context, new[] { selection }, firstPlan);
+            Assert(!selection.ServerRemainderDecision.IsValid(),
+                "provider-lock drift must invalidate server-owned remainder evidence before execution");
+            selection.ServerRemainderDecision.ProviderLock = "test";
+            selection.ServerRemainderDecision.StableMediaId = "changed-stable-media";
+            var stableIdentityChanged = SeasonPlanningContextBuilder.CreatePlanFingerprint(
+                context, new[] { selection }, firstPlan);
+            selection.ServerRemainderDecision.StableMediaId = "stable-media";
+            selection.ServerRemainderDecision.EpisodeCountMismatchWarning = false;
+            var warningChanged = SeasonPlanningContextBuilder.CreatePlanFingerprint(
+                context, new[] { selection }, firstPlan);
+            selection.ServerRemainderDecision.EpisodeCountMismatchWarning = true;
+            selection.ServerRemainderDecision.RunItemIds.Reverse();
+            var remainderRunChanged = SeasonPlanningContextBuilder.CreatePlanFingerprint(
+                context, new[] { selection }, firstPlan);
+            selection.ServerRemainderDecision.RunItemIds.Reverse();
+            selection.ServerRemainderDecision.SourceYear = 2025;
+            var sourceYearChanged = SeasonPlanningContextBuilder.CreatePlanFingerprint(
+                context, new[] { selection }, firstPlan);
+            selection.ServerRemainderDecision.SourceYear = 2026;
+            selection.ServerRemainderDecision.ActiveLogicalSeasonNumber = 3;
+            var activeLogicalSeasonChanged = SeasonPlanningContextBuilder.CreatePlanFingerprint(
+                context, new[] { selection }, firstPlan);
+            selection.ServerRemainderDecision.ActiveLogicalSeasonNumber = 0;
+            selection.ServerRemainderDecision.FinalScore = .1;
+            var finalScoreChanged = SeasonPlanningContextBuilder.CreatePlanFingerprint(
+                context, new[] { selection }, firstPlan);
+            selection.ServerRemainderDecision.FinalScore = 0;
+            selection.ServerRemainderDecision.SimilarCandidateCount = 2;
+            var similarCountChanged = SeasonPlanningContextBuilder.CreatePlanFingerprint(
+                context, new[] { selection }, firstPlan);
+            selection.ServerRemainderDecision.SimilarCandidateCount = 1;
+            selection.ServerRemainderDecision.MatchingTupleCount = 1;
+            var tupleCountChanged = SeasonPlanningContextBuilder.CreatePlanFingerprint(
+                context, new[] { selection }, firstPlan);
+            selection.ServerRemainderDecision.MatchingTupleCount = 0;
+            selection.ServerRemainderDecision.AuthoritativeParentTitle = "parent";
+            var authoritativeParentChanged = SeasonPlanningContextBuilder.CreatePlanFingerprint(
+                context, new[] { selection }, firstPlan);
             Assert(baseline != commentChanged && baseline != selectionChanged &&
                    selectionChanged != mappingChanged && baseline != intentChanged &&
                    baseline != modeChanged && baseline != provenanceChanged &&
-                   baseline != protocolChanged && baseline != consideredOrderChanged,
-                "protocol intent, resolved mode, source provenance/order, CommentId, and exact mappings must invalidate the server fingerprint");
+                   baseline != protocolChanged && baseline != consideredOrderChanged &&
+                   baseline != remainderDecisionChanged &&
+                   remainderDecisionChanged != providerLockChanged &&
+                   remainderDecisionChanged != stableIdentityChanged &&
+                   remainderDecisionChanged != warningChanged &&
+                   remainderDecisionChanged != remainderRunChanged &&
+                   remainderDecisionChanged != sourceYearChanged &&
+                   remainderDecisionChanged != activeLogicalSeasonChanged &&
+                   remainderDecisionChanged != finalScoreChanged &&
+                   remainderDecisionChanged != similarCountChanged &&
+                   remainderDecisionChanged != tupleCountChanged &&
+                   remainderDecisionChanged != authoritativeParentChanged,
+                "protocol intent, resolved mode, source provenance/order, remainder decision facts, CommentId, and exact mappings must invalidate the server fingerprint");
         }
 
         private static void AutomaticGenerationIsSupersededByInteractivePreview()

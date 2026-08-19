@@ -119,12 +119,44 @@ namespace Emby.Plugin.Danmu.Scraper
                     localSeriesTitleAliases,
                     localSeasonTitleAliases,
                     contextItem,
-                    manualKeywordDiscovery).ConfigureAwait(false);
+                    manualKeywordDiscovery,
+                    null).ConfigureAwait(false);
             }
             finally
             {
                 linkedCancellation?.Dispose();
             }
+        }
+
+        /// <summary>Searches an unmatched suffix as an in-memory logical Season.
+        /// The real Emby context item is retained for provider calls, but scoring
+        /// receives the explicit logical ordinal instead of its IndexNumber.</summary>
+        public static async Task<DanmuMatchSearchResult> SearchLogicalSeasonAsync(
+            IEnumerable<AbstractScraper> scraperSource,
+            LogicalSeasonSearchContext logicalContext,
+            ILogger logger,
+            BoundedSearchPolicy policy,
+            CancellationToken executionCancellationToken,
+            CancellationToken parentCancellationToken,
+            IEnumerable<string> localSeriesTitleAliases = null,
+            IEnumerable<string> localSeasonTitleAliases = null,
+            BaseItem contextItem = null)
+        {
+            if (logicalContext == null || logicalContext.ExpectedLogicalSeasonNumber <= 0)
+            {
+                return new DanmuMatchSearchResult { IsComplete = false, Decision = "retryable-incomplete" };
+            }
+
+            var cancellationToken = CombineCancellationTokens(executionCancellationToken, parentCancellationToken, out var linkedCancellation);
+            try
+            {
+                return await SearchSeasonCoreAsync(scraperSource, logicalContext.ParentTitle,
+                    "Season " + logicalContext.ExpectedLogicalSeasonNumber,
+                    logicalContext.FirstEpisodeYear, logicalContext.SuffixEpisodeCount, null, logger, policy,
+                    cancellationToken, localSeriesTitleAliases, localSeasonTitleAliases, contextItem, false,
+                    logicalContext.ExpectedLogicalSeasonNumber).ConfigureAwait(false);
+            }
+            finally { linkedCancellation?.Dispose(); }
         }
 
         private static async Task<DanmuMatchSearchResult> SearchSeasonCoreAsync(
@@ -140,12 +172,13 @@ namespace Emby.Plugin.Danmu.Scraper
             IEnumerable<string> localSeriesTitleAliases,
             IEnumerable<string> localSeasonTitleAliases,
             BaseItem contextItem,
-            bool manualKeywordDiscovery)
+            bool manualKeywordDiscovery,
+            int? expectedLogicalSeasonNumber)
         {
             var scrapers = (scraperSource ?? Enumerable.Empty<AbstractScraper>()).ToList();
             // Prefer the authoritative Emby Season ordinal. Display names are
             // only a compatibility fallback for callers without an item.
-            var targetSeasonNumber = contextItem?.IndexNumber ??
+            var targetSeasonNumber = expectedLogicalSeasonNumber ?? contextItem?.IndexNumber ??
                                      DanmuMatchScorer.ParseExplicitSeasonNumber(seasonName);
             var keywords = DanmuMatchScorer.BuildSearchKeywords(seriesName, seasonName, keywordOverride)
                 .Take(string.IsNullOrWhiteSpace(keywordOverride) ? 2 : 1)

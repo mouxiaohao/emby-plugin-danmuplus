@@ -224,6 +224,7 @@ namespace Emby.Plugin.Danmu.Core
                     ? selection.SourceStartEpisodeNumber.Value.ToString(CultureInfo.InvariantCulture) : "?");
                 AppendFingerprintField(canonical, selection.MatchOrigin);
                 AppendFingerprintField(canonical, selection.SelectionEvidenceToken);
+                AppendRemainderDecisionFingerprint(canonical, selection.ServerRemainderDecision);
                 foreach (var consideredEntry in (selection.ServerConsideredLocalEpisodeItemIds ??
                                  new List<string>()).Select((itemId, consideredOrdinal) =>
                                  new { itemId, consideredOrdinal }))
@@ -278,6 +279,59 @@ namespace Emby.Plugin.Danmu.Core
             builder.Append(value.Length.ToString(CultureInfo.InvariantCulture));
             builder.Append(':');
             builder.Append(value);
+        }
+
+        private static void AppendRemainderDecisionFingerprint(
+            StringBuilder builder, DanmuRemainderDecisionEvidence decision)
+        {
+            AppendFingerprintField(builder, "remainder-decision");
+            AppendFingerprintField(builder, decision == null ? "null" : "value");
+            if (decision == null) return;
+            AppendFingerprintField(builder, decision.DecisionKind);
+            AppendFingerprintField(builder, decision.Stage);
+            AppendFingerprintField(builder, decision.PartNumber.HasValue
+                ? decision.PartNumber.Value.ToString(CultureInfo.InvariantCulture) : "?");
+            AppendFingerprintField(builder, decision.ComparisonYear.HasValue
+                ? decision.ComparisonYear.Value.ToString(CultureInfo.InvariantCulture) : "?");
+            AppendFingerprintField(builder, decision.SourceYear.HasValue
+                ? decision.SourceYear.Value.ToString(CultureInfo.InvariantCulture) : "?");
+            AppendFingerprintField(builder, decision.LocalEpisodeCount.ToString(CultureInfo.InvariantCulture));
+            AppendFingerprintField(builder, decision.VerifiedSourceEpisodeCount.ToString(CultureInfo.InvariantCulture));
+            AppendFingerprintField(builder, decision.LogicalSeasonNumber.HasValue
+                ? decision.LogicalSeasonNumber.Value.ToString(CultureInfo.InvariantCulture) : "?");
+            AppendFingerprintField(builder, decision.ActiveLogicalSeasonNumber.ToString(CultureInfo.InvariantCulture));
+            AppendFingerprintField(builder, decision.FinalScore.ToString("R", CultureInfo.InvariantCulture));
+            AppendFingerprintField(builder, decision.SimilarCandidateCount.ToString(CultureInfo.InvariantCulture));
+            AppendFingerprintField(builder, decision.MatchingTupleCount.ToString(CultureInfo.InvariantCulture));
+            AppendFingerprintField(builder, decision.AuthoritativeParentTitle);
+            AppendFingerprintField(builder, decision.ParentTitleScore.HasValue
+                ? decision.ParentTitleScore.Value.ToString("R", CultureInfo.InvariantCulture) : "?");
+            AppendFingerprintField(builder, decision.SeasonNumberScore.HasValue
+                ? decision.SeasonNumberScore.Value.ToString("R", CultureInfo.InvariantCulture) : "?");
+            AppendFingerprintField(builder, decision.YearScore.HasValue
+                ? decision.YearScore.Value.ToString("R", CultureInfo.InvariantCulture) : "?");
+            AppendFingerprintField(builder, decision.ProviderLock);
+            AppendFingerprintField(builder, decision.StableProviderId);
+            AppendFingerprintField(builder, decision.StableMediaId);
+            AppendFingerprintField(builder, decision.RunStartItemId);
+            AppendFingerprintField(builder, decision.PlanGeneration.ToString(CultureInfo.InvariantCulture));
+            AppendFingerprintField(builder, decision.EpisodeCountMismatchWarning ? "warning" : "no-warning");
+            foreach (var sourceEntry in (decision.VerifiedSourceEpisodes ?? new List<CompositeSeasonSourceEpisode>()).Select((episode, ordinal) => new { episode, ordinal }))
+            {
+                AppendFingerprintField(builder, "remainder-source-episode");
+                AppendFingerprintField(builder, sourceEntry.ordinal.ToString(CultureInfo.InvariantCulture));
+                AppendFingerprintField(builder, sourceEntry.episode?.EpisodeId);
+                AppendFingerprintField(builder, sourceEntry.episode?.CommentId);
+                AppendFingerprintField(builder, sourceEntry.episode?.EpisodeNumber.HasValue == true ? sourceEntry.episode.EpisodeNumber.Value.ToString(CultureInfo.InvariantCulture) : "?");
+                AppendFingerprintField(builder, sourceEntry.episode == null ? "?" : sourceEntry.episode.SourceOrdinal.ToString(CultureInfo.InvariantCulture));
+            }
+            foreach (var runEntry in (decision.RunItemIds ?? new List<string>())
+                         .Select((itemId, ordinal) => new { itemId, ordinal }))
+            {
+                AppendFingerprintField(builder, "remainder-run-item");
+                AppendFingerprintField(builder, runEntry.ordinal.ToString(CultureInfo.InvariantCulture));
+                AppendFingerprintField(builder, runEntry.itemId);
+            }
         }
     }
 }

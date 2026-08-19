@@ -19,5 +19,7 @@
     <Compile Remove="R5TargetSeasonScope\**\*.cs" />
     <Compile Remove="MgtvSearch\**\*.cs" />
     <Compile Remove="TitleFidelity\**\*.cs" />
+    <Compile Remove="R207RemainderCore\**\*.cs" />
+    <Compile Remove="R207RemainderOrchestration\**\*.cs" />
   </ItemGroup>
 </Project>

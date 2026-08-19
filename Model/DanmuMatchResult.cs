@@ -52,6 +52,14 @@ namespace Emby.Plugin.Danmu.Model
         public const string ExactBinding = "exact-binding";
     }
 
+    public static class DanmuMatchOrigin
+    {
+        public const string RemainderPart = "remainder-part";
+        public const string RemainderMetadata = "remainder-metadata";
+        public const string RemainderMetadataCountWarning = "remainder-metadata-count-warning";
+        public const string RemainderLogicalSeason = "remainder-logical-season";
+    }
+
     public class DanmuMatchPreviewResult
     {
         public int MappingProtocolVersion { get; set; } = Core.DanmuMappingProtocol.CurrentVersion;
@@ -200,6 +208,9 @@ namespace Emby.Plugin.Danmu.Model
         public string ScoreOrigin { get; set; } = string.Empty;
         public string SelectionEvidenceToken { get; set; } = string.Empty;
         public SourceMetadata SourceMetadata { get; set; }
+        // Server-rebuilt presentation state. This is additive response-only
+        // metadata; requests never use it as candidate or mapping evidence.
+        public bool EpisodeCountMismatchWarning { get; set; }
         public List<DanmuCompositeEpisode> Episodes { get; set; } = new List<DanmuCompositeEpisode>();
     }
 
@@ -274,6 +285,11 @@ namespace Emby.Plugin.Danmu.Model
         [IgnoreDataMember]
         public List<string> ServerConsideredLocalEpisodeItemIds { get; set; } =
             new List<string>();
+        // Remainder facts stay server-only. The compact V22 selection does not
+        // let a browser create, alter, or replay an automatic decision.
+        [JsonIgnore]
+        [IgnoreDataMember]
+        public Core.DanmuRemainderDecisionEvidence ServerRemainderDecision { get; set; }
     }
 
     /// <summary>
@@ -452,6 +468,9 @@ namespace Emby.Plugin.Danmu.Model
         public int? SuggestedEpisodeNumber { get; set; }
         public string Reason { get; set; } = string.Empty;
         public SourceMetadata SourceMetadata { get; set; }
+        [JsonIgnore]
+        [IgnoreDataMember]
+        public List<string> ServerTitleAliases { get; set; } = new List<string>();
         public string PartTitle { get; set; } = string.Empty;
         public List<DanmuMoviePartChoice> MovieParts { get; set; } =
             new List<DanmuMoviePartChoice>();

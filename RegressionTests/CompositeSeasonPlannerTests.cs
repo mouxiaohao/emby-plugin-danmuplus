@@ -57,6 +57,7 @@ namespace Emby.Plugin.Danmu.RegressionTests
             RetainsCompositeSafetyForSubsetAndZeroPersist();
             RebuildsPreviewAndDownloadFromTheSameExclusionAwarePlan();
             RejectsIncompleteAutomaticSeasonAndResidualSearches();
+            VerifiesLockedProviderCompletionSeam();
             PreservesDirectMetadataAcrossRemoveReplacementAndRestore();
             RetainsCompositeSafetyWhenReplacementCollapsesToOneSource();
             RejectsForeignAndStaleTemporaryRangesWithoutMutatingThePlan();
@@ -1526,6 +1527,48 @@ namespace Emby.Plugin.Danmu.RegressionTests
                     automatic.Contains("SeasonDisplayMirrorPolicy.CanCommit") &&
                     !automatic.Contains("OnCompositeSeasonFilePersistedAsync"),
                 "automatic downloads must preserve the lease and defer Season mirrors until terminal success");
+        }
+
+        private static void VerifiesLockedProviderCompletionSeam()
+        {
+            var closedAWithFaultedB = new[]
+            {
+                new DanmuSearchCompletionDiagnostic { Provider = "provider-a", Status = "completed" },
+                new DanmuSearchCompletionDiagnostic { Provider = "provider-b", Status = "failed" },
+            };
+            Assert(RemainderProviderCompletion.IsClosed(closedAWithFaultedB, "provider-a"),
+                "a completed locked provider may recurse even when an unrelated provider failed");
+            Assert(!RemainderProviderCompletion.IsClosed(new[]
+            {
+                new DanmuSearchCompletionDiagnostic { Provider = "provider-a", Status = "timed_out", TimedOut = true },
+            }, "provider-a") &&
+                !RemainderProviderCompletion.IsClosed(null, "provider-a"),
+                "timed-out or absent locked-provider diagnostics must stop before remainder details or commits");
+
+            var repositoryRoot = Path.GetFullPath(Path.Combine(
+                AppContext.BaseDirectory, "..", "..", "..", ".."));
+            var controller = File.ReadAllText(Path.Combine(
+                repositoryRoot, "Core", "Controllers", "DanmuController.cs")).Replace("\r\n", "\n");
+            var populate = SliceSource(controller,
+                "private async Task PopulateCompositePreviewIfRequired(",
+                "// This loop deliberately sits above BuildCompositePlanAsync:");
+            var extension = SliceSource(controller,
+                "private async Task<CompositePlanBuild> ExtendInteractiveRemainderPlanAsync(",
+                "private static RemainderAuthoritativeSnapshot CreateRemainderSnapshot(");
+            Assert(controller.Contains("RemainderOperationPolicy.InteractiveRecursive, authoritativeSearch.CompletionDiagnostics,\n                authoritativeSearch.WasCancelled") &&
+                   controller.Contains("RemainderOperationPolicy.InteractiveRecursive, search.CompletionDiagnostics,\n                        search.WasCancelled"),
+                "manual and scored first-segment paths must pass server-owned completion diagnostics and global cancellation separately");
+            Assert(populate.Contains("!canonicalSearchWasCancelled") &&
+                   !populate.Contains("canonicalComplete"),
+                "the preview gate must preserve global cancellation without applying aggregate search completeness to locked recursion");
+            Assert(extension.Contains("RemainderProviderCompletion.IsClosed(canonicalCompletionDiagnostics, providerLock)") &&
+                   extension.Contains("logicalSearch.CompletionDiagnostics, providerLock") &&
+                   !extension.Contains("!logicalSearch.IsComplete") &&
+                   extension.IndexOf("RemainderProviderCompletion.IsClosed(canonicalCompletionDiagnostics, providerLock)", StringComparison.Ordinal) <
+                   extension.IndexOf("foreach (var candidate in currentCandidates)", StringComparison.Ordinal) &&
+                   extension.IndexOf("RemainderProviderCompletion.IsClosed(canonicalCompletionDiagnostics, providerLock)", StringComparison.Ordinal) <
+                   extension.IndexOf("CandidateEvidence.RegisterRemainder", StringComparison.Ordinal),
+                "the production remainder seam must evaluate initial and fresh logical pools only through the locked provider diagnostics before remainder detail or commit");
         }
 
         private static void RejectsIncompleteAutomaticSeasonAndResidualSearches()
