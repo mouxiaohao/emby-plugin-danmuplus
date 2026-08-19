@@ -1,0 +1,480 @@
+warning: in the working copy of 'Configuration/PluginConfiguration.cs', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'Frontend/DanmuSmartMatch.CustomCssJS.js', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'README.md', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'RegressionTests/R4IdentifierMetamorphic/Program.cs', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'RegressionTests/TitleFidelity/Program.cs', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'RegressionTests/TmdbAliasTests.cs', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'Scraper/DanmuMatchScorer.cs', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'Scraper/Tmdb/TmdbAliasClient.cs', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'UPDATE.md', LF will be replaced by CRLF the next time Git touches it
+diff --git a/Configuration/PluginConfiguration.cs b/Configuration/PluginConfiguration.cs
+index 8e6e3de..bea0679 100644
+--- a/Configuration/PluginConfiguration.cs
++++ b/Configuration/PluginConfiguration.cs
+@@ -14,7 +14,7 @@ namespace Emby.Plugin.Danmu.Configuration
+         /// <summary>
+         /// 版本信息
+         /// </summary>
+-        public string Version { get; } = "2.0.5r1";//Assembly.GetExecutingAssembly().GetName().Version.ToString();
++        public string Version { get; } = "2.0.6";//Assembly.GetExecutingAssembly().GetName().Version.ToString();
+ 
+         public DandanOption Dandan { get; set; } = new DandanOption();
+ 
+diff --git a/Emby.Plugin.Danmu.csproj b/Emby.Plugin.Danmu.csproj
+index aa309f9..4189d43 100644
+--- a/Emby.Plugin.Danmu.csproj
++++ b/Emby.Plugin.Danmu.csproj
+@@ -1,10 +1,10 @@
+ ﻿<Project Sdk="Microsoft.NET.Sdk">
+-    <PropertyGroup>
++    <PropertyGroup>
+         <TargetFramework>netstandard2.0</TargetFramework>
+         <Description>弹幕插件</Description>
+-        <AssemblyVersion>2.0.5.1</AssemblyVersion>
+-        <FileVersion>2.0.5.1</FileVersion>
+-        <InformationalVersion>2.0.5r1</InformationalVersion>
++        <AssemblyVersion>2.0.6.0</AssemblyVersion>
++        <FileVersion>2.0.6.0</FileVersion>
++        <InformationalVersion>2.0.6</InformationalVersion>
+         <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+         <PackageTags>emby;plugin;pms;media;server;</PackageTags>
+         <LangVersion>8.0</LangVersion>
+@@ -14,7 +14,11 @@
+         <GeneratedDanmuConfigurationDirectory>$(MSBuildProjectDirectory)\obj\Generated\Configuration</GeneratedDanmuConfigurationDirectory>
+         <GeneratedDanmuConfigurationPage>$(GeneratedDanmuConfigurationDirectory)\configPage.html</GeneratedDanmuConfigurationPage>
+         <GeneratedDanmuConfigurationConstants>$(GeneratedDanmuConfigurationDirectory)\GeneratedConfigurationPageResources.cs</GeneratedDanmuConfigurationConstants>
+-    </PropertyGroup>
++    </PropertyGroup>
++    <PropertyGroup Condition="'$(Configuration)' == 'Release'">
++        <DebugType>none</DebugType>
++        <DebugSymbols>false</DebugSymbols>
++    </PropertyGroup>
+     <ItemGroup>
+         <None Remove="Configuration\logo.png" />
+         <Compile Remove="RegressionTests\**\*.cs" />
+diff --git a/Frontend/DanmuSmartMatch.CustomCssJS.js b/Frontend/DanmuSmartMatch.CustomCssJS.js
+index b37686d..25a5567 100644
+--- a/Frontend/DanmuSmartMatch.CustomCssJS.js
++++ b/Frontend/DanmuSmartMatch.CustomCssJS.js
+@@ -1,6 +1,6 @@
+ ﻿/*
+  * Emby.CustomCssJS: 电视剧/季/集/电影智能匹配并一键下载弹幕
+- * 适用于 Emby 4.9.x + 本方案配套的 Emby.Plugin.Danmu 2.0.5r1 DLL
++ * 适用于 Emby 4.9.x + 本方案配套的 Emby.Plugin.Danmu 2.0.6 DLL
+  */
+ (function () {
+     "use strict";
+diff --git a/README.md b/README.md
+index dc24caf..0c7fafe 100644
+--- a/README.md
++++ b/README.md
+@@ -1,11 +1,18 @@
+ # emby-plugin-danmuplus
+ 
+-Emby 弹幕插件增强版，参考 [fengymi/emby-plugin-danmu](https://github.com/fengymi/emby-plugin-danmu) 开发。当前版本为 **2.0.5r1**，面向 Synology 套件版 Emby **4.9.5.0**；最终 V22/V28 Release 包已完成本地验证、备份、部署、哈希回读和只读现场验收。
++Emby 弹幕插件增强版，参考 [fengymi/emby-plugin-danmu](https://github.com/fengymi/emby-plugin-danmu) 开发。当前版本为 **2.0.6**，面向 Synology 套件版 Emby **4.9.5.0**；V22/V28 Release 包保持协议兼容并完成本地确定性验证。
+ 
+ 版本变化请查看 [完整更新日志（UPDATE.md）](UPDATE.md)。README 只汇总 DanmuPlus 相比旧版 Danmu 插件的重要使用功能变化。
+ 
+ ## 相比旧版 Danmu 插件的主要改动
+ 
++### 2.0.6 连续标题相似度
++
++- 季度父剧名 60 分和季名 20 分改为基于宽松规范化文本的等权 Levenshtein 连续相似度；完全一致仍为满分，插入、删除、替换按编辑距离比例扣分。
++- 正确的通用季号会先完成冲突校验，再从命名季度双方移除后比较描述文本；不会特化删除“之”等连接字。`西行` / `之西行` 得到 `0.6667` 季名相似度，总分约 `93.33`。
++- 普通自动阈值仍为包含边界的 `>= 90`，TMDB 别名阈值仍为 `>= 80`；不增加季名最低门槛、冲突上限或自动 veto。电影评分、候选资格和共享 Jaro-Winkler 行为保持不变。
++- 插件程序集/文件版本为 `2.0.6.0`，产品、配置与 TMDB User-Agent 版本为 `2.0.6`；前端安装标记保持 V28，映射协议保持 V22。
++
+ ### 2.0.5r1 搜索与呈现更新
+ 
+ - 一个弹幕网站搜索失败时，会保留该站点的有界诊断，同时继续使用其他已完成网站的候选；全部网站失败、明确取消或权威映射不完整时仍然不会自动下载或写入元数据。临时错误会显示可操作原因，整剧预览偶发返回空 Season 时只自动重试一次。
+diff --git a/RegressionTests/R4IdentifierMetamorphic/Program.cs b/RegressionTests/R4IdentifierMetamorphic/Program.cs
+index 3d370c7..489ddb4 100644
+--- a/RegressionTests/R4IdentifierMetamorphic/Program.cs
++++ b/RegressionTests/R4IdentifierMetamorphic/Program.cs
+@@ -175,17 +175,41 @@ namespace Emby.Plugin.Danmu.R4IdentifierMetamorphicRegression
+ 
+             foreach (var entry in new[] { interactive, composite, automatic })
+             {
+-                Assert(!entry.Contains("DanmuProviderIdResolver.", StringComparison.Ordinal) &&
+-                       !entry.Contains("TryGetSavedManualBinding(", StringComparison.Ordinal) &&
+-                       entry.Contains("DanmuMatchSearchEngine.SearchSeasonAsync", StringComparison.Ordinal),
++                Assert(IsIdentifierFreeBatchEntry(entry),
+                     "a Series/Season batch entry must search descriptively without resolving local identifiers");
+             }
++            const string descriptiveSearch = "DanmuMatchSearchEngine.SearchSeasonAsync";
++            const string allowedMetadataProjection =
++                "DanmuProviderIdResolver.GetEnabledProviderIdKeys(item);";
++            Assert(IsIdentifierFreeBatchEntry(allowedMetadataProjection + descriptiveSearch),
++                "enabled-provider-key metadata projection plus descriptive search must remain allowed");
++            Assert(!IsIdentifierFreeBatchEntry(
++                    "DanmuProviderIdResolver.ResolveAsync(item);" + descriptiveSearch),
++                "every resolver operation other than enabled-provider-key metadata projection must fail the gate");
++            Assert(!IsIdentifierFreeBatchEntry(
++                    "TryGetSavedManualBinding(item);" + descriptiveSearch),
++                "saved manual binding lookup must fail the identifier-free gate");
++            Assert(!IsIdentifierFreeBatchEntry(allowedMetadataProjection),
++                "an allowed metadata projection without descriptive search must fail the gate");
+             Assert(interactive.Contains("TryBuildOwnedPlanningContext", StringComparison.Ordinal) &&
+                    composite.Contains("BuildCompositePlanAsync", StringComparison.Ordinal) &&
+                    automatic.Contains("TryBuildAutomaticPlanningContext", StringComparison.Ordinal),
+                 "interactive, composite, and automatic paths must retain the shared target coordinator boundaries");
+         }
+ 
++        private static bool IsIdentifierFreeBatchEntry(string entry)
++        {
++            const string allowedMetadataProjection =
++                "DanmuProviderIdResolver.GetEnabledProviderIdKeys(";
++            var source = entry ?? string.Empty;
++            var withoutAllowedMetadataProjection =
++                source.Replace(allowedMetadataProjection, string.Empty);
++            return !withoutAllowedMetadataProjection.Contains(
++                       "DanmuProviderIdResolver.", StringComparison.Ordinal) &&
++                   !source.Contains("TryGetSavedManualBinding(", StringComparison.Ordinal) &&
++                   source.Contains("DanmuMatchSearchEngine.SearchSeasonAsync", StringComparison.Ordinal);
++        }
++
+         private static string Slice(string source, string startMarker, string endMarker)
+         {
+             var start = source.IndexOf(startMarker, StringComparison.Ordinal);
+diff --git a/RegressionTests/TitleFidelity/Program.cs b/RegressionTests/TitleFidelity/Program.cs
+index e920422..22f7696 100644
+--- a/RegressionTests/TitleFidelity/Program.cs
++++ b/RegressionTests/TitleFidelity/Program.cs
+@@ -394,9 +394,20 @@ namespace Emby.Plugin.Danmu.TitleFidelityTests
+                 },
+                 "DandanID", "DandanPlay", 0, "Localized Parent", "Season 2", 2024, 12,
+                 new[] { "Target Parent＊" }, null);
++            var noLocalParentAlias = DanmuMatchScorer.Score(
++                new ScraperSearchInfo
++                {
++                    Id = "no-local-parent-alias",
++                    Name = "Target Parent*",
++                    Category = "anime",
++                    Year = 2024,
++                    EpisodeSize = 12,
++                },
++                "DandanID", "DandanPlay", 0, "Localized Parent", "Season 2", 2024, 12);
+             Assert(localParentAlias.FidelityTitleEvidence == 1 &&
+-                   localParentAlias.ParentTitleScore == 0,
+-                "Series.OriginalTitle may remain rank-1 fidelity evidence but must not earn ordinary Season parent-score credit");
++                   localParentAlias.ParentTitleScore == noLocalParentAlias.ParentTitleScore &&
++                   localParentAlias.ParentTitleScore > 0 && localParentAlias.ParentTitleScore < 1,
++                "Series.OriginalTitle may remain rank-1 fidelity evidence but ordinary parent scoring must use only the authoritative title's continuous evidence");
+ 
+             var genericSeason = ScoreSeasonWithRoles(
+                 "generic-season", "Target Parent*", "Season 2", "Season 2");
+diff --git a/RegressionTests/TmdbAliasTests.cs b/RegressionTests/TmdbAliasTests.cs
+index 3f1324c..6ea0fb0 100644
+--- a/RegressionTests/TmdbAliasTests.cs
++++ b/RegressionTests/TmdbAliasTests.cs
+@@ -41,6 +41,7 @@ namespace Emby.Plugin.Danmu.RegressionTests
+             ExercisesTmdbClientFallbackCachingAndCancellation();
+             PreservesOrdinaryScoresForContradictoryEvidence();
+             ScoresSeasonEvidenceWithExactIndependentChannels();
++            ScoresContinuousSeasonAndParentTitleEvidence();
+             ScoresLiveOnePunchManThirdSeasonAliasFallback();
+             ScoresBookwormFourthSeasonDespiteAuthoritativeCountDifference();
+             ScoresOnlyValidatedShortParentAliasExtensions();
+@@ -179,8 +180,8 @@ namespace Emby.Plugin.Danmu.RegressionTests
+                    TmdbAliasClient.GetJapaneseOriginalPrimaryTitle(englishDetails, false) == "本好きの下剋上" &&
+                    TmdbAliasClient.GetLocalizedPrimaryTitle(japaneseDetails, false) == "本好きの下剋上",
+                 "fallback rounds must use en-US primary first, then Japanese original or ja-JP primary data");
+-            Assert(TmdbAliasClient.UserAgent == "DanmuPlus/2.0.5r1",
+-                "TMDB requests must identify the 2.0.5r1 build");
++            Assert(TmdbAliasClient.UserAgent == "DanmuPlus/2.0.6",
++                "TMDB requests must identify the 2.0.6 build");
+         }
+ 
+         private static void ExercisesTmdbClientFallbackCachingAndCancellation()
+@@ -351,9 +352,8 @@ namespace Emby.Plugin.Danmu.RegressionTests
+             Assert(correct.Score == 1 && bare.Score == 0.60 && second.Score == 0.60 &&
+                    youkuSecond.Score == 0.60,
+                 "Season weights must be parent 60, whole-remainder Season 20, exact year 20, and episode count 0");
+-            Assert(extraThirdKeyword.KeywordScore > 0 && extraThirdKeyword.KeywordScore < 1 &&
+-                   extraThirdKeyword.Score < 1,
+-                "an equal numeric Season marker must not erase additional remainder keywords or receive the full 20-point Season score");
++            Assert(extraThirdKeyword.KeywordScore == 0 && extraThirdKeyword.Score == 0.80,
++                "a pure generic target must compare as empty against additional descriptive remainder text");
+ 
+             var splitChannels = ScoreOnePunchMan("split", "一拳超人", 2025, 12, "第三季");
+             Assert(splitChannels.Score == 0.80 && splitChannels.ParentTitleScore == 1 &&
+@@ -443,6 +443,129 @@ namespace Emby.Plugin.Danmu.RegressionTests
+                 "a target Season-title variant with an explicit number conflicting with expected S3 must be excluded from similarity scoring");
+         }
+ 
++        private static void ScoresContinuousSeasonAndParentTitleEvidence()
++        {
++            const string tangParent = "唐朝诡事录";
++            var prefixInsertion = ScoreNamedSeason(
++                "prefix-insertion", tangParent + "之西行", tangParent, "第2季：西行", 2);
++            var exact = ScoreNamedSeason(
++                "exact", tangParent + "西行", tangParent, "第2季：西行", 2);
++            var substitution = ScoreNamedSeason(
++                "substitution", tangParent + "东行", tangParent, "第2季：西行", 2);
++            var reordered = ScoreNamedSeason(
++                "reordered", tangParent + "行西", tangParent, "第2季：西行", 2);
++            var disjoint = ScoreNamedSeason(
++                "disjoint", tangParent + "北斗", tangParent, "第2季：西行", 2);
++            var pureMarker = ScoreNamedSeason(
++                "pure-marker", tangParent + "第2季", tangParent, "第2季：西行", 2);
++            var wrongMarker = ScoreNamedSeason(
++                "wrong-marker", tangParent + "第3季：西行", tangParent, "第2季：西行", 2);
++
++            Assert(prefixInsertion.ParentTitleScore == 1 &&
++                   prefixInsertion.KeywordScore == 0.6667 &&
++                   prefixInsertion.MatchScore == 0.9333,
++                "西行 / 之西行 must receive proportional 2/3 Season evidence without deleting 之");
++            Assert(exact.KeywordScore == 1 && exact.MatchScore == 1 &&
++                   substitution.KeywordScore == 0.5 && substitution.MatchScore == 0.9 &&
++                   DanmuMatchScorer.SelectAutoCandidate(new[] { substitution })?.Id == "substitution",
++                "exact named Seasons must retain 20 points and a unique 90-point substitution must remain auto-selectable");
++            Assert(reordered.KeywordScore == 0 && disjoint.KeywordScore == 0 &&
++                   reordered.MatchScore == 0.8 && disjoint.MatchScore == 0.8,
++                "reordered and disjoint two-character Season names must receive zero edit similarity");
++            Assert(pureMarker.KeywordScore == 0,
++                "a pure-marker/named pair must receive zero Season evidence, actual=" + pureMarker.KeywordScore);
++            Assert(wrongMarker.KeywordScore == 0,
++                "a conflicting explicit Season marker must receive zero Season evidence, actual=" + wrongMarker.KeywordScore);
++
++            var correctMarkersDifferentNames = DanmuMatchScorer.Score(new ScraperSearchInfo
++            {
++                Id = "correct-markers-different-names",
++                Name = tangParent + " Season 2 东行",
++                Category = "动漫",
++                Year = 2024,
++            }, "dandan", "DandanPlay", 0, tangParent, "第2季：西行", 2024, 0,
++                null, null, false, 2);
++            Assert(correctMarkersDifferentNames.KeywordScore == 0.5 &&
++                   correctMarkersDifferentNames.MatchScore == 0.9,
++                "shared correct marker text must be removed before comparing 西行 / 东行");
++
++            var firstSeasonBare = DanmuMatchScorer.Score(new ScraperSearchInfo
++            {
++                Id = "first-season-empty",
++                Name = tangParent,
++                Category = "动漫",
++                Year = 2024,
++            }, "dandan", "DandanPlay", 0, tangParent, "第一季", 2024, 0,
++                null, null, false, 1);
++            Assert(firstSeasonBare.KeywordScore == 1 && firstSeasonBare.MatchScore == 1,
++                "the established Season 1 empty/empty residual exception must remain full credit");
++
++            const string localBookworm = "爱书的下克上：为了成为图书管理员不择手段！";
++            const string sourceBookworm = "小书痴的下克上 〜为了成为图书管理员而不择手段〜";
++            var bookworm = DanmuMatchScorer.Score(new ScraperSearchInfo
++            {
++                Id = "bookworm-continuous-parent",
++                Name = sourceBookworm,
++                Category = "动漫",
++            }, "dandan", "DandanPlay", 0, localBookworm, "完全不同", 0, 0);
++            var emptyParent = DanmuMatchScorer.Score(new ScraperSearchInfo
++            {
++                Id = "empty-parent",
++                Name = sourceBookworm,
++                Category = "动漫",
++            }, "dandan", "DandanPlay", 0, string.Empty, "完全不同", 0, 0);
++            var emptyParentExactSeason = DanmuMatchScorer.Score(new ScraperSearchInfo
++            {
++                Id = "empty-parent-exact-season",
++                Name = "西行",
++                Category = "动漫",
++                Year = 2024,
++            }, "dandan", "DandanPlay", 0, string.Empty, "西行", 2024, 0);
++            var disjointParent = DanmuMatchScorer.Score(new ScraperSearchInfo
++            {
++                Id = "disjoint-parent",
++                Name = "北斗神拳",
++                Category = "动漫",
++            }, "dandan", "DandanPlay", 0, "唐朝诡事录", "完全不同", 0, 0);
++            Assert(DanmuMatchScorer.Normalize(localBookworm).Length == 19 &&
++                   DanmuMatchScorer.Normalize(sourceBookworm).Length == 21 &&
++                   bookworm.ParentTitleScore == 0.8571,
++                "the normalized Bookworm parent pair must have distance 3/max length 21 and score 0.8571");
++            Assert(emptyParent.ParentTitleScore == 0 && disjointParent.ParentTitleScore == 0,
++                "empty and disjoint parent-title endpoints must remain zero");
++            Assert(emptyParentExactSeason.ParentTitleScore == 0 &&
++                   emptyParentExactSeason.KeywordScore == 1 &&
++                   emptyParentExactSeason.MatchScore == 0.4,
++                "an empty parent set must not discard the source channel's existing Season evidence");
++
++            var movie = DanmuMatchScorer.ScoreMovie(new ScraperSearchInfo
++            {
++                Id = "movie-metric-isolation",
++                Name = "行西",
++                Category = "电影",
++                Year = 2024,
++            }, "dandan", "DandanPlay", 0, "西行", 2024);
++            Assert(movie.TitleScore == 0 && movie.MatchScore == 0.18,
++                "Movie scoring must retain the existing short-string Jaro-Winkler result and 82/18 weights");
++        }
++
++        private static DanmuMatchCandidate ScoreNamedSeason(
++            string id,
++            string sourceTitle,
++            string parentTitle,
++            string seasonTitle,
++            int expectedSeasonNumber)
++        {
++            return DanmuMatchScorer.Score(new ScraperSearchInfo
++            {
++                Id = id,
++                Name = sourceTitle,
++                Category = "动漫",
++                Year = 2024,
++            }, "dandan", "DandanPlay", 0, parentTitle, seasonTitle, 2024, 0,
++                null, null, false, expectedSeasonNumber);
++        }
++
+         private static DanmuMatchCandidate ScoreOnePunchMan(
+             string id,
+             string name,
+diff --git a/Scraper/DanmuMatchScorer.cs b/Scraper/DanmuMatchScorer.cs
+index 78488fa..08366dd 100644
+--- a/Scraper/DanmuMatchScorer.cs
++++ b/Scraper/DanmuMatchScorer.cs
+@@ -557,7 +557,9 @@ namespace Emby.Plugin.Danmu.Scraper
+                 }
+             }
+ 
+-            if (expectedSeasonNumber.GetValueOrDefault() > 0)
++            if (expectedSeasonNumber.GetValueOrDefault() > 0 &&
++                !variants.Any(value =>
++                    RemoveExpectedSeasonMarkers(value, expectedSeasonNumber).Length > 0))
+             {
+                 AddSeasonVariant(variants, seen,
+                     Normalize("第" + expectedSeasonNumber.Value.ToString(CultureInfo.InvariantCulture) + "季"),
+@@ -615,11 +617,25 @@ namespace Emby.Plugin.Danmu.Scraper
+                     .ToList();
+                 if (matchedParents.Count == 0)
+                 {
++                    var partialParentScore = 0d;
++                    var partialParentLength = 0;
++                    foreach (var parent in parentTitles ?? new List<string>())
++                    {
++                        var similarity = NormalizedLevenshteinSimilarity(normalizedSource, parent);
++                        if (similarity > partialParentScore ||
++                            Math.Abs(similarity - partialParentScore) < 0.0000001 &&
++                            parent.Length > partialParentLength)
++                        {
++                            partialParentScore = similarity;
++                            partialParentLength = parent.Length;
++                        }
++                    }
+                     SelectBetterSeasonTitleEvidence(best, new SeasonTitleEvidence
+                     {
+-                        ParentScore = 0,
++                        ParentScore = partialParentScore,
+                         SeasonScore = BestSeasonSimilarity(
+                             normalizedSource, seasonTitles, expectedSeasonNumber),
++                        MatchedParentLength = partialParentLength,
+                     });
+                     continue;
+                 }
+@@ -889,7 +905,74 @@ namespace Emby.Plugin.Danmu.Scraper
+             {
+                 return 0;
+             }
+-            return Clamp(source.Distance(target));
++
++            var sourceDescription = RemoveExpectedSeasonMarkers(source, expectedSeasonNumber);
++            var targetDescription = RemoveExpectedSeasonMarkers(target, expectedSeasonNumber);
++            if (sourceDescription.Length > 0 || targetDescription.Length > 0)
++            {
++                return NormalizedLevenshteinSimilarity(sourceDescription, targetDescription);
++            }
++            return NormalizedLevenshteinSimilarity(source, target);
++        }
++
++        private static string RemoveExpectedSeasonMarkers(string value, int? expectedSeasonNumber)
++        {
++            if (expectedSeasonNumber.GetValueOrDefault() <= 0)
++            {
++                return value ?? string.Empty;
++            }
++
++            return ExplicitSeasonMarkerRegex.Replace(value ?? string.Empty, match =>
++                ParseExplicitSeasonNumber(match.Value) == expectedSeasonNumber
++                    ? string.Empty
++                    : match.Value);
++        }
++
++        private static double NormalizedLevenshteinSimilarity(string left, string right)
++        {
++            var source = left ?? string.Empty;
++            var target = right ?? string.Empty;
++            if (source.Length == 0 || target.Length == 0)
++            {
++                return 0;
++            }
++            if (string.Equals(source, target, StringComparison.Ordinal))
++            {
++                return 1;
++            }
++
++            if (source.Length > target.Length)
++            {
++                var swap = source;
++                source = target;
++                target = swap;
++            }
++
++            var previous = new int[source.Length + 1];
++            var current = new int[source.Length + 1];
++            for (var column = 0; column <= source.Length; column++)
++            {
++                previous[column] = column;
++            }
++
++            for (var row = 1; row <= target.Length; row++)
++            {
++                current[0] = row;
++                for (var column = 1; column <= source.Length; column++)
++                {
++                    var substitutionCost = source[column - 1] == target[row - 1] ? 0 : 1;
++                    current[column] = Math.Min(
++                        Math.Min(current[column - 1] + 1, previous[column] + 1),
++                        previous[column - 1] + substitutionCost);
++                }
++
++                var buffer = previous;
++                previous = current;
++                current = buffer;
++            }
++
++            var maximumLength = Math.Max(source.Length, target.Length);
++            return Clamp(1d - (double)previous[source.Length] / maximumLength);
+         }
+ 
+         private static bool HasConflictingExplicitSeasonMarker(
+diff --git a/Scraper/Tmdb/TmdbAliasClient.cs b/Scraper/Tmdb/TmdbAliasClient.cs
+index 57f148e..daf36d1 100644
+--- a/Scraper/Tmdb/TmdbAliasClient.cs
++++ b/Scraper/Tmdb/TmdbAliasClient.cs
+@@ -113,7 +113,7 @@ namespace Emby.Plugin.Danmu.Scraper.Tmdb
+     {
+         private const string ApiBaseUrl = "https://api.themoviedb.org/3";
+         private const int RequestTimeoutMs = 10000;
+-        internal const string UserAgent = "DanmuPlus/2.0.5r1";
++        internal const string UserAgent = "DanmuPlus/2.0.6";
+         private const int MaximumCachedResponses = 128;
+         private static readonly TimeSpan SuccessfulCacheLifetime = TimeSpan.FromHours(24);
+         private static readonly TimeSpan EmptyCacheLifetime = TimeSpan.FromHours(1);
+diff --git a/UPDATE.md b/UPDATE.md
+index 3c91890..728ba99 100644
+--- a/UPDATE.md
++++ b/UPDATE.md
+@@ -1,5 +1,13 @@
+ # 更新日志
+ 
++## 2.0.6（2026-08-18）
++
++- 季度评分中的父剧名 60 分与季名 20 分使用等权、单位成本的规范化 Levenshtein 连续相似度；完全一致为满分，完全不相干为 0，中间差异按 `1 - 编辑距离 / 最大长度` 比例计分。年份仍为精确 0/20，集数仍不计分。
++- 保留父剧名精确包含时的满分与精确残差分解；没有精确父剧名时，完整来源标题可与当前允许的父标题候选连续比较，但不会删除推测的模糊片段，也不会跨来源标题通道叠加证据。
++- 显式季号先校验冲突，再只移除已确认正确的通用季号并比较描述残差；不删除“之”或其他词汇。`第2季：西行` 对 `唐朝诡事录之西行` 的季名相似度为 `0.6667`，总分为 `0.9333`；`西行` 对 `东行` 为 `0.5000`，总分 `0.9000`。
++- 普通自动门槛保持包含边界的 `>= 0.90`，TMDB 别名门槛保持 `>= 0.80`；没有季名分最低门槛、冲突上限或自动 veto。Movie、候选资格、保真证据、搜索顺序和共享 Jaro-Winkler 消费者不变。
++- 插件程序集/文件版本为 `2.0.6.0`，产品与配置版本为 `2.0.6`，TMDB User-Agent 为 `DanmuPlus/2.0.6`；前端安装标记保持 V28，映射协议保持 V22。
++
+ ## 2.0.5r1（2026-08-18）
+ 
+ - l1-l2：删除过时的复合季度警告，并把“仅用于本次下载映射”的说明收敛为每个适用结果一次；权威来源集数多于库内集数时仅显示一次黄色提示，不改变评分、映射或下载资格。
