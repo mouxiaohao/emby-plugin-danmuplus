@@ -557,7 +557,9 @@ namespace Emby.Plugin.Danmu.Scraper
                 }
             }
 
-            if (expectedSeasonNumber.GetValueOrDefault() > 0)
+            if (expectedSeasonNumber.GetValueOrDefault() > 0 &&
+                !variants.Any(value =>
+                    RemoveExpectedSeasonMarkers(value, expectedSeasonNumber).Length > 0))
             {
                 AddSeasonVariant(variants, seen,
                     Normalize("第" + expectedSeasonNumber.Value.ToString(CultureInfo.InvariantCulture) + "季"),
@@ -615,11 +617,25 @@ namespace Emby.Plugin.Danmu.Scraper
                     .ToList();
                 if (matchedParents.Count == 0)
                 {
+                    var partialParentScore = 0d;
+                    var partialParentLength = 0;
+                    foreach (var parent in parentTitles ?? new List<string>())
+                    {
+                        var similarity = NormalizedLevenshteinSimilarity(normalizedSource, parent);
+                        if (similarity > partialParentScore ||
+                            Math.Abs(similarity - partialParentScore) < 0.0000001 &&
+                            parent.Length > partialParentLength)
+                        {
+                            partialParentScore = similarity;
+                            partialParentLength = parent.Length;
+                        }
+                    }
                     SelectBetterSeasonTitleEvidence(best, new SeasonTitleEvidence
                     {
-                        ParentScore = 0,
+                        ParentScore = partialParentScore,
                         SeasonScore = BestSeasonSimilarity(
                             normalizedSource, seasonTitles, expectedSeasonNumber),
+                        MatchedParentLength = partialParentLength,
                     });
                     continue;
                 }
@@ -889,7 +905,74 @@ namespace Emby.Plugin.Danmu.Scraper
             {
                 return 0;
             }
-            return Clamp(source.Distance(target));
+
+            var sourceDescription = RemoveExpectedSeasonMarkers(source, expectedSeasonNumber);
+            var targetDescription = RemoveExpectedSeasonMarkers(target, expectedSeasonNumber);
+            if (sourceDescription.Length > 0 || targetDescription.Length > 0)
+            {
+                return NormalizedLevenshteinSimilarity(sourceDescription, targetDescription);
+            }
+            return NormalizedLevenshteinSimilarity(source, target);
+        }
+
+        private static string RemoveExpectedSeasonMarkers(string value, int? expectedSeasonNumber)
+        {
+            if (expectedSeasonNumber.GetValueOrDefault() <= 0)
+            {
+                return value ?? string.Empty;
+            }
+
+            return ExplicitSeasonMarkerRegex.Replace(value ?? string.Empty, match =>
+                ParseExplicitSeasonNumber(match.Value) == expectedSeasonNumber
+                    ? string.Empty
+                    : match.Value);
+        }
+
+        private static double NormalizedLevenshteinSimilarity(string left, string right)
+        {
+            var source = left ?? string.Empty;
+            var target = right ?? string.Empty;
+            if (source.Length == 0 || target.Length == 0)
+            {
+                return 0;
+            }
+            if (string.Equals(source, target, StringComparison.Ordinal))
+            {
+                return 1;
+            }
+
+            if (source.Length > target.Length)
+            {
+                var swap = source;
+                source = target;
+                target = swap;
+            }
+
+            var previous = new int[source.Length + 1];
+            var current = new int[source.Length + 1];
+            for (var column = 0; column <= source.Length; column++)
+            {
+                previous[column] = column;
+            }
+
+            for (var row = 1; row <= target.Length; row++)
+            {
+                current[0] = row;
+                for (var column = 1; column <= source.Length; column++)
+                {
+                    var substitutionCost = source[column - 1] == target[row - 1] ? 0 : 1;
+                    current[column] = Math.Min(
+                        Math.Min(current[column - 1] + 1, previous[column] + 1),
+                        previous[column - 1] + substitutionCost);
+                }
+
+                var buffer = previous;
+                previous = current;
+                current = buffer;
+            }
+
+            var maximumLength = Math.Max(source.Length, target.Length);
+            return Clamp(1d - (double)previous[source.Length] / maximumLength);
         }
 
         private static bool HasConflictingExplicitSeasonMarker(

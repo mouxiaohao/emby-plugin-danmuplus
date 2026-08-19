@@ -1,10 +1,17 @@
 # emby-plugin-danmuplus
 
-Emby 弹幕插件增强版，参考 [fengymi/emby-plugin-danmu](https://github.com/fengymi/emby-plugin-danmu) 开发。当前版本为 **2.0.5r1**，面向 Synology 套件版 Emby **4.9.5.0**；最终 V22/V28 Release 包已完成本地验证、备份、部署、哈希回读和只读现场验收。
+Emby 弹幕插件增强版，参考 [fengymi/emby-plugin-danmu](https://github.com/fengymi/emby-plugin-danmu) 开发。当前版本为 **2.0.6**，面向 Synology 套件版 Emby **4.9.5.0**；V22/V28 Release 包保持协议兼容并完成本地确定性验证。
 
 版本变化请查看 [完整更新日志（UPDATE.md）](UPDATE.md)。README 只汇总 DanmuPlus 相比旧版 Danmu 插件的重要使用功能变化。
 
 ## 相比旧版 Danmu 插件的主要改动
+
+### 2.0.6 连续标题相似度
+
+- 季度父剧名 60 分和季名 20 分改为基于宽松规范化文本的等权 Levenshtein 连续相似度；完全一致仍为满分，插入、删除、替换按编辑距离比例扣分。
+- 正确的通用季号会先完成冲突校验，再从命名季度双方移除后比较描述文本；不会特化删除“之”等连接字。`西行` / `之西行` 得到 `0.6667` 季名相似度，总分约 `93.33`。
+- 普通自动阈值仍为包含边界的 `>= 90`，TMDB 别名阈值仍为 `>= 80`；不增加季名最低门槛、冲突上限或自动 veto。电影评分、候选资格和共享 Jaro-Winkler 行为保持不变。
+- 插件程序集/文件版本为 `2.0.6.0`，产品、配置与 TMDB User-Agent 版本为 `2.0.6`；前端安装标记保持 V28，映射协议保持 V22。
 
 ### 2.0.5r1 搜索与呈现更新
 
