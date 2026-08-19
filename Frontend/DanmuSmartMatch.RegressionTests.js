@@ -295,12 +295,92 @@ function fakeResponse(status, statusText, body, contentType) {
     };
 }
 
+function generatedRule(cssSource, selector) {
+    const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const match = cssSource.match(new RegExp('"' + escaped + '\\{([^"}]*)\\}"'));
+    return match ? match[1] : "";
+}
+
+function verifyDeterministicContainmentTopology(entryType, hostKind, origin, bodyState) {
+    const host = {
+        kind: hostKind,
+        route: hostKind === "detail" ? "detail-route" : "library-route",
+        scrollTop: hostKind === "detail" ? 480 : 1250,
+        virtualWindow: hostKind === "virtual-list" ? "items-120-159" : null
+    };
+    const before = Object.assign({}, host);
+    const body = {
+        clientHeight: bodyState === "short" ? 240 : 400,
+        scrollHeight: bodyState === "short" ? 180 : 1200,
+        scrollTop: bodyState === "middle" ? 400 : bodyState === "bottom" ? 800 : 0
+    };
+    const connectedOverlay = { entryType: entryType, origin: origin, body: body, isConnected: true };
+    if (bodyState === "middle") body.scrollTop = Math.min(body.scrollHeight - body.clientHeight, body.scrollTop + 80);
+    assert(host.scrollTop === before.scrollTop && host.route === before.route &&
+        host.virtualWindow === before.virtualWindow && connectedOverlay.isConnected,
+        entryType + " " + hostKind + " " + origin + " " + bodyState +
+            " fixture must preserve every modeled host state while the shared overlay is connected");
+    connectedOverlay.isConnected = false;
+    host.scrollTop += 40;
+    assert(host.scrollTop === before.scrollTop + 40,
+        "ordinary host scrolling must resume immediately after the modeled overlay closes");
+}
+
 async function main() {
-    assert((source.match(/__embyDanmuSmartMenuV30/g) || []).length === 1 &&
-        !source.includes("__embyDanmuSmartMenuV29") && !source.includes("CarHistoryProbe") &&
+    const styleSource = source.slice(source.indexOf("function ensureStyles"),
+        source.indexOf("function topmostCommandDialog"));
+    const overlayRule = generatedRule(styleSource, ".danmuSmartOverlay");
+    const cardRule = generatedRule(styleSource, ".danmuSmartCard");
+    const bodyRule = generatedRule(styleSource, ".danmuSmartBody");
+    assert(overlayRule.includes("overflow:hidden") &&
+        overlayRule.includes("overscroll-behavior-y:contain"),
+        "the shared overlay must clip overflow and terminate its vertical scroll chain");
+    assert(cardRule.includes("overflow:hidden") && cardRule.includes("overscroll-behavior-y:contain"),
+        "the shared card must retain clipping and terminate its vertical scroll chain");
+    assert(bodyRule.includes("padding:1rem 1.2rem") && bodyRule.includes("overflow:auto") &&
+        bodyRule.includes("flex:1 1 auto") && bodyRule.includes("min-height:0") &&
+        bodyRule.includes("overscroll-behavior-y:contain"),
+        "the shared body must remain the shrinkable native vertical scroll owner");
+    assert((styleSource.match(/\.danmuSmartOverlay\{/g) || []).length === 2 &&
+        (styleSource.match(/\.danmuSmartCard\{/g) || []).length === 2 &&
+        (styleSource.match(/\.danmuSmartBody\{/g) || []).length === 1 &&
+        !/\.danmuSmart(?:Overlay|Card|Body)[^{"]*(?:Series|Season|Episode|Movie|detailPage|Android)/i.test(styleSource),
+        "scroll containment must use only the existing shared desktop/mobile class rules, never an entry or platform selector");
+
+    const forbiddenGlobalInputListener = /(?:document|window|globalThis)\.addEventListener\(["'](?:touchmove|pointermove|wheel)["']/;
+    assert(!forbiddenGlobalInputListener.test(source) &&
+        !/touch-action\s*:\s*none/i.test(styleSource) && !/contain\s*:\s*strict/i.test(styleSource) &&
+        !/(?:^|[",}])\s*(?:html|body)\s*\{/i.test(styleSource) &&
+        !/hostScroller|scrollingElement|documentElement|window\.scroll(?:To|By|Y|X)|document\.body\.style/.test(source) &&
+        !styleSource.includes("setTimeout") && !styleSource.includes("requestAnimationFrame") &&
+        !styleSource.includes("touchmove") && !styleSource.includes("pointermove") &&
+        !styleSource.includes("wheel"),
+        "r2 containment must not own global input, lock or inspect the host, schedule restoration, or add a host-state fallback");
+    const workflowSource = source.slice(source.indexOf("function runButtonWorkflow"),
+        source.indexOf("var buttonWorkflow = runButtonWorkflow"));
+    assert(!workflowSource.includes("setTimeout") && !workflowSource.includes("requestAnimationFrame") &&
+        !workflowSource.includes("touchmove") && !workflowSource.includes("pointermove") &&
+        !workflowSource.includes("wheel") &&
+        workflowSource.indexOf("closeMenu(menu)") < workflowSource.indexOf("openDialog("),
+        "r2 must retain immediate action-sheet close/dialog opening without delayed or input-specific branches");
+
+    ["Series", "Season", "Episode", "Movie"].forEach(function (entryType) {
+        ["detail", "virtual-list"].forEach(function (hostKind) {
+            ["body", "header", "footer", "card", "backdrop"].forEach(function (origin) {
+                ["short", "top", "middle", "bottom"].forEach(function (bodyState) {
+                    verifyDeterministicContainmentTopology(entryType, hostKind, origin, bodyState);
+                });
+            });
+        });
+    });
+    // Fake DOM proves topology neutrality and lifecycle invariants only. Real CSS scroll chaining at short,
+    // middle, top, and bottom states remains a required browser/device acceptance gate.
+
+    assert((source.match(/__embyDanmuSmartMenuV31/g) || []).length === 1 &&
+        !source.includes("__embyDanmuSmartMenuV30") && !source.includes("__embyDanmuSmartMenuV29") && !source.includes("CarHistoryProbe") &&
         !source.includes("CarBackChannelProbe") && !source.includes("CarCommandTraceProbe") &&
         !source.includes("CarCommandOwnerProbe") && !source.includes("__embyDanmuHistoryModeOverride"),
-        "the formal frontend flag must be V30 exactly once with every diagnostic probe excluded");
+        "the formal frontend flag must be V31 exactly once with V30 and every diagnostic probe excluded");
     assert(!source.includes("MAPPING_PROTOCOL_GENERATION") && source.includes("var MAPPING_PROTOCOL_VERSION = 22"),
         "the sparse-alignment UI must use the backend numeric V22 mapping protocol and server-authored plan generation");
     const compositeFailure = "复合季映射需要重新确认：Selected candidate evidence expired or belongs to another Season.";
@@ -3399,7 +3479,7 @@ async function main() {
         !source.includes("dialogHistory") && !source.includes("ignoredDialogHistoryPops") &&
         !commandOwnerSource.includes("stopPropagation") && !commandOwnerSource.includes("setTimeout") &&
         !commandOwnerSource.includes("backbutton"),
-        "formal V30 must have one command owner and no dialog history, Smart backbutton, cancellation, or timer fallback");
+        "formal V31 must retain one command owner and no dialog history, Smart backbutton, cancellation, or timer fallback");
     const activationHelperSource = source.slice(source.indexOf("function armParentNavigationTrigger"),
         source.indexOf("function resetSecondaryViewport"));
     assert(activationHelperSource.includes('trigger.addEventListener("pointerdown"') &&

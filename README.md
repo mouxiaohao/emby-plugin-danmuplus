@@ -1,10 +1,17 @@
 # emby-plugin-danmuplus
 
-Emby 弹幕插件增强版，参考 [fengymi/emby-plugin-danmu](https://github.com/fengymi/emby-plugin-danmu) 开发。当前版本为 **2.0.6r1**，面向 Synology 套件版 Emby **4.9.5.0**；V22/V30 Release 包保持协议兼容并完成本地确定性验证。
+Emby 弹幕插件增强版，参考 [fengymi/emby-plugin-danmu](https://github.com/fengymi/emby-plugin-danmu) 开发。当前版本为 **2.0.6r2**，面向 Synology 套件版 Emby **4.9.5.0**；V22/V31 Review 包保持协议兼容并完成本地确定性验证。
 
 版本变化请查看 [完整更新日志（UPDATE.md）](UPDATE.md)。README 只汇总 DanmuPlus 相比旧版 Danmu 插件的重要使用功能变化。
 
 ## 相比旧版 Danmu 插件的主要改动
+
+### 2.0.6r2 智能匹配弹窗滚动边界
+
+- 智能匹配共用浮层会裁剪溢出并终止纵向滚动链，卡片保持纵向边界，内部正文成为可收缩的原生滚动区域；短内容、长内容中部以及顶部/底部边界均使用同一套 Series、Season、Episode、Movie 中立样式。
+- 修复目标仅限浮层、卡片和正文的共享 CSS，不监听全局触摸、指针或滚轮，不锁定、读取、写回 Emby 宿主滚动，也不增加计时器、动画帧、入口类型、详情页或 Android 特化分支。真实浏览器与设备是否完整支持滚动链 containment 仍须在部署后以实际滚动位置验收。
+- 保留 2.0.6r1 的零弹窗 history、Android `command: back` 所有权、宿主 `popstate` 清理、父子页逻辑视口恢复和 V22 映射协议；评分、候选顺序、请求、绑定、下载与元数据行为不变。
+- 插件程序集版本保持 `2.0.6.0`，文件版本为 `2.0.6.2`，产品、配置与 TMDB User-Agent 版本为 `2.0.6r2`；前端安装标记为 V31，配置缓存 token 为 `2-0-6r2`。
 
 ### 2.0.6r1 智能匹配滚动、无历史与 Android 返回
 

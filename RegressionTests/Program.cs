@@ -2156,9 +2156,14 @@ namespace Emby.Plugin.Danmu.RegressionTests
             var controllerName = (string)generatedType.GetField("ControllerName", BindingFlags.Static | BindingFlags.NonPublic)
                 .GetRawConstantValue();
             var informationalVersion = assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
+            var fileVersion = assembly.GetCustomAttribute<AssemblyFileVersionAttribute>()?.Version;
 
             Assert(assembly.GetName().Name == "Emby.Plugin.Danmu",
                 "the configuration heading must not change the plugin assembly identity");
+            Assert(assembly.GetName().Version?.ToString() == "2.0.6.0" &&
+                   fileVersion == "2.0.6.2" && informationalVersion == "2.0.6r2" &&
+                   new PluginConfiguration().Version == "2.0.6r2" && token == "2-0-6r2",
+                "the r2 assembly, file, product/configuration, and cache identities must remain exact");
             Assert(token == NormalizeCacheToken(informationalVersion) &&
                    Regex.IsMatch(token, "^[A-Za-z0-9_-]+$"),
                 "the generated cache token should normalize informational-version metadata to a URL-safe identifier");
