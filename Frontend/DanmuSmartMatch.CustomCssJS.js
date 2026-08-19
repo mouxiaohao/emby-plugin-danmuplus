@@ -1,12 +1,12 @@
-/*
+﻿/*
  * Emby.CustomCssJS: 电视剧/季/集/电影智能匹配并一键下载弹幕
- * 适用于 Emby 4.9.x + 本方案配套的 Emby.Plugin.Danmu 2.0.7 DLL
+ * 适用于 Emby 4.9.x + 本方案配套的 Emby.Plugin.Danmu 2.0.7r1 DLL
  */
 (function () {
     "use strict";
 
-    // V32 adds server-authoritative remainder count warnings while retaining V22.
-    var INSTALL_FLAG = "__embyDanmuSmartMenuV32";
+    // V33 conditions the server-authoritative ignored-scope notice while retaining V22.
+    var INSTALL_FLAG = "__embyDanmuSmartMenuV33";
     var MAPPING_PROTOCOL_VERSION = 22;
     var DEFAULT_ZERO_OFFSET = "DefaultZeroOffset";
     var EXPLICIT_ANCHOR = "ExplicitAnchor";
@@ -710,25 +710,47 @@
         return ids;
     }
 
-    function scopeSummaryLine(season) {
+    function ignoredScopeCounts(season) {
+        var counts = {
+            parentZero: normalizeIgnoredCount(value(
+                season, "IgnoredParentZeroEpisodeCount", "ignoredParentZeroEpisodeCount", null)),
+            otherSeason: normalizeIgnoredCount(value(
+                season, "IgnoredOtherSeasonEpisodeCount", "ignoredOtherSeasonEpisodeCount", null)),
+            unknownParent: normalizeIgnoredCount(value(
+                season, "IgnoredUnknownParentEpisodeCount", "ignoredUnknownParentEpisodeCount", null)),
+            invalid: normalizeIgnoredCount(value(
+                season, "IgnoredInvalidEpisodeCount", "ignoredInvalidEpisodeCount", null))
+        };
+        counts.total = counts.parentZero + counts.otherSeason + counts.unknownParent + counts.invalid;
+        return counts;
+    }
+
+    function normalizeIgnoredCount(raw) {
+        var rawType = typeof raw;
+        if (rawType !== "number" && rawType !== "string") return 0;
+        if (rawType === "string" && raw.trim() === "") return 0;
+        var count = Number(raw);
+        return isFinite(count) && count > 0 ? Math.floor(count) : 0;
+    }
+
+    function scopeSummaryLine(season, normalizedIgnoredCounts) {
         var displayed = Math.max(0, Number(value(season, "DisplayedEpisodeCount", "displayedEpisodeCount", 0)) || 0);
         var eligible = Math.max(0, Number(value(season, "EligibleEpisodeCount", "eligibleEpisodeCount", 0)) || 0);
-        var parentZero = Math.max(0, Number(value(season, "IgnoredParentZeroEpisodeCount", "ignoredParentZeroEpisodeCount", 0)) || 0);
-        var other = Math.max(0, Number(value(season, "IgnoredOtherSeasonEpisodeCount", "ignoredOtherSeasonEpisodeCount", 0)) || 0);
-        var unknown = Math.max(0, Number(value(season, "IgnoredUnknownParentEpisodeCount", "ignoredUnknownParentEpisodeCount", 0)) || 0);
-        var invalid = Math.max(0, Number(value(season, "IgnoredInvalidEpisodeCount", "ignoredInvalidEpisodeCount", 0)) || 0);
-        var ignored = parentZero + other + unknown + invalid;
+        var counts = normalizedIgnoredCounts || ignoredScopeCounts(season);
+        var ignored = counts.total;
         if (!displayed && !eligible && !ignored) return "";
         var parts = ["显示 " + displayed + " 集", "参与匹配 " + eligible + " 集"];
         if (ignored) {
             var details = [];
-            if (parentZero) details.push("S00 " + parentZero + " 集");
-            if (other) details.push("其他季 " + other + " 集");
-            if (unknown) details.push("季号未知 " + unknown + " 集");
-            if (invalid) details.push("标识无效 " + invalid + " 集");
-            parts.push("只读忽略 " + ignored + " 集（" + details.join("，") + "）");
+            if (counts.parentZero) details.push("S00 " + counts.parentZero + " 集");
+            if (counts.otherSeason) details.push("其他季 " + counts.otherSeason + " 集");
+            if (counts.unknownParent) details.push("季号未知 " + counts.unknownParent + " 集");
+            if (counts.invalid) details.push("标识无效 " + counts.invalid + " 集");
+            parts.push("只读忽略 " + ignored + " 集（" + details.join("，") +
+                "）。忽略项不可选择，也不会进入下载。");
+            return parts.join("；");
         }
-        return parts.join("；");
+        return parts.join("；") + "。";
     }
 
     function nonNegativeCount(raw) {
@@ -2773,7 +2795,7 @@
         if (scopeLine) {
             var scope = document.createElement("div");
             scope.className = "danmuSeasonScopeSummary";
-            scope.textContent = scopeLine + "。忽略项不可选择，也不会进入下载。";
+            scope.textContent = scopeLine;
             container.appendChild(scope);
         }
         var groups = compositeVirtualGroups(season, selections);
@@ -3616,11 +3638,12 @@
         dialog.footer.replaceChildren();
         var manualKeyword = isManualKeyword(season);
 
+        var scopeLine = scopeSummaryLine(season);
         var summary = document.createElement("p");
         summary.textContent = seasonLibraryContextLine(season) + "。请选择正确项目；服务器会先解析逐集映射并显示未匹配区间。" +
             (!manualKeyword && isProviderIdMatch(season) && hasBackendMatch(season) ? "　✓ 匹配成功" : "") +
             (!manualKeyword && backendDecisionLine(season) ? "　" + backendDecisionLine(season) : "") +
-            (scopeSummaryLine(season) ? "　" + scopeSummaryLine(season) : "");
+            (scopeLine ? "　" + scopeLine : "");
         dialog.body.appendChild(summary);
         var diagnosticsText = searchDiagnosticsLine(season);
         if (diagnosticsText) {
@@ -4563,6 +4586,7 @@
         targetSeasonNumber: targetSeasonNumber,
         isEligibleCompositeEpisode: isEligibleCompositeEpisode,
         eligibleCompositeEpisodes: eligibleCompositeEpisodes,
+        ignoredScopeCounts: ignoredScopeCounts,
         scopeSummaryLine: scopeSummaryLine,
         discardIncompatibleSeasonDrafts: discardIncompatibleSeasonDrafts,
         decodeApiResult: decodeApiResult,

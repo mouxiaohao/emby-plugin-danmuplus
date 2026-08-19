@@ -376,11 +376,11 @@ async function main() {
     // Fake DOM proves topology neutrality and lifecycle invariants only. Real CSS scroll chaining at short,
     // middle, top, and bottom states remains a required browser/device acceptance gate.
 
-    assert((source.match(/__embyDanmuSmartMenuV32/g) || []).length === 1 &&
-        !source.includes("__embyDanmuSmartMenuV31") && !source.includes("__embyDanmuSmartMenuV30") && !source.includes("__embyDanmuSmartMenuV29") && !source.includes("CarHistoryProbe") &&
+    assert((source.match(/__embyDanmuSmartMenuV33/g) || []).length === 1 &&
+        !source.includes("__embyDanmuSmartMenuV32") && !source.includes("__embyDanmuSmartMenuV31") && !source.includes("__embyDanmuSmartMenuV30") && !source.includes("__embyDanmuSmartMenuV29") && !source.includes("CarHistoryProbe") &&
         !source.includes("CarBackChannelProbe") && !source.includes("CarCommandTraceProbe") &&
         !source.includes("CarCommandOwnerProbe") && !source.includes("__embyDanmuHistoryModeOverride"),
-        "the formal frontend flag must be V32 exactly once with V31, V30, and every diagnostic probe excluded");
+        "the formal frontend flag must be V33 exactly once with V32, V31, V30, and every diagnostic probe excluded");
     assert(!source.includes("MAPPING_PROTOCOL_GENERATION") && source.includes("var MAPPING_PROTOCOL_VERSION = 22"),
         "the sparse-alignment UI must use the backend numeric V22 mapping protocol and server-authored plan generation");
     const compositeFailure = "复合季映射需要重新确认：Selected candidate evidence expired or belongs to another Season.";
@@ -1423,6 +1423,349 @@ async function main() {
         hooks.scopeSummaryLine(scopedS1).includes("S00 7 集"),
         "ignored cross-season counts must remain a read-only summary");
 
+    const ignoredSafetyNotice = "忽略项不可选择，也不会进入下载。";
+    const positiveIgnoredExpected =
+        "显示 19 集；参与匹配 12 集；只读忽略 7 集（S00 7 集）。" + ignoredSafetyNotice;
+    const zeroIgnoredExpected = "显示 19 集；参与匹配 12 集。";
+    const singleBranchFailures = [];
+    function expectSingleBranch(condition, message) {
+        if (!condition) singleBranchFailures.push(message);
+    }
+    const positiveDirectSummary = hooks.scopeSummaryLine(scopedS1);
+    expectSingleBranch(positiveDirectSummary === positiveIgnoredExpected,
+        "direct positive scopeSummaryLine must return breakdown plus its immediately adjacent fixed safety suffix");
+    expectSingleBranch(typeof hooks.scopePresentationLine === "undefined" &&
+        source.indexOf("function scopePresentationLine") < 0 &&
+        (source.split(ignoredSafetyNotice).length - 1) === 1 &&
+        (source.match(/var scopeLine = scopeSummaryLine\(season\);/g) || []).length === 3,
+        "production must have one notice literal, no independent scopePresentationLine, and exactly three direct scopeSummaryLine renderer consumers");
+    const positiveIgnoredDialog = hooks.openDialog("positive ignored scope notice");
+    hooks.renderCompositeSeasonSummary(positiveIgnoredDialog,
+        { Id: "scope-series", Type: "Series", Name: "Scope Series" },
+        scopedS1, 0, [scopedS1], {}, {});
+    const positiveIgnoredText = allVisibleText(positiveIgnoredDialog.body);
+    const positiveIgnoredSummary = positiveIgnoredDialog.body.querySelector(".danmuSeasonScopeSummary");
+    assert(positiveIgnoredText.includes("只读忽略 7 集（S00 7 集）") &&
+        positiveIgnoredText.split(ignoredSafetyNotice).length === 2,
+        "a real composite render with authoritative ignored items must keep the breakdown and exactly one safety notice");
+    expectSingleBranch(positiveIgnoredSummary &&
+        positiveIgnoredSummary.textContent === positiveDirectSummary &&
+        positiveIgnoredSummary.textContent === positiveIgnoredExpected,
+        "real composite positive rendering must consume the exact direct scopeSummaryLine string");
+    positiveIgnoredDialog.forceClose();
+
+    const zeroIgnoredSeason = Object.assign({}, scopedS1, {
+        SeasonId: "scope-s1-zero-ignored",
+        IgnoredParentZeroEpisodeCount: 0,
+        IgnoredOtherSeasonEpisodeCount: 0,
+        IgnoredUnknownParentEpisodeCount: 0,
+        IgnoredInvalidEpisodeCount: 0
+    });
+    const zeroIgnoredDialog = hooks.openDialog("zero ignored scope notice");
+    hooks.renderCompositeSeasonSummary(zeroIgnoredDialog,
+        { Id: "scope-series", Type: "Series", Name: "Scope Series" },
+        zeroIgnoredSeason, 0, [zeroIgnoredSeason], {}, {});
+    const zeroIgnoredText = allVisibleText(zeroIgnoredDialog.body);
+    const zeroDirectSummary = hooks.scopeSummaryLine(zeroIgnoredSeason);
+    const zeroIgnoredSummary = zeroIgnoredDialog.body.querySelector(".danmuSeasonScopeSummary");
+    assert(zeroIgnoredText.includes("显示 19 集") &&
+        zeroIgnoredText.includes("参与匹配 12 集") &&
+        !zeroIgnoredText.includes(ignoredSafetyNotice),
+        "a real composite render with displayed/eligible scope but zero ignored counts must not show the ignored-item safety notice");
+    expectSingleBranch(zeroDirectSummary === zeroIgnoredExpected && zeroIgnoredSummary &&
+        zeroIgnoredSummary.textContent === zeroDirectSummary &&
+        !zeroDirectSummary.includes("只读忽略") && !zeroDirectSummary.includes(ignoredSafetyNotice),
+        "direct and real composite zero-ignore summaries must be the same normal string with neither ignored branch nor suffix");
+    zeroIgnoredDialog.forceClose();
+
+    const ignoredCountFieldNames = [
+        "IgnoredParentZeroEpisodeCount", "ignoredParentZeroEpisodeCount",
+        "IgnoredOtherSeasonEpisodeCount", "ignoredOtherSeasonEpisodeCount",
+        "IgnoredUnknownParentEpisodeCount", "ignoredUnknownParentEpisodeCount",
+        "IgnoredInvalidEpisodeCount", "ignoredInvalidEpisodeCount"
+    ];
+    function ignoredScopeFixture(id, fields) {
+        const fixture = JSON.parse(JSON.stringify(scopedS1));
+        fixture.SeasonId = id;
+        ignoredCountFieldNames.forEach(name => { delete fixture[name]; });
+        return Object.assign(fixture, fields || {});
+    }
+    function renderIgnoredScope(fixture, label, itemType) {
+        const dialog = hooks.openDialog(label);
+        hooks.renderCompositeSeasonSummary(dialog,
+            { Id: "scope-series", Type: itemType || "Series", Name: "Scope Series" },
+            fixture, 0, [fixture], {}, {});
+        const result = {
+            text: allVisibleText(dialog.body),
+            summary: dialog.body.querySelector(".danmuSeasonScopeSummary")
+        };
+        dialog.forceClose();
+        return result;
+    }
+
+    [
+        ["parent-zero", { IgnoredParentZeroEpisodeCount: 2 }, "只读忽略 2 集（S00 2 集）"],
+        ["other-season", { ignoredOtherSeasonEpisodeCount: 3 }, "只读忽略 3 集（其他季 3 集）"],
+        ["unknown-parent", { IgnoredUnknownParentEpisodeCount: 4 }, "只读忽略 4 集（季号未知 4 集）"],
+        ["invalid-id", { ignoredInvalidEpisodeCount: 5 }, "只读忽略 5 集（标识无效 5 集）"]
+    ].forEach(testCase => {
+        const fixture = ignoredScopeFixture("scope-" + testCase[0], testCase[1]);
+        const rendered = renderIgnoredScope(
+            fixture,
+            "ignored category " + testCase[0]);
+        assert(rendered.text.includes(testCase[2]) &&
+            rendered.text.split(ignoredSafetyNotice).length === 2,
+            "each authoritative ignored category and Pascal/camel casing must render its own breakdown and one notice: " +
+                testCase[0]);
+        const direct = hooks.scopeSummaryLine(fixture);
+        expectSingleBranch(direct.includes(testCase[2] + "。" + ignoredSafetyNotice) &&
+            rendered.summary && rendered.summary.textContent === direct,
+            "each positive category must return and render one indivisible breakdown-plus-suffix string: " +
+                testCase[0]);
+    });
+
+    const mixedIgnoredSeason = ignoredScopeFixture("scope-mixed-ignored", {
+        ignoredParentZeroEpisodeCount: 1.9,
+        IgnoredOtherSeasonEpisodeCount: "2.8",
+        ignoredUnknownParentEpisodeCount: 3.7,
+        IgnoredInvalidEpisodeCount: 4.6
+    });
+    const mixedIgnoredCounts = hooks.ignoredScopeCounts(mixedIgnoredSeason);
+    const mixedIgnoredRender = renderIgnoredScope(mixedIgnoredSeason, "mixed ignored counts");
+    const mixedIgnoredDirect = hooks.scopeSummaryLine(mixedIgnoredSeason);
+    assert(mixedIgnoredCounts.parentZero === 1 && mixedIgnoredCounts.otherSeason === 2 &&
+        mixedIgnoredCounts.unknownParent === 3 && mixedIgnoredCounts.invalid === 4 &&
+        mixedIgnoredCounts.total === 10 &&
+        mixedIgnoredRender.text.includes("只读忽略 10 集（S00 1 集，其他季 2 集，季号未知 3 集，标识无效 4 集）") &&
+        mixedIgnoredRender.text.split(ignoredSafetyNotice).length === 2,
+        "mixed Pascal/camel ignored counts must floor finite positive fractions and share one total across breakdown and notice");
+    expectSingleBranch(mixedIgnoredDirect.includes(
+        "只读忽略 10 集（S00 1 集，其他季 2 集，季号未知 3 集，标识无效 4 集）。" + ignoredSafetyNotice) &&
+        mixedIgnoredRender.summary && mixedIgnoredRender.summary.textContent === mixedIgnoredDirect,
+        "mixed authoritative counts must return and render one indivisible breakdown-plus-suffix string");
+
+    [
+        ["missing", {}],
+        ["zero", {
+            IgnoredParentZeroEpisodeCount: 0, ignoredOtherSeasonEpisodeCount: 0,
+            IgnoredUnknownParentEpisodeCount: 0, ignoredInvalidEpisodeCount: 0
+        }],
+        ["invalid", {
+            IgnoredParentZeroEpisodeCount: null, ignoredOtherSeasonEpisodeCount: "not-a-number",
+            IgnoredUnknownParentEpisodeCount: Infinity, ignoredInvalidEpisodeCount: -8
+        }],
+        ["nan-and-subunit", {
+            ignoredParentZeroEpisodeCount: NaN, IgnoredOtherSeasonEpisodeCount: 0.9,
+            ignoredUnknownParentEpisodeCount: -Infinity, IgnoredInvalidEpisodeCount: ""
+        }],
+        ["unsupported-casing", { ignoredparentzeroepisodecount: 9 }]
+    ].forEach(testCase => {
+        const fixture = ignoredScopeFixture("scope-zero-" + testCase[0], testCase[1]);
+        const counts = hooks.ignoredScopeCounts(fixture);
+        const rendered = renderIgnoredScope(fixture, "zero ignored " + testCase[0]);
+        const direct = hooks.scopeSummaryLine(fixture);
+        assert(counts.total === 0 && rendered.text.includes("显示 19 集") &&
+            rendered.text.includes("参与匹配 12 集") &&
+            !rendered.text.includes("只读忽略") && !rendered.text.includes(ignoredSafetyNotice),
+            "missing, zero, invalid, non-finite, negative, sub-unit, and unsupported-casing values must normalize to zero: " +
+                testCase[0]);
+        expectSingleBranch(direct === zeroIgnoredExpected && rendered.summary &&
+            rendered.summary.textContent === direct,
+            "zero/invalid direct and real summaries must be identical and contain no ignored branch: " + testCase[0]);
+    });
+
+    const p1Failures = [];
+    function expectP1(condition, message) {
+        if (!condition) p1Failures.push(message);
+    }
+    function nonCompositeScopeFixture(id, fields) {
+        const fixture = ignoredScopeFixture(id, fields);
+        delete fixture.CompositePlan;
+        delete fixture.CompositeGroups;
+        delete fixture.CompositeSelections;
+        fixture.RequiresCompositeMapping = false;
+        return fixture;
+    }
+    const nonCompositePositive = nonCompositeScopeFixture("scope-non-composite-positive", {
+        IgnoredParentZeroEpisodeCount: 2
+    });
+    const nonCompositeZero = nonCompositeScopeFixture("scope-non-composite-zero", {
+        IgnoredParentZeroEpisodeCount: 0,
+        IgnoredOtherSeasonEpisodeCount: 0,
+        IgnoredUnknownParentEpisodeCount: 0,
+        IgnoredInvalidEpisodeCount: 0
+    });
+
+    const nonCompositeSeriesDialog = hooks.openDialog("non-composite whole-Series ignored notice");
+    hooks.renderSeriesPicker(nonCompositeSeriesDialog,
+        { Id: "scope-series", Type: "Series", Name: "Scope Series" },
+        [nonCompositePositive], {}, {});
+    const nonCompositeSeriesPositiveText = allVisibleText(nonCompositeSeriesDialog.body);
+    const nonCompositeSeriesPositiveSummary = nonCompositeSeriesDialog.body.querySelector(
+        ".danmuSeasonSummaryDetail");
+    expectP1(nonCompositeSeriesPositiveText.includes("只读忽略 2 集（S00 2 集）") &&
+        nonCompositeSeriesPositiveText.split(ignoredSafetyNotice).length === 2,
+        "A non-composite whole-Series positive ignored count must render the notice exactly once");
+    expectSingleBranch(nonCompositeSeriesPositiveSummary &&
+        nonCompositeSeriesPositiveSummary.textContent.endsWith(
+            hooks.scopeSummaryLine(nonCompositePositive)) &&
+        hooks.scopeSummaryLine(nonCompositePositive).includes(
+            "只读忽略 2 集（S00 2 集）。" + ignoredSafetyNotice),
+        "non-composite whole-Series positive rendering must consume the exact direct scopeSummaryLine string");
+    hooks.renderSeriesPicker(nonCompositeSeriesDialog,
+        { Id: "scope-series", Type: "Series", Name: "Scope Series" },
+        [nonCompositeZero], {}, {});
+    const nonCompositeSeriesZeroText = allVisibleText(nonCompositeSeriesDialog.body);
+    const nonCompositeSeriesZeroSummary = nonCompositeSeriesDialog.body.querySelector(
+        ".danmuSeasonSummaryDetail");
+    expectP1(nonCompositeSeriesPositiveText.split(ignoredSafetyNotice).length === 2 &&
+        !nonCompositeSeriesZeroText.includes(ignoredSafetyNotice),
+        "C non-composite whole-Series positive-to-zero rerender must remove the old notice");
+    expectSingleBranch(nonCompositeSeriesZeroSummary &&
+        nonCompositeSeriesZeroSummary.textContent.endsWith(
+            hooks.scopeSummaryLine(nonCompositeZero)) &&
+        !nonCompositeSeriesZeroSummary.textContent.includes("只读忽略") &&
+        !nonCompositeSeriesZeroSummary.textContent.includes(ignoredSafetyNotice),
+        "non-composite whole-Series zero rerender must consume the direct summary and remove the whole ignored branch");
+    nonCompositeSeriesDialog.forceClose();
+
+    const nonCompositeSeasonDialog = hooks.openDialog("non-composite single-Season ignored notice");
+    hooks.renderCandidatePicker(nonCompositeSeasonDialog,
+        { Id: "scope-non-composite-positive", Type: "Season", Name: "Season 1" },
+        nonCompositePositive, "");
+    const nonCompositeSeasonPositiveText = allVisibleText(nonCompositeSeasonDialog.body);
+    const nonCompositeSeasonPositiveSummary = nonCompositeSeasonDialog.body.children[0];
+    expectP1(nonCompositeSeasonPositiveText.includes("只读忽略 2 集（S00 2 集）") &&
+        nonCompositeSeasonPositiveText.split(ignoredSafetyNotice).length === 2,
+        "B single-Season without CompositePlan positive ignored count must render the notice exactly once");
+    expectSingleBranch(nonCompositeSeasonPositiveSummary &&
+        nonCompositeSeasonPositiveSummary.textContent.endsWith(
+            hooks.scopeSummaryLine(nonCompositePositive)) &&
+        hooks.scopeSummaryLine(nonCompositePositive).includes(
+            "只读忽略 2 集（S00 2 集）。" + ignoredSafetyNotice),
+        "direct single-Season positive rendering must consume the exact direct scopeSummaryLine string");
+    hooks.renderCandidatePicker(nonCompositeSeasonDialog,
+        { Id: "scope-non-composite-zero", Type: "Season", Name: "Season 1" },
+        nonCompositeZero, "");
+    const nonCompositeSeasonZeroText = allVisibleText(nonCompositeSeasonDialog.body);
+    const nonCompositeSeasonZeroSummary = nonCompositeSeasonDialog.body.children[0];
+    expectP1(nonCompositeSeasonPositiveText.split(ignoredSafetyNotice).length === 2 &&
+        !nonCompositeSeasonZeroText.includes(ignoredSafetyNotice),
+        "C single-Season positive-to-zero rerender must remove the old notice");
+    expectSingleBranch(nonCompositeSeasonZeroSummary &&
+        nonCompositeSeasonZeroSummary.textContent.endsWith(
+            hooks.scopeSummaryLine(nonCompositeZero)) &&
+        !nonCompositeSeasonZeroSummary.textContent.includes("只读忽略") &&
+        !nonCompositeSeasonZeroSummary.textContent.includes(ignoredSafetyNotice),
+        "direct single-Season zero rerender must consume the direct summary and remove the whole ignored branch");
+    nonCompositeSeasonDialog.forceClose();
+
+    [
+        ["boolean-true", true],
+        ["boolean-false", false],
+        ["array", [2]],
+        ["numeric-string-array", ["2"]],
+        ["object", { value: 2 }],
+        ["empty-string", ""],
+        ["whitespace-string", "   "]
+    ].forEach(testCase => {
+        const counts = hooks.ignoredScopeCounts(ignoredScopeFixture(
+            "scope-reject-coercion-" + testCase[0], { IgnoredParentZeroEpisodeCount: testCase[1] }));
+        expectP1(counts.parentZero === 0 && counts.total === 0,
+            "D ignored count must reject coercive " + testCase[0] + " input as zero");
+    });
+    const numericIgnoredCounts = hooks.ignoredScopeCounts(ignoredScopeFixture(
+        "scope-accepted-number", { IgnoredParentZeroEpisodeCount: 4.9 }));
+    const numericStringIgnoredCounts = hooks.ignoredScopeCounts(ignoredScopeFixture(
+        "scope-accepted-numeric-string", { ignoredParentZeroEpisodeCount: "5.8" }));
+    expectP1(numericIgnoredCounts.parentZero === 4 && numericIgnoredCounts.total === 4 &&
+        numericStringIgnoredCounts.parentZero === 5 && numericStringIgnoredCounts.total === 5,
+        "D finite positive numbers and non-empty numeric strings must remain accepted and floored");
+    assert(p1Failures.length === 0,
+        "r1 P1 red contract failures: " + p1Failures.join(" | "));
+    assert(singleBranchFailures.length === 0,
+        "r1 single-branch red contract failures: " + singleBranchFailures.join(" | "));
+
+    const scopeS2 = ignoredScopeFixture("scope-s2", {
+        SeasonNumber: 2, SeasonName: "Season 2",
+        IgnoredOtherSeasonEpisodeCount: 0
+    });
+    scopeS2.CompositePlan.OrderedEpisodes.forEach(episode => {
+        episode.ItemId = "s2e1";
+        episode.ParentSeasonNumber = 2;
+        episode.LocalDisplayLabel = "S02E01";
+    });
+    scopeS2.CompositePlan.Mappings = scopeS2.CompositePlan.Mappings.slice(0, 1);
+    scopeS2.CompositePlan.Mappings[0].LocalEpisodeItemId = "s2e1";
+    scopeS2.CompositeSelections[0].LocalStartEpisodeItemId = "s2e1";
+    scopeS2.CompositeGroups = scopeS2.CompositeGroups.slice(0, 1);
+    scopeS2.CompositeGroups[0].Episodes[0].ItemId = "s2e1";
+    scopeS2.CompositeGroups[0].Episodes[0].ParentSeasonNumber = 2;
+    scopeS2.CompositeGroups[0].Episodes[0].LocalDisplayLabel = "S02E01";
+    const isolatedSeriesDialog = hooks.openDialog("whole-Series ignored isolation");
+    hooks.renderSeriesPicker(isolatedSeriesDialog,
+        { Id: "scope-series", Type: "Series", Name: "Scope Series" },
+        [scopedS1, scopeS2], {}, {});
+    const isolatedScopeSummaries = isolatedSeriesDialog.body.querySelectorAll(".danmuSeasonScopeSummary");
+    assert(isolatedScopeSummaries.length === 2 &&
+        allVisibleText(isolatedScopeSummaries[0]).split(ignoredSafetyNotice).length === 2 &&
+        !allVisibleText(isolatedScopeSummaries[1]).includes(ignoredSafetyNotice) &&
+        allVisibleText(isolatedSeriesDialog.body).split(ignoredSafetyNotice).length === 2,
+        "whole-Series rendering must isolate a positive ignored total to its own Season and leave a zero-total Season clean");
+    isolatedSeriesDialog.forceClose();
+
+    const rerenderIgnoredDialog = hooks.openDialog("ignored notice response rerender");
+    hooks.renderSeriesPicker(rerenderIgnoredDialog,
+        { Id: "scope-series", Type: "Series", Name: "Scope Series" }, [scopedS1], {}, {});
+    assert(allVisibleText(rerenderIgnoredDialog.body).split(ignoredSafetyNotice).length === 2,
+        "a positive ignored response must initially render exactly one safety notice");
+    hooks.renderSeriesPicker(rerenderIgnoredDialog,
+        { Id: "scope-series", Type: "Series", Name: "Scope Series" }, [zeroIgnoredSeason], {}, {});
+    assert(!allVisibleText(rerenderIgnoredDialog.body).includes(ignoredSafetyNotice),
+        "a zero ignored rematch/rebuild response must replace the old DOM without retaining its safety notice");
+    hooks.renderSeriesPicker(rerenderIgnoredDialog,
+        { Id: "scope-series", Type: "Series", Name: "Scope Series" }, [scopedS1], {}, {});
+    assert(allVisibleText(rerenderIgnoredDialog.body).split(ignoredSafetyNotice).length === 2,
+        "repeated positive rerender must still contain exactly one safety notice rather than accumulating duplicates");
+    rerenderIgnoredDialog.forceClose();
+
+    const singleScopeDialog = hooks.openDialog("single-Season ignored scope");
+    hooks.renderCompositeTargetPicker(singleScopeDialog,
+        { Id: "scope-s1", Type: "Season", Name: "Season 1" }, scopedS1);
+    const singleScopeText = allVisibleText(singleScopeDialog.body.querySelector(".danmuSeasonScopeSummary"));
+    const seriesScopeConsistencyDialog = hooks.openDialog("whole-Series ignored scope consistency");
+    hooks.renderSeriesPicker(seriesScopeConsistencyDialog,
+        { Id: "scope-series", Type: "Series", Name: "Scope Series" }, [scopedS1], {}, {});
+    const seriesScopeText = allVisibleText(
+        seriesScopeConsistencyDialog.body.querySelector(".danmuSeasonScopeSummary"));
+    assert(singleScopeText === seriesScopeText &&
+        singleScopeText.split(ignoredSafetyNotice).length === 2,
+        "single-Season and whole-Series must use the same ignored breakdown and conditional-notice render path");
+    singleScopeDialog.forceClose();
+    seriesScopeConsistencyDialog.forceClose();
+
+    assert(!positiveIgnoredText.includes("S00E01") &&
+        JSON.stringify(hooks.compositeVirtualGroups(scopedS1, {})).indexOf("s0e1") < 0 &&
+        JSON.stringify(hooks.serverCompositeRequestSelections(scopedS1)).indexOf("s0e1") < 0 &&
+        JSON.stringify(hooks.compositeRequestSelections({}, scopedS1)).indexOf("foreign-source") < 0,
+        "ignored Episodes must remain absent from selectable groups, authoritative selections, and request selections");
+    apiResponses.StartTrackedDownload = {
+        TaskId: "ignored-scope-task", Status: "completed", Completed: 1, Total: 1,
+        Succeeded: 1, Skipped: 0, Partial: 0, Failed: 0, Episodes: []
+    };
+    const ignoredDownloadCallStart = apiCalls.length;
+    const ignoredDownloadDialog = hooks.openDialog("ignored scope download safety");
+    await hooks.renderDownloadProgress(ignoredDownloadDialog, [scopedS1], {});
+    const ignoredDownloadCall = apiCalls.slice(ignoredDownloadCallStart)
+        .find(call => call.option === "StartTrackedDownload");
+    assert(ignoredDownloadCall && ignoredDownloadCall.itemId === "scope-s1" &&
+        JSON.parse(ignoredDownloadCall.parameters.compositeSelections).length === 1 &&
+        ignoredDownloadCall.parameters.compositeSelections.indexOf("s1e1") >= 0 &&
+        ignoredDownloadCall.parameters.compositeSelections.indexOf("s0e1") < 0 &&
+        ignoredDownloadCall.parameters.compositeSelections.indexOf("foreign-source") < 0,
+        "the real download request must retain the eligible S1 selection and submit zero ignored mappings");
+    ignoredDownloadDialog.forceClose();
+    delete apiResponses.StartTrackedDownload;
 
     const explicitS0 = {
         SeriesId: "scope-series", SeasonId: "scope-s0", SeasonNumber: 0, SeasonName: "Season 0",
@@ -3511,7 +3854,7 @@ async function main() {
         !source.includes("dialogHistory") && !source.includes("ignoredDialogHistoryPops") &&
         !commandOwnerSource.includes("stopPropagation") && !commandOwnerSource.includes("setTimeout") &&
         !commandOwnerSource.includes("backbutton"),
-        "formal V32 must retain one command owner and no dialog history, Smart backbutton, cancellation, or timer fallback");
+        "formal V33 must retain one command owner and no dialog history, Smart backbutton, cancellation, or timer fallback");
     const activationHelperSource = source.slice(source.indexOf("function armParentNavigationTrigger"),
         source.indexOf("function resetSecondaryViewport"));
     assert(activationHelperSource.includes('trigger.addEventListener("pointerdown"') &&

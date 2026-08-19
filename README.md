@@ -1,10 +1,16 @@
 # emby-plugin-danmuplus
 
-Emby 弹幕插件增强版，参考 [fengymi/emby-plugin-danmu](https://github.com/fengymi/emby-plugin-danmu) 开发。当前版本为 **2.0.7**，面向 Synology 套件版 Emby **4.9.5.0**；V22/V32 保持协议兼容并完成本地确定性验证。
+Emby 弹幕插件增强版，参考 [fengymi/emby-plugin-danmu](https://github.com/fengymi/emby-plugin-danmu) 开发。当前版本为 **2.0.7r1**，面向 Synology 套件版 Emby **4.9.5.0**；V22/V33 保持协议兼容并完成本地确定性验证。
 
 版本变化请查看 [完整更新日志（UPDATE.md）](UPDATE.md)。README 只汇总 DanmuPlus 相比旧版 Danmu 插件的重要使用功能变化。
 
 ## 相比旧版 Danmu 插件的主要改动
+
+### 2.0.7r1 条件显示忽略项提示
+
+- 季度范围摘要继续显示服务端返回的库内展示集数和参与匹配集数；只有四项权威 ignored count 的归一化总数大于零时，`scopeSummaryLine` 才会在同一个 `只读忽略 N 集（分类）` 分支中直接追加固定后缀“忽略项不可选择，也不会进入下载。”，不经过独立的第二 gate。总数为零、字段缺失或值非法时保留正常范围摘要，但不生成该明细分支或提示。
+- 单季、整剧、重新匹配和权威重建共用同一无状态渲染规则；旧的正数提示会被后续零值响应清除。忽略项的 Season ownership、可选组、V22 权威映射和下载门禁保持 2.0.7 行为不变。
+- 插件程序集版本保持 `2.0.7.0`，文件版本为 `2.0.7.1`，产品、配置与 TMDB User-Agent 版本为 `2.0.7r1` / `DanmuPlus/2.0.7r1`；前端安装标记为 V33，配置缓存 token 为 `2-0-7r1`，映射协议保持 V22。
 
 ### 2.0.7 余集自动匹配
 
