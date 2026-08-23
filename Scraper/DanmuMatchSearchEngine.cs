@@ -93,7 +93,8 @@ namespace Emby.Plugin.Danmu.Scraper
             IEnumerable<string> localSeriesTitleAliases = null,
             IEnumerable<string> localSeasonTitleAliases = null,
             BaseItem contextItem = null,
-            bool manualKeywordDiscovery = false)
+            bool manualKeywordDiscovery = false,
+            SeasonLogicalTargetContext logicalTargetContext = null)
         {
             if (manualKeywordDiscovery && string.IsNullOrWhiteSpace(keywordOverride))
             {
@@ -106,10 +107,21 @@ namespace Emby.Plugin.Danmu.Scraper
                 out var linkedCancellation);
             try
             {
+                var continuation = logicalTargetContext != null && logicalTargetContext.IsContinuation
+                    ? logicalTargetContext.Clone()
+                    : null;
+                var effectiveScrapers = (scraperSource ?? Enumerable.Empty<AbstractScraper>())
+                    .Where(scraper => continuation == null ||
+                        string.Equals(scraper?.ProviderId, continuation.RequiredProviderId,
+                            StringComparison.OrdinalIgnoreCase))
+                    .ToList();
+                var effectiveSeasonName = continuation == null
+                    ? seasonName
+                    : "Season " + continuation.ExpectedLogicalSeasonNumber;
                 return await SearchSeasonCoreAsync(
-                    scraperSource,
+                    effectiveScrapers,
                     seriesName,
-                    seasonName,
+                    effectiveSeasonName,
                     expectedYear,
                     expectedEpisodes,
                     keywordOverride,
@@ -120,7 +132,7 @@ namespace Emby.Plugin.Danmu.Scraper
                     localSeasonTitleAliases,
                     contextItem,
                     manualKeywordDiscovery,
-                    null).ConfigureAwait(false);
+                    continuation?.ExpectedLogicalSeasonNumber).ConfigureAwait(false);
             }
             finally
             {

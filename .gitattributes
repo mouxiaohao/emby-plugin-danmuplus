@@ -3,3 +3,4 @@ artifacts/2.0.3r2/restart_emby.sh -text
 artifacts/2.0.3r2/update_customcssjs.py -text
 artifacts/2.0.7/review-package/* binary
 artifacts/2.0.7r1/review-package/* binary
+artifacts/2.0.7r2/review-package/* binary

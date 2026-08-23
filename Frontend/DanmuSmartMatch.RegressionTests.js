@@ -376,11 +376,11 @@ async function main() {
     // Fake DOM proves topology neutrality and lifecycle invariants only. Real CSS scroll chaining at short,
     // middle, top, and bottom states remains a required browser/device acceptance gate.
 
-    assert((source.match(/__embyDanmuSmartMenuV33/g) || []).length === 1 &&
-        !source.includes("__embyDanmuSmartMenuV32") && !source.includes("__embyDanmuSmartMenuV31") && !source.includes("__embyDanmuSmartMenuV30") && !source.includes("__embyDanmuSmartMenuV29") && !source.includes("CarHistoryProbe") &&
+    assert((source.match(/__embyDanmuSmartMenuV34/g) || []).length === 1 &&
+        !source.includes("__embyDanmuSmartMenuV33") && !source.includes("__embyDanmuSmartMenuV32") && !source.includes("__embyDanmuSmartMenuV31") && !source.includes("__embyDanmuSmartMenuV30") && !source.includes("__embyDanmuSmartMenuV29") && !source.includes("CarHistoryProbe") &&
         !source.includes("CarBackChannelProbe") && !source.includes("CarCommandTraceProbe") &&
         !source.includes("CarCommandOwnerProbe") && !source.includes("__embyDanmuHistoryModeOverride"),
-        "the formal frontend flag must be V33 exactly once with V32, V31, V30, and every diagnostic probe excluded");
+        "the formal frontend flag must be V34 exactly once with V33, V32, V31, V30, and every diagnostic probe excluded");
     assert(!source.includes("MAPPING_PROTOCOL_GENERATION") && source.includes("var MAPPING_PROTOCOL_VERSION = 22"),
         "the sparse-alignment UI must use the backend numeric V22 mapping protocol and server-authored plan generation");
     const compositeFailure = "复合季映射需要重新确认：Selected candidate evidence expired or belongs to another Season.";
@@ -3854,7 +3854,7 @@ async function main() {
         !source.includes("dialogHistory") && !source.includes("ignoredDialogHistoryPops") &&
         !commandOwnerSource.includes("stopPropagation") && !commandOwnerSource.includes("setTimeout") &&
         !commandOwnerSource.includes("backbutton"),
-        "formal V33 must retain one command owner and no dialog history, Smart backbutton, cancellation, or timer fallback");
+        "formal V34 must retain one command owner and no dialog history, Smart backbutton, cancellation, or timer fallback");
     const activationHelperSource = source.slice(source.indexOf("function armParentNavigationTrigger"),
         source.indexOf("function resetSecondaryViewport"));
     assert(activationHelperSource.includes('trigger.addEventListener("pointerdown"') &&

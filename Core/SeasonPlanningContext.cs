@@ -193,7 +193,10 @@ namespace Emby.Plugin.Danmu.Core
         public static string CreatePlanFingerprint(
             SeasonPlanningContext context,
             IEnumerable<DanmuCompositeSeasonSelection> selections,
-            CompositeSeasonPlan plan)
+            CompositeSeasonPlan plan,
+            SeasonLogicalTargetContext logicalTargetContext = null,
+            int terminalLogicalSeasonNumber = 0,
+            bool activatedByLogicalSeasonAdvance = false)
         {
             if (context == null || plan == null) return string.Empty;
             // The canonical material is intentionally kept server-side. Length-prefixed
@@ -203,6 +206,8 @@ namespace Emby.Plugin.Danmu.Core
             AppendFingerprintField(canonical, "protocol");
             AppendFingerprintField(canonical, DanmuMappingProtocol.CurrentVersion.ToString(CultureInfo.InvariantCulture));
             AppendFingerprintField(canonical, context.StructureFingerprint);
+            AppendLogicalTargetFingerprint(canonical, logicalTargetContext,
+                terminalLogicalSeasonNumber, activatedByLogicalSeasonAdvance);
             foreach (var entry in (selections ?? Enumerable.Empty<DanmuCompositeSeasonSelection>())
                          .Select((selection, ordinal) => new { selection, ordinal }))
             {
@@ -279,6 +284,60 @@ namespace Emby.Plugin.Danmu.Core
             builder.Append(value.Length.ToString(CultureInfo.InvariantCulture));
             builder.Append(':');
             builder.Append(value);
+        }
+
+        private static void AppendLogicalTargetFingerprint(
+            StringBuilder builder,
+            SeasonLogicalTargetContext logicalTargetContext,
+            int terminalLogicalSeasonNumber,
+            bool activatedByLogicalSeasonAdvance)
+        {
+            AppendFingerprintField(builder, "logical-target");
+            AppendFingerprintField(builder, logicalTargetContext == null ? "none" : "value");
+            if (logicalTargetContext == null) return;
+
+            AppendFingerprintField(builder, logicalTargetContext.ExpectedLogicalSeasonNumber
+                .ToString(CultureInfo.InvariantCulture));
+            AppendFingerprintField(builder, logicalTargetContext.RequiredProviderId);
+            AppendFingerprintField(builder, terminalLogicalSeasonNumber
+                .ToString(CultureInfo.InvariantCulture));
+            AppendFingerprintField(builder, activatedByLogicalSeasonAdvance ? "1" : "0");
+            var proof = logicalTargetContext.Proof;
+            AppendFingerprintField(builder, proof == null ? "no-proof" : "proof");
+            if (proof == null) return;
+
+            AppendFingerprintField(builder, proof.SeriesId);
+            AppendFingerprintField(builder, proof.PredecessorSeasonId);
+            AppendFingerprintField(builder, proof.CurrentSeasonId);
+            AppendFingerprintField(builder, proof.PredecessorLocalSeasonNumber
+                .ToString(CultureInfo.InvariantCulture));
+            AppendFingerprintField(builder, proof.CurrentLocalSeasonNumber
+                .ToString(CultureInfo.InvariantCulture));
+            AppendFingerprintField(builder, proof.PredecessorPlanGeneration
+                .ToString(CultureInfo.InvariantCulture));
+            AppendFingerprintField(builder, proof.PredecessorStructureFingerprint);
+            AppendFingerprintField(builder, proof.PredecessorPlanFingerprint);
+            AppendFingerprintField(builder, proof.PredecessorInitialLogicalSeasonNumber
+                .ToString(CultureInfo.InvariantCulture));
+            AppendFingerprintField(builder, proof.PredecessorTerminalLogicalSeasonNumber
+                .ToString(CultureInfo.InvariantCulture));
+            AppendFingerprintField(builder, proof.ExpectedLogicalSeasonNumber
+                .ToString(CultureInfo.InvariantCulture));
+            AppendFingerprintField(builder, proof.RequiredProviderId);
+            AppendFingerprintField(builder, proof.AnimatedWholeSeries ? "1" : "0");
+            AppendFingerprintField(builder, proof.ActivatedByLogicalSeasonAdvance ? "1" : "0");
+            foreach (var itemId in (proof.EligibleItemIds ?? new List<string>())
+                         .OrderBy(value => value, StringComparer.OrdinalIgnoreCase))
+            {
+                AppendFingerprintField(builder, "eligible");
+                AppendFingerprintField(builder, itemId);
+            }
+            foreach (var itemId in (proof.MappedItemIds ?? new List<string>())
+                         .OrderBy(value => value, StringComparer.OrdinalIgnoreCase))
+            {
+                AppendFingerprintField(builder, "mapped");
+                AppendFingerprintField(builder, itemId);
+            }
         }
 
         private static void AppendRemainderDecisionFingerprint(
