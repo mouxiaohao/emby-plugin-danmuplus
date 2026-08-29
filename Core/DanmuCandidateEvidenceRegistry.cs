@@ -20,8 +20,26 @@ namespace Emby.Plugin.Danmu.Core
 
         public string Register(string seasonId, string site, string candidateId,
             double matchScore, string scoreOrigin, SourceMetadata sourceMetadata = null,
-            DanmuRemainderDecisionEvidence remainderDecision = null)
+            DanmuRemainderDecisionEvidence remainderDecision = null,
+            long planGeneration = 0,
+            int initialLogicalSeasonNumber = 0,
+            string requiredProviderId = null,
+            SeasonLogicalContinuationProof continuationProof = null)
         {
+            var proof = continuationProof?.Clone();
+            var providerLock = requiredProviderId ?? string.Empty;
+            if (proof != null &&
+                (!proof.IsValid() || planGeneration <= 0 ||
+                 initialLogicalSeasonNumber != proof.ExpectedLogicalSeasonNumber ||
+                 !string.Equals(providerLock, proof.RequiredProviderId, StringComparison.OrdinalIgnoreCase) ||
+                 !string.Equals(site, providerLock, StringComparison.OrdinalIgnoreCase)))
+            {
+                return string.Empty;
+            }
+            if (proof == null && !string.IsNullOrWhiteSpace(providerLock))
+            {
+                return string.Empty;
+            }
             PurgeExpired();
             while (_entries.Count >= MaximumEntries)
             {
@@ -39,6 +57,10 @@ namespace Emby.Plugin.Danmu.Core
                 ScoreOrigin = scoreOrigin ?? string.Empty,
                 SourceMetadata = sourceMetadata?.Clone(),
                 RemainderDecision = remainderDecision?.Clone(),
+                PlanGeneration = planGeneration,
+                InitialLogicalSeasonNumber = initialLogicalSeasonNumber,
+                RequiredProviderId = providerLock,
+                ContinuationProof = proof,
                 ExpiresUtc = DateTime.UtcNow.Add(Lifetime),
             };
             return token;
@@ -67,11 +89,17 @@ namespace Emby.Plugin.Danmu.Core
             string candidateId,
             double matchScore,
             SourceMetadata sourceMetadata,
-            DanmuRemainderDecisionEvidence remainderDecision)
+            DanmuRemainderDecisionEvidence remainderDecision,
+            long planGeneration = 0,
+            int initialLogicalSeasonNumber = 0,
+            string requiredProviderId = null,
+            SeasonLogicalContinuationProof continuationProof = null)
         {
             if (remainderDecision == null || !remainderDecision.IsValid()) return string.Empty;
             return Register(seasonId, site, candidateId, matchScore,
-                remainderDecision.DecisionKind, sourceMetadata, remainderDecision);
+                remainderDecision.DecisionKind, sourceMetadata, remainderDecision,
+                planGeneration, initialLogicalSeasonNumber, requiredProviderId,
+                continuationProof);
         }
 
         public string RegisterMoviePart(
@@ -156,6 +184,10 @@ namespace Emby.Plugin.Danmu.Core
         // Server-authored proof for a recursive remainder selection. This is
         // process-local and target-bound by the enclosing evidence token.
         public DanmuRemainderDecisionEvidence RemainderDecision { get; set; }
+        public long PlanGeneration { get; set; }
+        public int InitialLogicalSeasonNumber { get; set; }
+        public string RequiredProviderId { get; set; } = string.Empty;
+        public SeasonLogicalContinuationProof ContinuationProof { get; set; }
         public DateTime ExpiresUtc { get; set; }
     }
 

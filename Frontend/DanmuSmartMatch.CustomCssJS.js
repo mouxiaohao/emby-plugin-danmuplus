@@ -1,12 +1,12 @@
 ﻿/*
  * Emby.CustomCssJS: 电视剧/季/集/电影智能匹配并一键下载弹幕
- * 适用于 Emby 4.9.x + 本方案配套的 Emby.Plugin.Danmu 2.0.7r1 DLL
+ * 适用于 Emby 4.9.x + 本方案配套的 Emby.Plugin.Danmu 2.0.7r2 DLL
  */
 (function () {
     "use strict";
 
-    // V33 conditions the server-authoritative ignored-scope notice while retaining V22.
-    var INSTALL_FLAG = "__embyDanmuSmartMenuV33";
+    // V34 pairs the animated whole-Series continuation backend while retaining V22.
+    var INSTALL_FLAG = "__embyDanmuSmartMenuV34";
     var MAPPING_PROTOCOL_VERSION = 22;
     var DEFAULT_ZERO_OFFSET = "DefaultZeroOffset";
     var EXPLICIT_ANCHOR = "ExplicitAnchor";

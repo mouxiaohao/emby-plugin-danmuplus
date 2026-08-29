@@ -21,5 +21,6 @@
     <Compile Remove="TitleFidelity\**\*.cs" />
     <Compile Remove="R207RemainderCore\**\*.cs" />
     <Compile Remove="R207RemainderOrchestration\**\*.cs" />
+    <Compile Remove="R207R2SeasonContinuity\**\*.cs" />
   </ItemGroup>
 </Project>

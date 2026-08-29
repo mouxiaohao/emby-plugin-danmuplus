@@ -189,6 +189,11 @@ namespace Emby.Plugin.Danmu.Model
         // never projected into this list.
         public List<DanmuCompositeSeasonSelection> CompositeSelections { get; set; } =
             new List<DanmuCompositeSeasonSelection>();
+        // Process-local authority for the next target in one animated
+        // whole-Series preview. It is never browser-visible or accepted back.
+        [JsonIgnore]
+        [IgnoreDataMember]
+        public Core.SeasonLogicalTargetOutcome LogicalContinuationOutcome { get; set; }
     }
 
     public class DanmuCompositeSeasonGroup
