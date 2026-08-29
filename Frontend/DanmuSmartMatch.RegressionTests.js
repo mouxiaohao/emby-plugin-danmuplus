@@ -20,22 +20,55 @@ class FakeElement {
         this.style = {};
         this.attributes = {};
         this.listeners = {};
+        this.captureListeners = {};
         this.className = "";
         this.textContent = "";
         this.isConnected = true;
         this.disabled = false;
+        this.hidden = false;
+        this.type = "";
+        this.name = "";
+        this.value = "";
+        this.checked = false;
+        this.href = "";
+        this.tabIndex = ["BUTTON", "INPUT", "SELECT", "TEXTAREA", "SUMMARY", "A"].includes(this.tagName) ? 0 : -1;
         this.scrollTop = 0;
         this.scrollHeight = 0;
         this.clientHeight = 0;
         this._offsetTop = 0;
-        this.classList = { contains: name => this.className.split(/\s+/).includes(name) };
+        this._rect = null;
+        this.focusOptions = [];
+        this.clickCount = 0;
+        this.classList = {
+            contains: name => this.className.split(/\s+/).filter(Boolean).includes(name),
+            add: (...names) => {
+                const classes = this.className.split(/\s+/).filter(Boolean);
+                names.forEach(name => { if (!classes.includes(name)) classes.push(name); });
+                this.className = classes.join(" ");
+            },
+            remove: (...names) => {
+                this.className = this.className.split(/\s+/).filter(name => name && !names.includes(name)).join(" ");
+            },
+            toggle: (name, force) => {
+                const present = this.classList.contains(name);
+                const enabled = force === undefined ? !present : Boolean(force);
+                if (enabled) this.classList.add(name); else this.classList.remove(name);
+                return enabled;
+            }
+        };
     }
 
     append(...children) { children.forEach(child => this.appendChild(child)); }
     appendChild(child) {
         child.parentElement = this;
+        child._setConnected(this.isConnected);
         this._children.push(child);
         return child;
+    }
+
+    _setConnected(value) {
+        this.isConnected = Boolean(value);
+        this._children.forEach(child => child._setConnected(value));
     }
 
     get offsetTop() {
@@ -45,7 +78,7 @@ class FakeElement {
     }
     set offsetTop(value) { this._offsetTop = Number(value || 0); }
     replaceChildren(...children) {
-        this._children.forEach(child => { child.parentElement = null; });
+        this._children.forEach(child => { child.parentElement = null; child._setConnected(false); });
         this._children.splice(0, this._children.length);
         this.append(...children);
     }
@@ -60,7 +93,7 @@ class FakeElement {
             if (index >= 0) this.parentElement._children.splice(index, 1);
         }
         this.parentElement = null;
-        this.isConnected = false;
+        this._setConnected(false);
     }
     cloneNode(deep) {
         const clone = new FakeElement(this.tagName);
@@ -72,24 +105,139 @@ class FakeElement {
         clone.scrollHeight = this.scrollHeight;
         clone.clientHeight = this.clientHeight;
         clone.offsetTop = this.offsetTop;
+        clone._rect = this._rect ? Object.assign({}, this._rect) : null;
+        clone.hidden = this.hidden;
+        clone.disabled = this.disabled;
+        clone.type = this.type;
+        clone.name = this.name;
+        clone.value = this.value;
+        clone.checked = this.checked;
+        clone.tabIndex = this.tabIndex;
         if (deep) this._children.forEach(child => clone.appendChild(child.cloneNode(true)));
         return clone;
     }
-    setAttribute(name, value) { this.attributes[name] = String(value); }
+    setAttribute(name, value) {
+        this.attributes[name] = String(value);
+        if (name === "tabindex") this.tabIndex = Number(value);
+        if (name === "href") this.href = String(value);
+    }
     getAttribute(name) { return this.attributes[name] === undefined ? null : this.attributes[name]; }
     removeAttribute(name) { delete this.attributes[name]; }
-    addEventListener(type, listener) {
-        (this.listeners[type] || (this.listeners[type] = [])).push(listener);
+    addEventListener(type, listener, options) {
+        const capture = options === true || Boolean(options && options.capture);
+        const target = capture ? this.captureListeners : this.listeners;
+        (target[type] || (target[type] = [])).push(listener);
+    }
+    removeEventListener(type, listener, options) {
+        const capture = options === true || Boolean(options && options.capture);
+        const target = capture ? this.captureListeners : this.listeners;
+        const listeners = target[type] || [];
+        const index = listeners.indexOf(listener);
+        if (index >= 0) listeners.splice(index, 1);
+    }
+    _dispatchSync(type, event) {
+        const run = listeners => {
+            for (const listener of (listeners || []).slice()) {
+                listener(event);
+                if (event.immediatePropagationStopped) break;
+            }
+        };
+        run(this.captureListeners[type]);
+        if (!event.immediatePropagationStopped) run(this.listeners[type]);
     }
     async dispatch(type, overrides) {
         const event = Object.assign({
             target: this,
+            currentTarget: this,
             isTrusted: type === "click" ? false : true,
-            preventDefault: function () {},
-            stopPropagation: function () {},
-            stopImmediatePropagation: function () {}
+            defaultPrevented: false,
+            propagationStopped: false,
+            immediatePropagationStopped: false,
+            preventDefault: function () { this.defaultPrevented = true; },
+            stopPropagation: function () { this.propagationStopped = true; },
+            stopImmediatePropagation: function () {
+                this.immediatePropagationStopped = true;
+                this.propagationStopped = true;
+            }
         }, overrides || {});
-        await Promise.all((this.listeners[type] || []).map(listener => listener(event)));
+        const listeners = (this.captureListeners[type] || []).concat(this.listeners[type] || []);
+        for (const listener of listeners) {
+            await listener(event);
+            if (event.immediatePropagationStopped) break;
+        }
+        return event;
+    }
+    focus(options) {
+        if (!this.isConnected || this.disabled) return;
+        const previous = documentStub.activeElement;
+        if (previous === this) {
+            this.focusOptions.push(options || null);
+            return;
+        }
+        if (previous && typeof previous._dispatchSync === "function") {
+            previous._dispatchSync("blur", { type: "blur", target: previous, relatedTarget: this });
+        }
+        documentStub.activeElement = this;
+        this.focusOptions.push(options || null);
+        this._dispatchSync("focus", { type: "focus", target: this, relatedTarget: previous });
+        const focusEvent = { type: "focusin", target: this, relatedTarget: previous };
+        (documentStub.captureListeners.focusin || []).slice().forEach(listener => listener(focusEvent));
+        this._dispatchSync("focusin", focusEvent);
+        (documentStub.listeners.focusin || []).slice().forEach(listener => listener(focusEvent));
+    }
+    blur() {
+        if (documentStub.activeElement !== this) return;
+        documentStub.activeElement = documentStub.body;
+        this._dispatchSync("blur", { type: "blur", target: this, relatedTarget: documentStub.body });
+    }
+    click() {
+        if (this.disabled) return;
+        this.clickCount++;
+        if (this.tagName === "INPUT" && this.type === "radio") {
+            const root = documentStub.body;
+            const peers = [];
+            (function visit(node) {
+                (node._children || []).forEach(child => {
+                    if (child.tagName === "INPUT" && child.type === "radio" && child.name === this.name) peers.push(child);
+                    visit.call(this, child);
+                });
+            }).call(this, root);
+            peers.forEach(peer => { peer.checked = false; });
+            this.checked = true;
+        } else if (this.tagName === "INPUT" && this.type === "checkbox") {
+            this.checked = !this.checked;
+        }
+        const event = {
+            type: "click", target: this, currentTarget: this, isTrusted: false,
+            defaultPrevented: false, propagationStopped: false, immediatePropagationStopped: false,
+            preventDefault: function () { this.defaultPrevented = true; },
+            stopPropagation: function () { this.propagationStopped = true; },
+            stopImmediatePropagation: function () {
+                this.immediatePropagationStopped = true;
+                this.propagationStopped = true;
+            }
+        };
+        this._dispatchSync("click", event);
+    }
+    setRect(rect) {
+        const left = Number(rect && rect.left || 0);
+        const top = Number(rect && rect.top || 0);
+        const width = Number(rect && (rect.width !== undefined ? rect.width : rect.right - left) || 0);
+        const height = Number(rect && (rect.height !== undefined ? rect.height : rect.bottom - top) || 0);
+        this._rect = { left: left, top: top, width: width, height: height, right: left + width, bottom: top + height };
+        return this;
+    }
+    getBoundingClientRect() {
+        if (this._rect) return Object.assign({}, this._rect);
+        const top = Number(this.offsetTop || 0);
+        return { left: 0, top: top, width: 100, height: 32, right: 100, bottom: top + 32 };
+    }
+    getClientRects() {
+        const style = context && context.window && typeof context.window.getComputedStyle === "function"
+            ? context.window.getComputedStyle(this) : { display: "block", visibility: "visible" };
+        const rect = this.getBoundingClientRect();
+        return this.hidden || style.display === "none" || style.visibility === "hidden" ||
+            rect.width <= 0 || rect.height <= 0 ? [] : [rect];
     }
     closest() { return null; }
     querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
@@ -141,6 +289,7 @@ function menuFor(id) {
 const documentStub = {
     body: new FakeElement("body"),
     head: new FakeElement("head"),
+    activeElement: null,
     openedMenus: [],
     listeners: {},
     captureListeners: {},
@@ -154,15 +303,49 @@ const documentStub = {
         const index = listeners.indexOf(listener);
         if (index >= 0) listeners.splice(index, 1);
     },
-    dispatchKey: function (key) {
-        const event = {
+    dispatchKey: function (key, overrides) {
+        const target = overrides && overrides.target || this.activeElement || this.body;
+        const event = Object.assign({
             key: key,
+            code: key,
+            keyCode: 0,
+            which: 0,
+            target: target,
+            currentTarget: this,
+            repeat: false,
+            shiftKey: false,
+            isComposing: false,
             defaultPrevented: false,
             propagationStopped: false,
+            immediatePropagationStopped: false,
             preventDefault: function () { this.defaultPrevented = true; },
-            stopPropagation: function () { this.propagationStopped = true; }
+            stopPropagation: function () { this.propagationStopped = true; },
+            stopImmediatePropagation: function () {
+                this.immediatePropagationStopped = true;
+                this.propagationStopped = true;
+            }
+        }, overrides || {});
+        const run = listeners => {
+            for (const listener of (listeners || []).slice()) {
+                listener(event);
+                if (event.immediatePropagationStopped) break;
+            }
         };
-        (this.listeners.keydown || []).slice().forEach(listener => listener(event));
+        run(this.captureListeners.keydown);
+        if (!event.propagationStopped && target && typeof target._dispatchSync === "function") {
+            target._dispatchSync("keydown", event);
+        }
+        let ancestor = target && target.parentElement;
+        while (!event.propagationStopped && ancestor) {
+            run(ancestor.listeners && ancestor.listeners.keydown);
+            ancestor = ancestor.parentElement;
+        }
+        if (!event.propagationStopped) run(this.listeners.keydown);
+        if (!event.defaultPrevented && !event.repeat && target &&
+            (key === "Enter" || key === "NumpadEnter" || key === "Select") &&
+            ["BUTTON", "SUMMARY", "A"].includes(target.tagName)) {
+            target.click();
+        }
         return event;
     },
     dispatchEvent: function (type) {
@@ -197,13 +380,24 @@ const documentStub = {
     },
     createElement: tag => new FakeElement(tag),
     getElementById: function (id) {
-        const all = this.body.querySelectorAll("." + id);
-        return all[0] || null;
+        let found = null;
+        function visit(node) {
+            if (!node || found) return;
+            if (node.id === id || node.getAttribute && node.getAttribute("id") === id) {
+                found = node;
+                return;
+            }
+            (node._children || []).forEach(visit);
+        }
+        visit(this.head);
+        visit(this.body);
+        return found;
     },
     querySelectorAll: function (selector) {
         return selector === ".actionSheet.opened" ? this.openedMenus : [];
     }
 };
+documentStub.activeElement = documentStub.body;
 
 const apiCalls = [];
 const apiResponses = {};
@@ -262,6 +456,14 @@ const context = {
             return typeof response === "function" ? response(request) : response;
         }
     }
+};
+context.window.getComputedStyle = function (element) {
+    const classes = String(element && element.className || "").split(/\s+/);
+    const sourceEpisodeHidden = classes.includes("danmuSourceEpisode") && !classes.includes("active");
+    return {
+        display: element && element.style && element.style.display || (sourceEpisodeHidden ? "none" : "block"),
+        visibility: element && element.style && element.style.visibility || "visible"
+    };
 };
 context.window.window = context.window;
 context.window.document = documentStub;
@@ -344,7 +546,7 @@ async function main() {
     assert((styleSource.match(/\.danmuSmartOverlay\{/g) || []).length === 2 &&
         (styleSource.match(/\.danmuSmartCard\{/g) || []).length === 2 &&
         (styleSource.match(/\.danmuSmartBody\{/g) || []).length === 1 &&
-        !/\.danmuSmart(?:Overlay|Card|Body)[^{"]*(?:Series|Season|Episode|Movie|detailPage|Android)/i.test(styleSource),
+        !/(?:Series|Season|Episode|Movie|detailPage|Android)/i.test(overlayRule + cardRule + bodyRule),
         "scroll containment must use only the existing shared desktop/mobile class rules, never an entry or platform selector");
 
     const forbiddenGlobalInputListener = /(?:document|window|globalThis)\.addEventListener\(["'](?:touchmove|pointermove|wheel)["']/;
@@ -376,11 +578,11 @@ async function main() {
     // Fake DOM proves topology neutrality and lifecycle invariants only. Real CSS scroll chaining at short,
     // middle, top, and bottom states remains a required browser/device acceptance gate.
 
-    assert((source.match(/__embyDanmuSmartMenuV34/g) || []).length === 1 &&
-        !source.includes("__embyDanmuSmartMenuV33") && !source.includes("__embyDanmuSmartMenuV32") && !source.includes("__embyDanmuSmartMenuV31") && !source.includes("__embyDanmuSmartMenuV30") && !source.includes("__embyDanmuSmartMenuV29") && !source.includes("CarHistoryProbe") &&
+    assert((source.match(/__embyDanmuSmartMenuV36/g) || []).length === 1 &&
+        !source.includes("__embyDanmuSmartMenuV35") && !source.includes("__embyDanmuSmartMenuV34") && !source.includes("__embyDanmuSmartMenuV33") && !source.includes("__embyDanmuSmartMenuV32") && !source.includes("__embyDanmuSmartMenuV31") && !source.includes("__embyDanmuSmartMenuV30") && !source.includes("__embyDanmuSmartMenuV29") && !source.includes("CarHistoryProbe") &&
         !source.includes("CarBackChannelProbe") && !source.includes("CarCommandTraceProbe") &&
         !source.includes("CarCommandOwnerProbe") && !source.includes("__embyDanmuHistoryModeOverride"),
-        "the formal frontend flag must be V34 exactly once with V33, V32, V31, V30, and every diagnostic probe excluded");
+        "the formal frontend flag must be V36 exactly once with V35 and every older or diagnostic marker excluded");
     assert(!source.includes("MAPPING_PROTOCOL_GENERATION") && source.includes("var MAPPING_PROTOCOL_VERSION = 22"),
         "the sparse-alignment UI must use the backend numeric V22 mapping protocol and server-authored plan generation");
     const compositeFailure = "复合季映射需要重新确认：Selected candidate evidence expired or belongs to another Season.";
@@ -2200,6 +2402,40 @@ async function main() {
         resetRangeStart.value === "1",
         "rerendering or starting a fresh preview must clear transient source-start dirty state");
     const rangeCandidateRow = rangeDialog.body.querySelector(".danmuCandidate");
+    const rangeCandidateRadio = rangeCandidateRow.children[0];
+    const rangeSearchButton = rangeDialog.body.querySelector(".danmuSmartSearch").children[1];
+    const rangeApplyButton = rangeDialog.footer.children.find(button =>
+        button.textContent === "应用到此临时季");
+    rangeSearchButton.setRect({ left: 760, top: 160, width: 180, height: 44 });
+    rangeCandidateRow.setRect({ left: 100, top: 240, width: 840, height: 88 });
+    rangeCandidateRadio.setRect({ left: 115, top: 260, width: 13, height: 48 });
+    rangeApplyButton.setRect({ left: 760, top: 620, width: 180, height: 48 });
+    assert(rangeCandidateRow.tabIndex === 0 && rangeCandidateRow.getAttribute("role") === "radio" &&
+        rangeCandidateRow.getAttribute("aria-checked") === "false" && rangeCandidateRadio.tabIndex === -1,
+        "every rendered candidate must expose one full-card radio proxy and remove its narrow native radio from focus order");
+    rangeSearchButton.focus();
+    let rangeRemoteEvent = documentStub.dispatchKey("ArrowDown");
+    assert(documentStub.activeElement === rangeCandidateRow && rangeRemoteEvent.defaultPrevented &&
+        !rangeCandidateRadio.checked,
+        "a right-aligned search action must move Down into the full-width candidate card instead of skipping to the aligned footer");
+    rangeRemoteEvent = documentStub.dispatchKey("Enter");
+    assert(rangeCandidateRadio.checked && rangeCandidateRadio.clickCount === 1 &&
+        rangeCandidateRow.getAttribute("aria-checked") === "true" && rangeRemoteEvent.defaultPrevented,
+        "remote confirm on a candidate proxy must select its native radio exactly once and synchronize checked semantics");
+    documentStub.dispatchKey("Enter", { repeat: true });
+    assert(rangeCandidateRadio.clickCount === 1,
+        "held confirm on a candidate proxy must not repeat selection");
+    rangeCandidateRadio.checked = false;
+    rangeCandidateRow.setAttribute("aria-checked", "false");
+    rangeRemoteEvent = documentStub.dispatchKey(" ");
+    assert(rangeCandidateRadio.checked && rangeCandidateRadio.clickCount === 2 &&
+        rangeCandidateRow.getAttribute("aria-checked") === "true" && rangeRemoteEvent.defaultPrevented,
+        "ordinary keyboard Space on the consolidated candidate stop must preserve one native-radio selection");
+    rangeCandidateRadio.checked = false;
+    rangeCandidateRadio.click();
+    assert(rangeCandidateRadio.checked && rangeCandidateRadio.clickCount === 3 &&
+        rangeCandidateRow.getAttribute("aria-checked") === "true",
+        "pointer/native radio activation must remain usable and keep the full-card proxy state synchronized");
     const rangeScore = hooks.matchScoreLine({ MatchScore: 0.82, ScoreOrigin: "search-confidence" });
     assert(allVisibleText(rangeCandidateRow).split(rangeScore).length === 2,
         "a temporary-range candidate must render its match score exactly once");
@@ -2454,6 +2690,203 @@ async function main() {
     assert(hooks.compositeDraftSeasonState(searchedDialog, searchedSeasons[0], false).removedRuns.length === 0 &&
         hooks.compositeExcludedItemIds(searchedDialog, searchedSeasons[0]).length === 0,
         "closing the dialog must discard removed-selection snapshots and exclusions together");
+    delete apiResponses.MatchPreview;
+
+    function mappedSuffixFixture(suffix) {
+        const seasonId = "suffix-rematch-" + suffix;
+        const planGeneration = 9400 + suffix.length;
+        const ordered = Array.from({ length: 6 }, (_unused, index) => ({
+            ItemId: seasonId + "-episode-" + (index + 1), ParentSeasonNumber: 1,
+            EpisodeNumber: index + 1, LocalDisplayLabel: "S01E0" + (index + 1)
+        }));
+        const runs = [0, 2, 4].map((start, index) => ({
+            start: start, candidateId: "old-temporary-" + (index + 1), site: "Dandan"
+        }));
+        const compositeSelections = runs.map(run => ({
+            LocalStartEpisodeItemId: ordered[run.start].ItemId,
+            RequestedEpisodeCount: 2,
+            Site: run.site,
+            CandidateId: run.candidateId,
+            SourceStartEpisodeId: run.candidateId + "-source-1",
+            SourceStartEpisodeNumber: 1,
+            MatchOrigin: "scored",
+            SelectionEvidenceToken: "",
+            AlignmentIntent: run.start === 0 ? "DefaultZeroOffset" : "ExplicitAnchor",
+            MappingProtocolVersion: 22,
+            PlanGeneration: planGeneration
+        }));
+        const mappings = [];
+        runs.forEach(run => {
+            for (let offset = 0; offset < 2; offset++) {
+                mappings.push({
+                    LocalEpisodeItemId: ordered[run.start + offset].ItemId,
+                    Source: { ProviderId: run.site, MediaId: run.candidateId },
+                    SourceEpisodeId: run.candidateId + "-source-" + (offset + 1),
+                    SourceEpisodeNumber: offset + 1,
+                    Origin: "scored",
+                    AlignmentIntent: run.start === 0 ? "DefaultZeroOffset" : "ExplicitAnchor"
+                });
+            }
+        });
+        return {
+            ordered: ordered,
+            season: {
+                SeriesId: "suffix-series-" + suffix,
+                SeasonId: seasonId,
+                SeasonNumber: 1,
+                SeasonName: "Suffix rematch " + suffix,
+                EpisodeCount: 6,
+                MappingProtocolVersion: 22,
+                PlanGeneration: planGeneration,
+                RequiresCompositeMapping: true,
+                CompositeSelections: compositeSelections,
+                CompositePlan: { OrderedEpisodes: ordered, Mappings: mappings, UnmatchedRuns: [] },
+                CompositeGroups: []
+            }
+        };
+    }
+
+    function mappedSuffixResponse(fixture, request) {
+        const query = request.url.query;
+        const excluded = JSON.parse(query.excludedLocalEpisodeItemIds || "[]");
+        const selections = JSON.parse(query.compositeSelections || "[]");
+        const mappings = [];
+        selections.forEach(selection => {
+            const start = fixture.ordered.findIndex(episode =>
+                episode.ItemId === selection.LocalStartEpisodeItemId);
+            for (let offset = 0; start >= 0 && offset < selection.RequestedEpisodeCount; offset++) {
+                const episode = fixture.ordered[start + offset];
+                if (!episode) break;
+                mappings.push({
+                    LocalEpisodeItemId: episode.ItemId,
+                    Source: { ProviderId: selection.Site, MediaId: selection.CandidateId },
+                    SourceEpisodeId: selection.SourceStartEpisodeId || "",
+                    SourceEpisodeNumber: (selection.SourceStartEpisodeNumber || 1) + offset,
+                    Origin: selection.MatchOrigin || "manual",
+                    AlignmentIntent: selection.AlignmentIntent
+                });
+            }
+        });
+        const unmatched = fixture.ordered.filter(episode =>
+            !mappings.some(mapping => mapping.LocalEpisodeItemId === episode.ItemId));
+        return Object.assign({}, fixture.season, {
+            CompositeSelections: selections,
+            CompositeGroups: [],
+            CompositePlan: {
+                OrderedEpisodes: fixture.ordered,
+                Mappings: mappings,
+                UnmatchedRuns: unmatched.length ? [{ Episodes: unmatched }] : [],
+                EffectiveExcludedLocalEpisodeItemIds: excluded
+            }
+        });
+    }
+
+    const suffixFixture = mappedSuffixFixture("all");
+    const suffixGroups = hooks.compositeVirtualGroups(suffixFixture.season, {});
+    assert(suffixGroups.length === 3 && suffixGroups.every(group => group.kind === "mapped"),
+        "the suffix-rematch fixture must begin as three separately mapped temporary Seasons");
+    const exactMiddleRemoval = hooks.filterCompositeSelectionsByItemIds(
+        suffixFixture.season,
+        hooks.compositeRequestSelections({}, suffixFixture.season),
+        suffixGroups[1].episodes.map(episode => episode.ItemId));
+    assert(exactMiddleRemoval.removed.map(selection => selection.CandidateId).join(",") === "old-temporary-2" &&
+        exactMiddleRemoval.kept.map(selection => selection.CandidateId).join(",") ===
+            "old-temporary-1,old-temporary-3",
+        "ordinary clicked-run filtering must remain non-cascading");
+    const middleSuffixEpisodes = hooks.compositeRematchSuffixEpisodes(
+        suffixFixture.season, suffixGroups[1]);
+    const middleSuffixFilter = hooks.filterCompositeSelectionsByItemIds(
+        suffixFixture.season,
+        hooks.compositeRequestSelections({}, suffixFixture.season),
+        middleSuffixEpisodes.map(episode => episode.ItemId));
+    assert(middleSuffixEpisodes.map(episode => episode.ItemId).join(",") ===
+            suffixFixture.ordered.slice(2).map(episode => episode.ItemId).join(",") &&
+        middleSuffixFilter.kept.map(selection => selection.CandidateId).join(",") === "old-temporary-1" &&
+        middleSuffixFilter.removed.map(selection => selection.CandidateId).join(",") ===
+            "old-temporary-2,old-temporary-3",
+        "rematching a middle temporary Season must retain only the earlier selection and prune the exact ordered suffix");
+
+    const suffixDialog = hooks.openDialog("three mapped temporary Season suffix rematch");
+    const suffixSeasons = [suffixFixture.season];
+    const suffixSelections = { __compositeSelections: {} };
+    const suffixKeywords = { preserved: "suffix-keyword" };
+    hooks.discardIncompatibleSeasonDrafts(suffixDialog, suffixSeasons, suffixSelections);
+    apiResponses.MatchPreview = request => {
+        const response = mappedSuffixResponse(suffixFixture, request);
+        if (request.url.query.searchScope === "temporary-range") {
+            response.CandidateGeneration = "suffix-range-generation";
+            response.Candidates = [{ Site: "Youku", Id: "new-suffix-source",
+                Name: "New suffix source", EpisodeSize: 6,
+                SelectionEvidenceToken: "new-suffix-private" }];
+        }
+        return { Seasons: [response] };
+    };
+    hooks.renderSeriesPicker(suffixDialog,
+        { Id: suffixFixture.season.SeriesId, Type: "Series", Name: "Suffix series" },
+        suffixSeasons, suffixSelections, suffixKeywords);
+    const suffixBeforeSeason = JSON.stringify(suffixSeasons[0]);
+    const suffixBeforeSelections = JSON.stringify(suffixSelections);
+    const suffixBeforeKeywords = JSON.stringify(suffixKeywords);
+    const suffixBeforeDraft = JSON.stringify(suffixDialog.compositeDraft);
+    const suffixRematchStart = apiCalls.length;
+    const firstSuffixCard = suffixDialog.body.querySelectorAll(".danmuVirtualSeason")[0];
+    const firstSuffixRematch = firstSuffixCard.querySelectorAll(".danmuSmartButton")
+        .find(button => button.textContent === "重新匹配");
+    await firstSuffixRematch.dispatch("click", { isTrusted: true });
+    await waitUntil(() => suffixDialog.body.querySelectorAll(".danmuCandidate").length === 1,
+        "rematching temporary Season 1 should reopen one candidate picker for the combined trailing suffix");
+    const suffixRebuildCall = apiCalls.slice(suffixRematchStart).find(call =>
+        call.option === "MatchPreview" && call.parameters.searchScope === "detail-resolution" &&
+        call.parameters.compositePlan === "true");
+    const suffixRangeCall = apiCalls.slice(suffixRematchStart).find(call =>
+        call.option === "MatchPreview" && call.parameters.searchScope === "temporary-range");
+    assert(suffixRebuildCall &&
+        JSON.parse(suffixRebuildCall.parameters.compositeSelections).length === 0 &&
+        suffixRebuildCall.parameters.excludedLocalEpisodeItemIds ===
+            JSON.stringify(suffixFixture.ordered.map(episode => episode.ItemId)) &&
+        suffixRangeCall && suffixRangeCall.parameters.compositeStartEpisodeItemId ===
+            suffixFixture.ordered[0].ItemId && suffixRangeCall.parameters.compositeEpisodeCount === "6" &&
+        JSON.parse(suffixRangeCall.parameters.compositeSelections).length === 0,
+        "temporary Season 1 rematch must prune all three old selections, exclude the complete ordered suffix, and search that merged range");
+    const suffixBack = suffixDialog.footer.children.find(button => button.textContent === "返回总览");
+    await suffixBack.dispatch("click");
+    assert(JSON.stringify(suffixSeasons[0]) === suffixBeforeSeason &&
+        JSON.stringify(suffixSelections) === suffixBeforeSelections &&
+        JSON.stringify(suffixKeywords) === suffixBeforeKeywords &&
+        JSON.stringify(suffixDialog.compositeDraft) === suffixBeforeDraft &&
+        suffixDialog.body.querySelectorAll(".danmuVirtualSeason").length === 3,
+        "returning from a merged suffix rematch must restore the exact three-mapping draft without leaving suffix exclusions");
+
+    const suffixApplyStart = apiCalls.length;
+    const firstSuffixCardAgain = suffixDialog.body.querySelectorAll(".danmuVirtualSeason")[0];
+    await firstSuffixCardAgain.querySelectorAll(".danmuSmartButton")
+        .find(button => button.textContent === "重新匹配").dispatch("click", { isTrusted: true });
+    await waitUntil(() => suffixDialog.body.querySelectorAll(".danmuCandidate").length === 1,
+        "the restored temporary Season 1 must remain rematchable");
+    const suffixInputs = suffixDialog.body.querySelector(".danmuCompositeInputs");
+    suffixInputs.children[0].children[0].value = "2";
+    const suffixCandidateRow = suffixDialog.body.querySelector(".danmuCandidate");
+    suffixCandidateRow.children[0].checked = true;
+    await suffixDialog.footer.children.find(button =>
+        button.textContent === "应用到此临时季").dispatch("click");
+    const suffixApplyCalls = apiCalls.slice(suffixApplyStart).filter(call =>
+        call.option === "MatchPreview" && call.parameters.searchScope === "detail-resolution" &&
+        call.parameters.compositePlan === "true");
+    const suffixApplyCall = suffixApplyCalls[suffixApplyCalls.length - 1];
+    const suffixAppliedSelections = JSON.parse(suffixApplyCall.parameters.compositeSelections);
+    const suffixAfterGroups = hooks.compositeVirtualGroups(suffixSeasons[0], {});
+    assert(suffixAppliedSelections.length === 1 &&
+        suffixAppliedSelections[0].CandidateId === "new-suffix-source" &&
+        suffixAppliedSelections[0].RequestedEpisodeCount === 2 &&
+        suffixAfterGroups.map(group => group.kind).join(",") === "mapped,unmatched" &&
+        suffixAfterGroups[0].source.MediaId === "new-suffix-source" &&
+        suffixAfterGroups[1].episodes.map(episode => episode.ItemId).join(",") ===
+            suffixFixture.ordered.slice(2).map(episode => episode.ItemId).join(",") &&
+        !JSON.stringify(suffixSeasons[0]).includes("old-temporary-2") &&
+        !JSON.stringify(suffixSeasons[0]).includes("old-temporary-3") &&
+        hooks.compositeDraftSeasonState(suffixDialog, suffixSeasons[0], false).removedRuns.length === 0,
+        "a partial replacement must map only the new leading range and leave every superseded later temporary Season in one unmatched remainder");
+    suffixDialog.forceClose();
     delete apiResponses.MatchPreview;
 
     function rematchFixture(kind, suffix) {
@@ -3478,17 +3911,19 @@ async function main() {
     scrollSeriesDialog.body.scrollTop = 426;
     await seriesEntry.dispatch("click", { isTrusted: true });
     assert(scrollSeriesDialog.body.scrollTop === 0 && hooks.navigationContextDepth(scrollSeriesDialog) === 1 &&
+        documentStub.activeElement === scrollSeriesDialog.body.querySelector(".danmuSmartSearch").children[0] &&
         scrollSeriesDialog.body.querySelectorAll(".danmuCandidateTitle").map(node => node.textContent).join("|") ===
             "Fake · First server candidate|Fake · Second server candidate",
-        "the real Series action must synchronously enter at zero without reordering server candidates");
+        "the real Series action must synchronously enter at zero, focus the child search, and preserve server candidate order");
     scrollSeriesDialog.body.scrollHeight = 200;
     scrollSeriesDialog.body.clientHeight = 200;
     await scrollSeriesDialog.footer.children.find(button => button.textContent === "返回总览").dispatch("click");
     const restoredSeriesAction = scrollSeriesDialog.body.querySelectorAll(".danmuSmartButton")
         .find(button => button.textContent === "查看候选");
-    assert(restoredSeriesAction && scrollSeriesDialog.body.scrollTop === 326 &&
+    assert(restoredSeriesAction && documentStub.activeElement === restoredSeriesAction &&
+        scrollSeriesDialog.body.scrollTop === 326 &&
         hooks.navigationContextDepth(scrollSeriesDialog) === 0,
-        "pointerdown must preserve the pre-focus 326 offset for contentTop 706 through HTMLCollection-like entry and action return instead of capturing the native-focus 426 offset");
+        "pointerdown must preserve the pre-focus 326 offset and restore logical action focus through HTMLCollection-like entry/return instead of capturing native-focus 426");
     delete anchorLayoutOffsets[seriesEntry.dataset.danmuNavAnchor];
     context.window.PointerEvent = savedPointerEvent;
     scrollSeriesDialog.forceClose();
@@ -3507,8 +3942,9 @@ async function main() {
             name + " preactivation must not push a navigation context");
         dialog.body.scrollTop = 426;
         await action.dispatch("click", clickEvent);
-        assert(dialog.body.scrollTop === 0 && hooks.navigationContextDepth(dialog) === 1,
-            name + " click must push exactly one context and enter the child at zero");
+        assert(dialog.body.scrollTop === 0 && hooks.navigationContextDepth(dialog) === 1 &&
+            documentStub.activeElement === dialog.body.querySelector(".danmuSmartSearch").children[0],
+            name + " click must push exactly one context, enter the child at zero, and focus its search field");
         const detachedBody = dialog.body.children[0];
         const detachedApiCount = apiCalls.length;
         await action.dispatch("click", { isTrusted: true });
@@ -3517,8 +3953,11 @@ async function main() {
             name + " detached second click must not push, render, or request again");
         if (useAndroidBack) documentStub.dispatchCommand("back");
         else await dialog.footer.children.find(button => button.textContent === "返回总览").dispatch("click");
-        assert(dialog.body.scrollTop === expectedOffset && hooks.navigationContextDepth(dialog) === 0,
-            name + " return must use the expected activation geometry");
+        const restoredAction = dialog.body.querySelectorAll(".danmuSmartButton")
+            .find(button => button.textContent === "查看候选");
+        assert(dialog.body.scrollTop === expectedOffset && hooks.navigationContextDepth(dialog) === 0 &&
+            documentStub.activeElement === restoredAction,
+            name + " return must use the expected activation geometry and restore the logical action focus");
         delete anchorLayoutOffsets[action.dataset.danmuNavAnchor];
         dialog.forceClose();
     }
@@ -3681,6 +4120,8 @@ async function main() {
         "the real temporary-range action must enter its child at zero before automatic range-search completion");
     await waitUntil(() => scrollCompositeDialog.footer.children
         .some(button => button.textContent === "返回总览"), "composite return action did not render");
+    assert(documentStub.activeElement === scrollCompositeDialog.body.querySelector(".danmuCompositeInputs").children[0].children[0],
+        "temporary-range child entry must focus its first editable mapping field");
     const detachedCompositeBody = scrollCompositeDialog.body.children[0];
     const detachedCompositeApiCount = apiCalls.length;
     await compositeEntry.dispatch("click", { isTrusted: true });
@@ -3690,8 +4131,11 @@ async function main() {
     scrollCompositeDialog.body.scrollHeight = 1600;
     scrollCompositeDialog.body.clientHeight = 300;
     await scrollCompositeDialog.footer.children.find(button => button.textContent === "返回总览").dispatch("click");
-    assert(scrollCompositeDialog.body.scrollTop === 326 && hooks.navigationContextDepth(scrollCompositeDialog) === 0,
-        "expanded composite return must preserve pre-focus 326 instead of click-time 426 geometry");
+    const restoredCompositeAction = scrollCompositeDialog.body.querySelectorAll(".danmuSmartButton")
+        .find(button => button.textContent === "手动匹配");
+    assert(scrollCompositeDialog.body.scrollTop === 326 && hooks.navigationContextDepth(scrollCompositeDialog) === 0 &&
+        documentStub.activeElement === restoredCompositeAction,
+        "expanded composite return must preserve pre-focus 326 and restore action focus instead of click-time 426 geometry");
     delete anchorLayoutOffsets[compositeEntry.dataset.danmuNavAnchor];
     scrollCompositeDialog.forceClose();
     context.window.PointerEvent = savedPointerEvent;
@@ -3736,6 +4180,9 @@ async function main() {
         const childClass = type === "Episode" ? ".danmuSourceEpisodeChoice" : ".danmuMoviePartChoice";
         await waitUntil(() => dialog.body.querySelectorAll(childClass).length === 2,
             type + " nested selector did not render");
+        assert(documentStub.activeElement === dialog.body.querySelectorAll(childClass)[0] &&
+            dialog.body.querySelectorAll(childClass)[0].getAttribute("role") === "radio",
+            type + " child entry must focus its first full-row source/version choice");
         const detachedChild = dialog.body.children[0];
         const detachedApiCount = apiCalls.length;
         await startAction.dispatch("click", { isTrusted: true });
@@ -3754,8 +4201,10 @@ async function main() {
         assert(hooks.navigationContextDepth(dialog) === 1,
             type + " failed submission must retain exactly one original candidate-parent context");
         await dialog.footer.children.find(button => button.textContent === "返回候选列表").dispatch("click");
-        assert(hooks.navigationContextDepth(dialog) === 0 && dialog.body.scrollTop === 426,
-            type + " changed checked candidate must reject the armed row sample, fall back to click-time geometry, and consume one retained context");
+        const restoredCandidateRows = dialog.body.querySelectorAll(".danmuCandidate");
+        assert(hooks.navigationContextDepth(dialog) === 0 && dialog.body.scrollTop === 426 &&
+            documentStub.activeElement === restoredCandidateRows[1],
+            type + " changed candidate must use click-time geometry, consume one retained context, and restore the selected row focus");
         delete anchorLayoutOffsets[candidateRows[0].children[1].dataset.danmuNavAnchor];
         delete anchorLayoutOffsets[candidateRows[1].children[1].dataset.danmuNavAnchor];
         context.window.PointerEvent = previousPointerEvent;
@@ -3792,6 +4241,225 @@ async function main() {
     assert(hooks.navigationContextDepth(directCompositeDialog) === contextBeforeBusy,
         "setBusy and other same-page surfaces must not create navigation contexts");
     directCompositeDialog.forceClose();
+
+    // 2.0.7r3 television remote contracts use the real dialog controller and document key path.
+    assert(typeof hooks.beginDialogSurface === "function" &&
+        typeof hooks.completeDialogSurface === "function" &&
+        typeof hooks.remoteFocusableElements === "function" &&
+        typeof hooks.spatialRemoteTarget === "function" &&
+        typeof hooks.focusRemoteElement === "function",
+        "V36 must expose only the narrow deterministic remote-focus hooks used by regression fixtures");
+
+    function remoteControl(tag, text, left, top, width, height) {
+        const element = new FakeElement(tag);
+        element.textContent = text || "";
+        element.setRect({ left: left, top: top, width: width || 120, height: height || 40 });
+        return element;
+    }
+
+    const remoteListenerBaseline = (documentStub.captureListeners.keydown || []).length;
+    const remoteDialog = hooks.openDialog("TV remote navigation");
+    assert((documentStub.captureListeners.keydown || []).length === remoteListenerBaseline + 1,
+        "each connected dialog must install exactly one removable capture key owner");
+    hooks.beginDialogSurface(remoteDialog);
+    remoteDialog.body.setRect({ left: 50, top: 80, width: 900, height: 400 });
+    remoteDialog.body.clientHeight = 400;
+    remoteDialog.body.scrollHeight = 900;
+    const remoteSearch = remoteControl("input", "", 100, 100, 500, 44);
+    remoteSearch.type = "search";
+    remoteSearch.placeholder = "TV keyword";
+    const remoteRowOne = remoteControl("label", "first", 100, 180, 600, 64);
+    const remoteRadioOne = remoteControl("input", "", 115, 192, 28, 28);
+    remoteRadioOne.type = "radio";
+    remoteRadioOne.name = "tv-choice";
+    remoteRadioOne.value = "one";
+    remoteRowOne.appendChild(remoteRadioOne);
+    const remoteRowTwo = remoteControl("label", "second", 100, 270, 600, 64);
+    const remoteRadioTwo = remoteControl("input", "", 115, 282, 28, 28);
+    remoteRadioTwo.type = "radio";
+    remoteRadioTwo.name = "tv-choice";
+    remoteRadioTwo.value = "two";
+    remoteRowTwo.appendChild(remoteRadioTwo);
+    const remoteHidden = remoteControl("button", "hidden", 115, 360, 120, 40);
+    remoteHidden.hidden = true;
+    const remoteDisabled = remoteControl("button", "disabled", 260, 360, 120, 40);
+    remoteDisabled.disabled = true;
+    const remoteBack = remoteControl("button", "back", 100, 600, 140, 48);
+    const remoteSave = remoteControl("button", "save", 300, 600, 140, 48);
+    remoteDialog.body.append(remoteSearch, remoteRowOne, remoteRowTwo, remoteHidden, remoteDisabled);
+    remoteDialog.footer.append(remoteBack, remoteSave);
+    hooks.completeDialogSurface(remoteDialog);
+    assert(documentStub.activeElement === remoteSearch && remoteSearch.classList.contains("danmuTvFocused"),
+        "surface completion must prefer the first enabled body control and make remote focus visible");
+
+    let keyEvent = documentStub.dispatchKey("ArrowDown");
+    assert(documentStub.activeElement === remoteRadioOne && keyEvent.defaultPrevented &&
+        keyEvent.immediatePropagationStopped && !remoteRadioOne.checked,
+        "Down from an editable field must enter the nearest candidate without selecting it or reaching Emby");
+    keyEvent = documentStub.dispatchKey("ArrowDown");
+    assert(documentStub.activeElement === remoteRadioTwo && !remoteRadioTwo.checked,
+        "vertical D-pad movement must follow rendered candidate geometry without selection");
+    keyEvent = documentStub.dispatchKey("ArrowDown");
+    assert(documentStub.activeElement === remoteBack &&
+        !hooks.remoteFocusableElements(remoteDialog).includes(remoteHidden) &&
+        !hooks.remoteFocusableElements(remoteDialog).includes(remoteDisabled),
+        "hidden and disabled controls must be skipped before the nearest footer action is focused");
+    documentStub.dispatchKey("ArrowRight");
+    assert(documentStub.activeElement === remoteSave,
+        "Right must move between horizontal footer actions");
+    keyEvent = documentStub.dispatchKey("ArrowRight");
+    assert(documentStub.activeElement === remoteSave && keyEvent.defaultPrevented,
+        "a directional edge must retain focus and remain owned by the dialog instead of wrapping or reaching Emby");
+    documentStub.activeElement = documentStub.body;
+    keyEvent = documentStub.dispatchKey("ArrowLeft");
+    assert(documentStub.activeElement === remoteSearch && keyEvent.defaultPrevented,
+        "lost or external focus must recover to the deterministic body entry without taking a second spatial step");
+
+    const tieCurrent = remoteControl("button", "tie-current", 500, 100, 40, 40);
+    const tieFirst = remoteControl("button", "tie-first", 450, 200, 40, 40);
+    const tieSecond = remoteControl("button", "tie-second", 550, 200, 40, 40);
+    assert(hooks.spatialRemoteTarget(tieCurrent, [tieFirst, tieSecond], "down") === tieFirst,
+        "equal primary/cross/distance candidates must use stable DOM order as the final tie break");
+
+    remoteRadioOne.focus();
+    keyEvent = documentStub.dispatchKey("Enter");
+    assert(remoteRadioOne.checked && remoteRadioOne.clickCount === 1 && keyEvent.defaultPrevented,
+        "Enter on a radio must bridge to exactly one selection click");
+    documentStub.dispatchKey("Enter", { repeat: true });
+    assert(remoteRadioOne.clickCount === 1,
+        "held confirm must not repeat radio or checkbox activation");
+    let nativeButtonActivations = 0;
+    remoteSave.addEventListener("click", function () { nativeButtonActivations++; });
+    remoteSave.focus();
+    keyEvent = documentStub.dispatchKey("Enter");
+    assert(nativeButtonActivations === 1 && remoteSave.clickCount === 1 && !keyEvent.defaultPrevented,
+        "buttons must retain one native Enter activation without a synthesized dialog click");
+    let searchEnterCount = 0;
+    remoteSearch.addEventListener("keydown", function (event) {
+        if (event.key === "Enter") searchEnterCount++;
+    });
+    remoteSearch.focus();
+    keyEvent = documentStub.dispatchKey("Enter");
+    assert(searchEnterCount === 1 && remoteSearch.clickCount === 0 && !keyEvent.defaultPrevented,
+        "search fields must retain their one existing Enter path without dialog synthesis");
+    let escapedEditableArrowCount = 0;
+    let nativeEditableArrowCount = 0;
+    const nativeEditableArrow = function (event) {
+        if (event.key === "ArrowLeft" || event.key === "ArrowRight") nativeEditableArrowCount++;
+    };
+    const escapedEditableArrow = function () { escapedEditableArrowCount++; };
+    remoteSearch.addEventListener("keydown", nativeEditableArrow);
+    documentStub.addEventListener("keydown", escapedEditableArrow);
+    keyEvent = documentStub.dispatchKey("ArrowLeft");
+    documentStub.removeEventListener("keydown", escapedEditableArrow);
+    assert(documentStub.activeElement === remoteSearch && !keyEvent.defaultPrevented &&
+        keyEvent.propagationStopped && !keyEvent.immediatePropagationStopped &&
+        nativeEditableArrowCount === 1 && escapedEditableArrowCount === 0,
+        "Left and Right in editable fields must retain native caret defaults without escaping to the Emby host focus manager");
+    remoteSave.focus();
+    keyEvent = documentStub.dispatchKey("Tab");
+    assert(documentStub.activeElement === remoteDialog.overlay.querySelector(".danmuSmartClose") && keyEvent.defaultPrevented,
+        "Tab at the final overlay control must wrap to the first eligible header control");
+    keyEvent = documentStub.dispatchKey("Tab", { shiftKey: true });
+    assert(documentStub.activeElement === remoteSave && keyEvent.defaultPrevented,
+        "Shift+Tab at the first overlay control must wrap to the final eligible control");
+    await remoteDialog.overlay.dispatch("pointerdown", { target: remoteSave, pointerType: "mouse" });
+    assert(!remoteSave.classList.contains("danmuTvFocused"),
+        "pointer handoff must clear the remote-only marker without activating the control");
+
+    // Surface identity continuity restores a semantically equivalent field synchronously.
+    remoteSearch.focus();
+    hooks.beginDialogSurface(remoteDialog);
+    const replacementSearch = remoteControl("input", "", 100, 100, 500, 44);
+    replacementSearch.type = "search";
+    replacementSearch.placeholder = "TV keyword";
+    const replacementButton = remoteControl("button", "replacement", 100, 200, 180, 44);
+    remoteDialog.body.append(replacementSearch, replacementButton);
+    hooks.completeDialogSurface(remoteDialog);
+    assert(documentStub.activeElement === replacementSearch,
+        "a same-surface rerender must restore an equivalent surviving search control");
+
+    // Off-screen reveal writes only the Smart Match body and uses preventScroll focus.
+    replacementButton.setRect({ left: 100, top: 550, width: 180, height: 44 });
+    remoteDialog.body.setRect({ left: 50, top: 80, width: 900, height: 400 });
+    remoteDialog.body.scrollTop = 0;
+    remoteDialog.body.scrollHeight = 900;
+    remoteDialog.body.clientHeight = 400;
+    const modeledHostScroll = 777;
+    hooks.focusRemoteElement(remoteDialog, replacementButton);
+    assert(remoteDialog.body.scrollTop === 114 && modeledHostScroll === 777 &&
+        replacementButton.focusOptions.some(option => option && option.preventScroll === true),
+        "off-screen focus must use preventScroll and reveal by the minimum dialog-body-only delta");
+
+    // Reaching the header X through Up is the dialog's visual top boundary.
+    const remoteClose = remoteDialog.overlay.querySelector(".danmuSmartClose");
+    remoteClose.setRect({ left: 100, top: 20, width: 44, height: 44 });
+    replacementSearch.setRect({ left: 100, top: 110, width: 500, height: 44 });
+    remoteDialog.body.scrollTop = 260;
+    replacementSearch.focus();
+    keyEvent = documentStub.dispatchKey("ArrowUp");
+    assert(documentStub.activeElement === remoteClose && remoteDialog.body.scrollTop === 0 &&
+        modeledHostScroll === 777 && keyEvent.defaultPrevented,
+        "Up landing on the header X must align only the Smart Match body to its top");
+    remoteDialog.body.scrollTop = 190;
+    remoteClose.focus();
+    keyEvent = documentStub.dispatchKey("ArrowUp");
+    assert(documentStub.activeElement === remoteClose && remoteDialog.body.scrollTop === 0 &&
+        modeledHostScroll === 777 && keyEvent.defaultPrevented,
+        "Up at the already-focused header X must retain focus and repair any nonzero dialog-body scroll");
+
+    // A protected busy page with no action leaves no ineffective close target, then recovers lazily.
+    const busyRemoteDialog = hooks.openDialog("protected remote busy");
+    busyRemoteDialog.closable = false;
+    hooks.setBusy(busyRemoteDialog, "protected");
+    assert(hooks.remoteFocusableElements(busyRemoteDialog).length === 0,
+        "a protected actionless busy surface must not expose its ineffective close control");
+    const lateRetry = remoteControl("button", "late retry", 100, 200, 160, 44);
+    busyRemoteDialog.footer.appendChild(lateRetry);
+    documentStub.activeElement = documentStub.body;
+    documentStub.dispatchKey("ArrowDown");
+    assert(documentStub.activeElement === lateRetry,
+        "the first direction after an action appears must recover focus without an observer or timer");
+    busyRemoteDialog.forceClose();
+
+    // Only the topmost connected dialog owns a direction.
+    const lowerFocusedBefore = documentStub.activeElement;
+    const topRemoteDialog = hooks.openDialog("topmost remote owner");
+    hooks.beginDialogSurface(topRemoteDialog);
+    const topOne = remoteControl("button", "top one", 100, 100, 140, 44);
+    const topTwo = remoteControl("button", "top two", 100, 200, 140, 44);
+    topRemoteDialog.body.append(topOne, topTwo);
+    hooks.completeDialogSurface(topRemoteDialog);
+    documentStub.dispatchKey("ArrowDown");
+    assert(documentStub.activeElement === topTwo && lowerFocusedBefore !== topTwo,
+        "only the topmost connected overlay may consume and move focus");
+    topRemoteDialog.forceClose();
+    remoteDialog.forceClose();
+    assert((documentStub.captureListeners.keydown || []).length === remoteListenerBaseline &&
+        (remoteDialog.overlay.listeners.keydown || []).length === 0 &&
+        !remoteDialog.overlay.isConnected,
+        "remote listener cleanup must be idempotent and leave subsequent input to Emby");
+    remoteDialog.forceClose();
+
+    const remoteStyleSource = source.slice(source.indexOf("function ensureStyles"),
+        source.indexOf("function topmostCommandDialog"));
+    assert(remoteStyleSource.includes("danmuTvFocused") && remoteStyleSource.includes(":focus-within") &&
+        remoteStyleSource.includes(":focus-visible"),
+        "V36 styles must expose a high-contrast remote target and whole-row focus-within treatment");
+    const remoteControllerSource = source.slice(source.indexOf("function remoteElementTag"),
+        source.indexOf("function presentationAnchorToken"));
+    assert(!remoteControllerSource.includes("scrollIntoView") && !remoteControllerSource.includes("MutationObserver") &&
+        !remoteControllerSource.includes("window.navigation") && !remoteControllerSource.includes("hostScroller") &&
+        !remoteControllerSource.includes("setTimeout") && !remoteControllerSource.includes("requestAnimationFrame"),
+        "remote focus must not schedule correction, reveal a whole page, depend on host focus APIs, or inspect host scrollers");
+    assert((remoteControllerSource.match(/document\.addEventListener\("keydown", keyListener, true\)/g) || []).length === 1 &&
+        (remoteControllerSource.match(/document\.removeEventListener\("keydown", dialog\.remoteKeyListener, true\)/g) || []).length === 1 &&
+        remoteControllerSource.includes('dialog.overlay.addEventListener("keydown", editableKeyListener)') &&
+        remoteControllerSource.includes('dialog.overlay.removeEventListener("keydown", dialog.remoteEditableKeyListener)') &&
+        remoteControllerSource.includes('document.addEventListener("focusin", focusListener, true)') &&
+        remoteControllerSource.includes('document.removeEventListener("focusin", dialog.remoteFocusListener, true)') &&
+        !/ApiClient|\bapi\(|fetch\(|XMLHttpRequest|localStorage|sessionStorage|userAgent|maxTouchPoints|innerWidth|history\./.test(remoteControllerSource),
+        "the remote controller must pair lifecycle listeners and remain free of requests, persistence, platform heuristics, and history ownership");
 
     const opaqueAnchorDialog = { body: new FakeElement("div"), navigationContexts: [], presentationAnchors: {} };
     const opaqueAnchor = hooks.markPresentationAnchor(opaqueAnchorDialog, new FakeElement("div"), "row",
@@ -3854,7 +4522,7 @@ async function main() {
         !source.includes("dialogHistory") && !source.includes("ignoredDialogHistoryPops") &&
         !commandOwnerSource.includes("stopPropagation") && !commandOwnerSource.includes("setTimeout") &&
         !commandOwnerSource.includes("backbutton"),
-        "formal V34 must retain one command owner and no dialog history, Smart backbutton, cancellation, or timer fallback");
+        "formal V36 must retain one command owner and no dialog history, Smart backbutton, cancellation, or timer fallback");
     const activationHelperSource = source.slice(source.indexOf("function armParentNavigationTrigger"),
         source.indexOf("function resetSecondaryViewport"));
     assert(activationHelperSource.includes('trigger.addEventListener("pointerdown"') &&

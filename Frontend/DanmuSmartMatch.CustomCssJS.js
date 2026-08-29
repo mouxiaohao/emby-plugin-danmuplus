@@ -1,12 +1,12 @@
 ﻿/*
  * Emby.CustomCssJS: 电视剧/季/集/电影智能匹配并一键下载弹幕
- * 适用于 Emby 4.9.x + 本方案配套的 Emby.Plugin.Danmu 2.0.7r2 DLL
+ * 适用于 Emby 4.9.x + 本方案配套的 Emby.Plugin.Danmu 2.0.7r3 DLL
  */
 (function () {
     "use strict";
 
-    // V34 pairs the animated whole-Series continuation backend while retaining V22.
-    var INSTALL_FLAG = "__embyDanmuSmartMenuV34";
+    // V36 refreshes the 2.0.7r3 television focus closure while retaining V22.
+    var INSTALL_FLAG = "__embyDanmuSmartMenuV36";
     var MAPPING_PROTOCOL_VERSION = 22;
     var DEFAULT_ZERO_OFFSET = "DefaultZeroOffset";
     var EXPLICIT_ANCHOR = "ExplicitAnchor";
@@ -401,6 +401,8 @@
             ".danmuSmartFooter{display:flex;align-items:center;justify-content:flex-end;gap:.7rem;padding:.9rem 1.2rem;border-top:1px solid rgba(255,255,255,.14)}",
             ".danmuSmartButton{background:#555;padding:.65rem 1rem;font-size:.95rem}",
             ".danmuSmartButton.primary{background:#00a4dc}.danmuSmartButton.danger{background:#c62828}.danmuSmartButton:disabled{opacity:.5;cursor:default}",
+            ".danmuSmartOverlay .danmuTvFocused,.danmuSmartOverlay .danmuCandidate:focus-visible,.danmuSmartOverlay button:focus-visible,.danmuSmartOverlay input:focus-visible,.danmuSmartOverlay summary:focus-visible,.danmuSmartOverlay a:focus-visible{outline:3px solid #fff;outline-offset:3px;box-shadow:0 0 0 6px #00a4dc}",
+            ".danmuSmartOverlay .danmuCandidate:focus-within,.danmuSmartOverlay .danmuVirtualSeason:focus-within,.danmuSmartOverlay .danmuSeasonSummary:focus-within,.danmuSmartOverlay .danmuSmartSearch:focus-within,.danmuSmartOverlay .danmuForceRefresh:focus-within{outline:3px solid #fff;outline-offset:3px;box-shadow:0 0 0 6px rgba(0,164,220,.9)}",
             ".danmuForceRefresh{display:flex;align-items:center;gap:.45rem;margin-right:auto;cursor:pointer;font-size:.9rem}.danmuForceRefresh.locked{opacity:.55;cursor:default}",
             ".danmuSmartSearch{display:flex;gap:.6rem;margin-bottom:1rem}.danmuSmartSearch input{flex:1;min-width:0;padding:.65rem .75rem;border:1px solid #777;border-radius:.35rem;background:#111;color:#fff;font-size:1rem}",
             ".danmuCandidate{display:flex;gap:.7rem;padding:.8rem;border:1px solid rgba(255,255,255,.16);border-radius:.4rem;margin:.55rem 0;cursor:pointer;background:rgba(255,255,255,.035)}",
@@ -502,6 +504,7 @@
             title: heading,
             body: body,
             footer: footer,
+            closeButton: close,
             closable: true,
             androidBackLocked: false,
             searchGeneration: 0,
@@ -515,6 +518,11 @@
             compositeDraft: { exclusions: {}, removedRuns: {} },
             navigationContexts: [],
             presentationAnchors: {},
+            surfaceGeneration: 0,
+            pendingRemoteFocusIdentity: null,
+            remoteFocusedElement: null,
+            remoteInputActive: false,
+            deferRemoteSurfaceFocus: false,
             backMode: backMode,
             close: function () {
                 return dialog.closable ? dispose() : false;
@@ -558,6 +566,7 @@
             }
             dialog.compositeDraft = { exclusions: {}, removedRuns: {} };
             clearNavigationContexts(dialog);
+            disposeDialogRemoteController(dialog);
             document.removeEventListener("keydown", escapeListener);
             var index = activeDialogs.indexOf(dialog);
             if (index >= 0) activeDialogs.splice(index, 1);
@@ -565,6 +574,8 @@
             return true;
         }
         activeDialogs.push(dialog);
+        installDialogRemoteController(dialog, isTopmost);
+        focusRemoteElement(dialog, close, { reveal: false });
         dialog.disposeFromHostNavigation = function () { return dispose(); };
         close.addEventListener("click", function () { dialog.close(); });
         document.addEventListener("keydown", escapeListener);
@@ -573,8 +584,7 @@
 
     function setBusy(dialog, message, search) {
         dialog.androidBackLocked = true;
-        dialog.body.replaceChildren();
-        dialog.footer.replaceChildren();
+        beginDialogSurface(dialog);
         var busy = document.createElement("div");
         busy.className = "danmuBusy";
         busy.textContent = message;
@@ -588,6 +598,7 @@
             cancel.addEventListener("click", function () { cancelDialogSearch(dialog, true); });
             dialog.footer.appendChild(cancel);
         }
+        completeDialogSurface(dialog);
     }
 
     function appendForceRefreshOption(dialog) {
@@ -1198,6 +1209,43 @@
         refresh();
     }
 
+    function candidateProxyChoice(row) {
+        return row && row.dataset && row.dataset.danmuCandidateProxy === "true"
+            ? row.danmuCandidateChoice || null : null;
+    }
+
+    function syncCandidateProxyGroup(row) {
+        var container = row && row.parentElement;
+        var rows = container && container.children ? Array.from(container.children) : [row];
+        rows.forEach(function (candidateRow) {
+            var choice = candidateProxyChoice(candidateRow);
+            if (choice && typeof candidateRow.setAttribute === "function") {
+                candidateRow.setAttribute("aria-checked", choice.checked ? "true" : "false");
+            }
+        });
+    }
+
+    function prepareCandidateRemoteProxy(row, radio) {
+        if (!row || !radio) return row;
+        row.setAttribute("tabindex", "0");
+        row.setAttribute("role", "radio");
+        row.setAttribute("aria-checked", radio.checked ? "true" : "false");
+        row.dataset.danmuCandidateProxy = "true";
+        row.danmuCandidateChoice = radio;
+        radio.setAttribute("tabindex", "-1");
+        var sync = function () { syncCandidateProxyGroup(row); };
+        radio.addEventListener("click", sync);
+        radio.addEventListener("change", sync);
+        row.addEventListener("keydown", function (event) {
+            var key = String(event && (event.key || event.code) || "");
+            if (key !== " " && key !== "Space" && key !== "Spacebar") return;
+            if (typeof event.preventDefault === "function") event.preventDefault();
+            if (typeof event.stopPropagation === "function") event.stopPropagation();
+            if (!event.repeat && typeof radio.click === "function") radio.click();
+        });
+        return row;
+    }
+
     // The server owns validation and produces the canonical plan.  These
     // helpers only turn that plan into cards and send compact *intent* for
     // later manual groups; they never manufacture CommentId or episode IDs.
@@ -1284,14 +1332,35 @@
         return result;
     }
 
+    function compositeRematchSuffixEpisodes(season, group) {
+        var ordered = compositeOrderedEpisodesForSeason(season);
+        var first = group && group.episodes && group.episodes[0];
+        var startId = String(value(first, "ItemId", "itemId", "") || "");
+        if (!startId) return [];
+        var start = ordered.findIndex(function (episode) {
+            return String(value(episode, "ItemId", "itemId", "") || "") === startId;
+        });
+        return start >= 0 ? ordered.slice(start) : [];
+    }
+
+    function excludeCompositeItemIds(dialog, season, itemIds) {
+        var state = compositeDraftSeasonState(dialog, season, true);
+        var added = [];
+        (itemIds || []).forEach(function (id) {
+            var normalized = String(id || "");
+            if (!normalized) return;
+            if (state.exclusions.indexOf(normalized) < 0) state.exclusions.push(normalized);
+            if (added.indexOf(normalized) < 0) added.push(normalized);
+        });
+        return added;
+    }
+
     function excludeCompositeRun(dialog, season, group, removedSelections) {
         var state = compositeDraftSeasonState(dialog, season, true);
         var ids = (group.episodes || []).map(function (episode) {
             return String(value(episode, "ItemId", "itemId", "") || "");
         }).filter(Boolean);
-        ids.forEach(function (id) {
-            if (state.exclusions.indexOf(id) < 0) state.exclusions.push(id);
-        });
+        excludeCompositeItemIds(dialog, season, ids);
         var start = ids[0] || "";
         if (start && !state.removedRuns.some(function (run) { return run.start === start; })) {
             state.removedRuns.push({
@@ -2107,6 +2176,398 @@
                 bodyContains(dialog.overlay, trigger)));
     }
 
+    function remoteElementTag(element) {
+        return String(element && element.tagName || "").toUpperCase();
+    }
+
+    function remoteElementAttribute(element, name) {
+        if (!element || typeof element.getAttribute !== "function") return "";
+        var result = element.getAttribute(name);
+        return result === undefined || result === null ? "" : String(result);
+    }
+
+    function remoteElementRect(element) {
+        if (!element || typeof element.getBoundingClientRect !== "function") return null;
+        var rect;
+        try {
+            rect = element.getBoundingClientRect();
+        } catch (_rectError) {
+            return null;
+        }
+        if (!rect) return null;
+        var left = Number(rect.left || 0);
+        var top = Number(rect.top || 0);
+        var width = Number(rect.width !== undefined ? rect.width : Number(rect.right || 0) - left);
+        var height = Number(rect.height !== undefined ? rect.height : Number(rect.bottom || 0) - top);
+        if (!(width > 0) || !(height > 0)) return null;
+        return {
+            left: left,
+            top: top,
+            right: rect.right !== undefined ? Number(rect.right) : left + width,
+            bottom: rect.bottom !== undefined ? Number(rect.bottom) : top + height,
+            width: width,
+            height: height,
+            centerX: left + width / 2,
+            centerY: top + height / 2
+        };
+    }
+
+    function remoteElementIsVisible(element) {
+        if (!element || element.hidden || element.isConnected === false) return false;
+        if (remoteElementAttribute(element, "aria-hidden").toLowerCase() === "true") return false;
+        try {
+            if (window.getComputedStyle) {
+                var style = window.getComputedStyle(element);
+                if (style && (style.display === "none" || style.visibility === "hidden")) return false;
+            }
+        } catch (_styleError) {
+            return false;
+        }
+        if (typeof element.getClientRects === "function") {
+            try {
+                if (!element.getClientRects().length) return false;
+            } catch (_clientRectError) {
+                return false;
+            }
+        }
+        return Boolean(remoteElementRect(element));
+    }
+
+    function remoteElementIsNativeControl(element) {
+        var tag = remoteElementTag(element);
+        if (tag === "BUTTON" || tag === "SELECT" || tag === "TEXTAREA" || tag === "SUMMARY") return true;
+        if (tag === "INPUT") return String(element.type || "").toLowerCase() !== "hidden";
+        if (tag === "A") return Boolean(element.href || remoteElementAttribute(element, "href"));
+        return remoteElementAttribute(element, "tabindex") !== "" && Number(element.tabIndex) >= 0;
+    }
+
+    function remoteElementIsFocusable(dialog, element) {
+        if (!dialog || !dialog.overlay || !element || !bodyContains(dialog.overlay, element)) return false;
+        if (element.disabled || Number(element.tabIndex) < 0 || !remoteElementIsNativeControl(element)) return false;
+        if (element === dialog.closeButton && !dialog.closable) return false;
+        return remoteElementIsVisible(element);
+    }
+
+    function remoteFocusableElements(dialog, root) {
+        var elements = [];
+        var scope = root || (dialog && dialog.overlay);
+        if (!dialog || !scope) return elements;
+        function visit(node) {
+            if (!node) return;
+            if (node !== scope && remoteElementIsFocusable(dialog, node)) elements.push(node);
+            var children = node.children;
+            var count = children ? children.length : 0;
+            for (var index = 0; index < count; index++) visit(children[index]);
+        }
+        visit(scope);
+        if (scope !== dialog.overlay && remoteElementIsFocusable(dialog, scope)) elements.unshift(scope);
+        return elements;
+    }
+
+    function remoteFocusIdentity(dialog, element) {
+        if (!dialog || !element || !dialogContainsTrigger(dialog, element)) return "";
+        var anchor = element;
+        while (anchor && anchor !== dialog.overlay &&
+            !(anchor.dataset && anchor.dataset.danmuNavAnchor)) anchor = anchor.parentElement;
+        var token = anchor && anchor.dataset ? String(anchor.dataset.danmuNavAnchor || "") : "";
+        var text = String(element.textContent || "").replace(/\s+/g, " ").trim();
+        if (text.length > 160) text = text.slice(0, 160);
+        return [
+            token,
+            remoteElementTag(element),
+            String(element.type || ""),
+            String(element.name || ""),
+            String(element.value === undefined || element.value === null ? "" : element.value),
+            remoteElementAttribute(element, "aria-label"),
+            String(element.placeholder || ""),
+            text
+        ].join("\u0001");
+    }
+
+    function clearDialogRemoteMarker(dialog) {
+        var marked = dialog && dialog.remoteFocusedElement;
+        if (marked && marked.classList && typeof marked.classList.remove === "function") {
+            marked.classList.remove("danmuTvFocused");
+        }
+        if (dialog) dialog.remoteFocusedElement = null;
+    }
+
+    function revealRemoteElement(dialog, element) {
+        if (!dialog || !dialog.body || !bodyContains(dialog.body, element)) return;
+        var bodyRect = remoteElementRect(dialog.body);
+        var elementRect = remoteElementRect(element);
+        if (!bodyRect || !elementRect) return;
+        var delta = 0;
+        if (elementRect.top < bodyRect.top) delta = elementRect.top - bodyRect.top;
+        else if (elementRect.bottom > bodyRect.bottom) delta = elementRect.bottom - bodyRect.bottom;
+        if (!delta) return;
+        var maximum = Math.max(0, Number(dialog.body.scrollHeight || 0) - Number(dialog.body.clientHeight || 0));
+        dialog.body.scrollTop = Math.max(0, Math.min(maximum, Number(dialog.body.scrollTop || 0) + delta));
+    }
+
+    function focusRemoteElement(dialog, element, options) {
+        options = options || {};
+        if (!remoteElementIsFocusable(dialog, element) || typeof element.focus !== "function") return false;
+        clearDialogRemoteMarker(dialog);
+        try {
+            element.focus({ preventScroll: true });
+        } catch (_preventScrollError) {
+            try {
+                element.focus();
+            } catch (_focusError) {
+                return false;
+            }
+        }
+        if (document.activeElement !== element) return false;
+        dialog.remoteInputActive = true;
+        dialog.remoteFocusedElement = element;
+        if (element.classList && typeof element.classList.add === "function") {
+            element.classList.add("danmuTvFocused");
+        }
+        if (options.alignBodyTop && dialog.body) dialog.body.scrollTop = 0;
+        else if (options.reveal !== false) revealRemoteElement(dialog, element);
+        return true;
+    }
+
+    function dialogRemoteEntryTarget(dialog, elements) {
+        elements = elements || remoteFocusableElements(dialog);
+        for (var index = 0; index < elements.length; index++) {
+            if (bodyContains(dialog.body, elements[index])) return elements[index];
+        }
+        for (var footerIndex = 0; footerIndex < elements.length; footerIndex++) {
+            if (bodyContains(dialog.footer, elements[footerIndex])) return elements[footerIndex];
+        }
+        return elements[0] || null;
+    }
+
+    function beginDialogSurface(dialog) {
+        if (!dialog || !dialog.body || !dialog.footer) return;
+        var active = document.activeElement;
+        dialog.pendingRemoteFocusIdentity = dialog.surfaceGeneration > 0 &&
+            dialogContainsTrigger(dialog, active) ? remoteFocusIdentity(dialog, active) : "";
+        clearDialogRemoteMarker(dialog);
+        dialog.body.replaceChildren();
+        dialog.footer.replaceChildren();
+    }
+
+    function completeDialogSurface(dialog) {
+        if (!dialog) return null;
+        dialog.surfaceGeneration = Number(dialog.surfaceGeneration || 0) + 1;
+        if (!dialog.overlay || !dialog.overlay.isConnected || dialog.deferRemoteSurfaceFocus) {
+            dialog.pendingRemoteFocusIdentity = "";
+            return null;
+        }
+        var elements = remoteFocusableElements(dialog);
+        var pending = String(dialog.pendingRemoteFocusIdentity || "");
+        var target = pending ? elements.find(function (element) {
+            return remoteFocusIdentity(dialog, element) === pending;
+        }) : null;
+        dialog.pendingRemoteFocusIdentity = "";
+        target = target || dialogRemoteEntryTarget(dialog, elements);
+        return target && focusRemoteElement(dialog, target) ? target : null;
+    }
+
+    function normalizeDialogRemoteKey(event) {
+        var key = String(event && event.key || "");
+        var code = String(event && event.code || "");
+        if (key === "ArrowUp" || code === "ArrowUp") return "up";
+        if (key === "ArrowDown" || code === "ArrowDown") return "down";
+        if (key === "ArrowLeft" || code === "ArrowLeft") return "left";
+        if (key === "ArrowRight" || code === "ArrowRight") return "right";
+        if (key === "Tab" || code === "Tab") return "tab";
+        if (key === "Enter" || key === "NumpadEnter" || key === "Select" ||
+            code === "Enter" || code === "NumpadEnter" || code === "Select") return "confirm";
+        if (key && key !== "Unidentified") return "";
+        var legacy = Number(event && (event.which || event.keyCode) || 0);
+        return legacy === 38 ? "up" : legacy === 40 ? "down" : legacy === 37 ? "left" :
+            legacy === 39 ? "right" : legacy === 13 ? "confirm" : "";
+    }
+
+    function spatialRemoteTarget(current, elements, direction) {
+        var origin = remoteElementRect(current);
+        if (!origin) return null;
+        var scored = [];
+        (elements || []).forEach(function (element, index) {
+            if (!element || element === current) return;
+            var rect = remoteElementRect(element);
+            if (!rect) return;
+            var deltaX = rect.centerX - origin.centerX;
+            var deltaY = rect.centerY - origin.centerY;
+            var primary;
+            var cross;
+            var beam;
+            if (direction === "up") {
+                if (deltaY >= -1) return;
+                primary = -deltaY;
+                cross = Math.abs(deltaX);
+                beam = rect.right >= origin.left - 1 && rect.left <= origin.right + 1 ? 0 : 1;
+            } else if (direction === "down") {
+                if (deltaY <= 1) return;
+                primary = deltaY;
+                cross = Math.abs(deltaX);
+                beam = rect.right >= origin.left - 1 && rect.left <= origin.right + 1 ? 0 : 1;
+            } else if (direction === "left") {
+                if (deltaX >= -1) return;
+                primary = -deltaX;
+                cross = Math.abs(deltaY);
+                beam = rect.bottom >= origin.top - 1 && rect.top <= origin.bottom + 1 ? 0 : 1;
+            } else if (direction === "right") {
+                if (deltaX <= 1) return;
+                primary = deltaX;
+                cross = Math.abs(deltaY);
+                beam = rect.bottom >= origin.top - 1 && rect.top <= origin.bottom + 1 ? 0 : 1;
+            } else {
+                return;
+            }
+            scored.push({
+                element: element,
+                beam: beam,
+                primary: primary,
+                cross: cross,
+                distance: Math.sqrt(deltaX * deltaX + deltaY * deltaY),
+                index: index
+            });
+        });
+        scored.sort(function (left, right) {
+            return left.beam - right.beam || left.primary - right.primary || left.cross - right.cross ||
+                left.distance - right.distance || left.index - right.index;
+        });
+        return scored.length ? scored[0].element : null;
+    }
+
+    function stopDialogRemotePropagation(event) {
+        if (event && typeof event.stopImmediatePropagation === "function") event.stopImmediatePropagation();
+        else if (event && typeof event.stopPropagation === "function") event.stopPropagation();
+    }
+
+    function ownDialogRemoteEvent(event) {
+        if (event && typeof event.preventDefault === "function") event.preventDefault();
+        stopDialogRemotePropagation(event);
+    }
+
+    function remoteEditableElement(element) {
+        var tag = remoteElementTag(element);
+        if (tag === "TEXTAREA") return true;
+        if (tag !== "INPUT") return false;
+        var type = String(element.type || "text").toLowerCase();
+        return type !== "radio" && type !== "checkbox" && type !== "button" &&
+            type !== "submit" && type !== "reset" && type !== "hidden";
+    }
+
+    function handleDialogRemoteKey(dialog, isTopmost, event) {
+        if (!dialog || !dialog.overlay || !dialog.overlay.isConnected || !isTopmost() ||
+            !event || event.isComposing) return;
+        var remoteKey = normalizeDialogRemoteKey(event);
+        if (!remoteKey) return;
+        var active = document.activeElement;
+        if ((remoteKey === "left" || remoteKey === "right") && remoteEditableElement(active)) return;
+        var elements = remoteFocusableElements(dialog);
+        if (remoteKey === "tab") {
+            if (!elements.length) return;
+            var tabIndex = elements.indexOf(active);
+            var target = null;
+            if (tabIndex < 0) target = event.shiftKey ? elements[elements.length - 1] : elements[0];
+            else if (!event.shiftKey && tabIndex === elements.length - 1) target = elements[0];
+            else if (event.shiftKey && tabIndex === 0) target = elements[elements.length - 1];
+            if (target) {
+                ownDialogRemoteEvent(event);
+                focusRemoteElement(dialog, target);
+            }
+            return;
+        }
+        if (remoteKey === "confirm") {
+            var proxyChoice = candidateProxyChoice(active);
+            if (proxyChoice) {
+                ownDialogRemoteEvent(event);
+                if (!event.repeat && typeof proxyChoice.click === "function") proxyChoice.click();
+                return;
+            }
+            if (elements.indexOf(active) < 0 || remoteElementTag(active) !== "INPUT") return;
+            var inputType = String(active.type || "").toLowerCase();
+            if (inputType !== "radio" && inputType !== "checkbox") return;
+            ownDialogRemoteEvent(event);
+            if (!event.repeat && typeof active.click === "function") active.click();
+            return;
+        }
+        ownDialogRemoteEvent(event);
+        if (elements.indexOf(active) < 0) {
+            var entry = dialogRemoteEntryTarget(dialog, elements);
+            if (entry) focusRemoteElement(dialog, entry);
+            return;
+        }
+        if (remoteKey === "up" && active === dialog.closeButton && dialog.body) {
+            dialog.body.scrollTop = 0;
+        }
+        var next = spatialRemoteTarget(active, elements, remoteKey);
+        if (next) focusRemoteElement(dialog, next, {
+            alignBodyTop: remoteKey === "up" && next === dialog.closeButton
+        });
+    }
+
+    function installDialogRemoteController(dialog, isTopmost) {
+        if (!dialog || dialog.remoteKeyListener) return;
+        var keyListener = function (event) { handleDialogRemoteKey(dialog, isTopmost, event); };
+        var editableKeyListener = function (event) {
+            if (!dialog.overlay || !dialog.overlay.isConnected || !isTopmost() ||
+                !event || event.isComposing) return;
+            var remoteKey = normalizeDialogRemoteKey(event);
+            if ((remoteKey === "left" || remoteKey === "right") && remoteEditableElement(event.target) &&
+                typeof event.stopPropagation === "function") {
+                // Run after the input target so its native caret/default handlers survive,
+                // then stop before Emby's document-level focus manager sees the D-pad key.
+                event.stopPropagation();
+            }
+        };
+        var focusListener = function (event) {
+            if (!dialog.remoteInputActive || !isTopmost() ||
+                !remoteElementIsFocusable(dialog, event && event.target)) return;
+            clearDialogRemoteMarker(dialog);
+            dialog.remoteFocusedElement = event.target;
+            if (event.target.classList && typeof event.target.classList.add === "function") {
+                event.target.classList.add("danmuTvFocused");
+            }
+        };
+        var pointerListener = function () {
+            dialog.remoteInputActive = false;
+            clearDialogRemoteMarker(dialog);
+        };
+        dialog.remoteKeyListener = keyListener;
+        dialog.remoteEditableKeyListener = editableKeyListener;
+        dialog.remoteFocusListener = focusListener;
+        dialog.remotePointerListener = pointerListener;
+        document.addEventListener("keydown", keyListener, true);
+        dialog.overlay.addEventListener("keydown", editableKeyListener);
+        document.addEventListener("focusin", focusListener, true);
+        dialog.overlay.addEventListener("pointerdown", pointerListener, true);
+        dialog.overlay.addEventListener("mousedown", pointerListener, true);
+        dialog.overlay.addEventListener("touchstart", pointerListener, true);
+    }
+
+    function disposeDialogRemoteController(dialog) {
+        if (!dialog) return;
+        if (dialog.remoteKeyListener) {
+            document.removeEventListener("keydown", dialog.remoteKeyListener, true);
+            dialog.remoteKeyListener = null;
+        }
+        if (dialog.remoteEditableKeyListener && dialog.overlay) {
+            dialog.overlay.removeEventListener("keydown", dialog.remoteEditableKeyListener);
+            dialog.remoteEditableKeyListener = null;
+        }
+        if (dialog.remoteFocusListener) {
+            document.removeEventListener("focusin", dialog.remoteFocusListener, true);
+            dialog.remoteFocusListener = null;
+        }
+        if (dialog.remotePointerListener && dialog.overlay) {
+            dialog.overlay.removeEventListener("pointerdown", dialog.remotePointerListener, true);
+            dialog.overlay.removeEventListener("mousedown", dialog.remotePointerListener, true);
+            dialog.overlay.removeEventListener("touchstart", dialog.remotePointerListener, true);
+            dialog.remotePointerListener = null;
+        }
+        clearDialogRemoteMarker(dialog);
+        dialog.pendingRemoteFocusIdentity = "";
+        dialog.remoteInputActive = false;
+    }
+
     function presentationAnchorToken(dialog, kind, identity) {
         var registry = dialog.presentationAnchors || (dialog.presentationAnchors = {});
         var key = kind + "\u0000" + String(identity || "");
@@ -2306,12 +2767,46 @@
         return maximum > 0 ? "raw" : "zero";
     }
 
+    function remoteTargetForNavigationChoice(dialog, context, choice) {
+        var saved = context && context[choice];
+        var anchor = saved && findPresentationAnchor(dialog.body, saved.token);
+        if (!anchor) return null;
+        if (remoteElementIsFocusable(dialog, anchor)) return anchor;
+        var row = enclosingPresentationAnchor(anchor, "row");
+        var rowTargets = row && remoteFocusableElements(dialog, row);
+        if (rowTargets && rowTargets.length) return rowTargets[0];
+        var targets = remoteFocusableElements(dialog, anchor);
+        return targets.length ? targets[0] : null;
+    }
+
+    function restoreParentRemoteFocus(dialog, context, restoredChoice) {
+        if (!dialog || !dialog.overlay || !dialog.overlay.isConnected) return null;
+        var choices = [restoredChoice, "action", "row", "section", "neighbor"];
+        var seen = {};
+        for (var index = 0; index < choices.length; index++) {
+            var choice = choices[index];
+            if (!choice || choice === "raw" || choice === "zero" || choice === "none" || seen[choice]) continue;
+            seen[choice] = true;
+            var target = remoteTargetForNavigationChoice(dialog, context, choice);
+            if (target && focusRemoteElement(dialog, target, { reveal: false })) return target;
+        }
+        var entry = dialogRemoteEntryTarget(dialog, remoteFocusableElements(dialog));
+        return entry && focusRemoteElement(dialog, entry, { reveal: false }) ? entry : null;
+    }
+
     function returnFromChild(dialog) {
         var stack = dialog && dialog.navigationContexts;
         var context = stack && stack.length ? stack[stack.length - 1] : null;
         if (!context) return false;
-        context.renderParent();
-        restoreParentViewport(dialog, context);
+        var previousDeferral = Boolean(dialog.deferRemoteSurfaceFocus);
+        dialog.deferRemoteSurfaceFocus = true;
+        try {
+            context.renderParent();
+        } finally {
+            dialog.deferRemoteSurfaceFocus = previousDeferral;
+        }
+        var restoredChoice = restoreParentViewport(dialog, context);
+        restoreParentRemoteFocus(dialog, context, restoredChoice);
         stack.pop();
         return true;
     }
@@ -2344,8 +2839,7 @@
         dialog.setBackHandler(null);
         dialog.androidBackLocked = false;
         dialog.closable = false;
-        dialog.body.replaceChildren();
-        dialog.footer.replaceChildren();
+        beginDialogSurface(dialog);
 
         var summary = document.createElement("div");
         summary.className = "danmuProgressSummary";
@@ -2391,6 +2885,7 @@
         stop.textContent = "强制停止全部下载";
         stop.disabled = true;
         dialog.footer.append(replay, background, stop);
+        completeDialogSurface(dialog);
 
         var detached = false;
         var stopRequested = false;
@@ -2805,15 +3300,27 @@
             var excludedBefore = compositeExcludedItemIds(dialog, season);
             var removedBefore = compositeDraftSeasonState(dialog, season, false).removedRuns.slice();
             var selectionsBefore = compositeSelectionStore(selections, season, false).slice();
-            var groupItemIds = (group.episodes || []).map(function (episode) {
+            var affectedEpisodes = reopenPicker
+                ? compositeRematchSuffixEpisodes(season, group) : (group.episodes || []);
+            var affectedItemIds = affectedEpisodes.map(function (episode) {
                 return String(value(episode, "ItemId", "itemId", "") || "");
             }).filter(Boolean);
+            if (reopenPicker && !affectedItemIds.length) {
+                restoreCompositeRematchDraft(dialog, rematchDraft, seasons, seasonIndex, selections, keywords);
+                restoreFailedTransition(dialog, transitionContext);
+                notify("未能确定重新匹配的尾部范围，已保留原映射。", true);
+                return;
+            }
             // Compute the request before mutating the dialog draft, then drop every
-            // authoritative/manual selection that overlaps the exact clicked run.
+            // authoritative/manual selection that overlaps the requested removal.
+            // An explicit rematch invalidates the clicked run and every later run
+            // so the server receives one unique trailing unmatched suffix. Ordinary
+            // Remove keeps its exact clicked-run behavior and Restore snapshot.
             // This prevents an excluded mapping from being re-submitted in the same request.
             var filtered = filterCompositeSelectionsByItemIds(
-                season, compositeRequestSelections(selections, season), groupItemIds);
-            excludeCompositeRun(dialog, season, group, filtered.removed);
+                season, compositeRequestSelections(selections, season), affectedItemIds);
+            if (reopenPicker) excludeCompositeItemIds(dialog, season, affectedItemIds);
+            else excludeCompositeRun(dialog, season, group, filtered.removed);
             setBusy(dialog, reopenPicker ? "正在移除旧映射并准备重新匹配…" : "正在移除虚拟季映射…");
             try {
                 var confirmed = await requestAuthoritativeCompositePlan(dialog, item, season, filtered.kept);
@@ -3037,8 +3544,7 @@
         dialog.setBackHandler(returnToOverview);
         var existingSelection = group.kind === "manual" ? group.selection : null;
         if (dialog.title) dialog.title.textContent = "手动匹配未匹配临时季";
-        dialog.body.replaceChildren();
-        dialog.footer.replaceChildren();
+        beginDialogSurface(dialog);
         var summary = document.createElement("p");
         summary.textContent = "本次范围：" + episodeRangeLabel(group.episodes) + "。选择来源后需确认来源起始集；服务器会重新验证来源剧集并只应用于此连续区间。";
         dialog.body.appendChild(summary);
@@ -3137,6 +3643,7 @@
             appendCandidateDetailControl(dialog, main,
                 value(season, "SeasonId", "seasonId", item.Id), candidate, detailGeneration);
             row.append(radio, main);
+            prepareCandidateRemoteProxy(row, radio);
             list.appendChild(row);
         });
         dialog.body.appendChild(list);
@@ -3256,6 +3763,7 @@
         appendPreDownloadFooter(dialog);
         dialog.footer.append(back, save);
         resetSecondaryViewport(dialog);
+        completeDialogSurface(dialog);
         if (automaticRangeSearch) searchCurrentGroup(true);
     }
 
@@ -3279,8 +3787,7 @@
                 ? "整部剧弹幕智能匹配"
                 : "本季弹幕智能匹配";
         }
-        dialog.body.replaceChildren();
-        dialog.footer.replaceChildren();
+        beginDialogSurface(dialog);
 
         seasons.forEach(function (season) {
             var key = seasonSelectionKey(season);
@@ -3446,6 +3953,7 @@
             submitSeriesSelections(dialog, matchedSeasons, selections);
         });
         dialog.footer.appendChild(ok);
+        completeDialogSurface(dialog);
     }
 
     function renderSeriesSeasonPicker(dialog, item, seasons, seasonIndex, selections, keywords) {
@@ -3465,8 +3973,7 @@
         if (dialog.title) {
             dialog.title.textContent = "手动匹配：" + value(season, "SeasonName", "seasonName", "本季");
         }
-        dialog.body.replaceChildren();
-        dialog.footer.replaceChildren();
+        beginDialogSurface(dialog);
 
         var summary = document.createElement("p");
         summary.textContent = seasonLibraryContextLine(season) + "。" +
@@ -3531,6 +4038,7 @@
             main.append(candidateTitle, meta, reason);
             appendCandidateDetailControl(dialog, main, value(season, "SeasonId", "seasonId", item.Id), candidate, detailGeneration);
             row.append(radio, main);
+            prepareCandidateRemoteProxy(row, radio);
             list.appendChild(row);
         });
         dialog.body.appendChild(list);
@@ -3614,6 +4122,7 @@
         appendPreDownloadFooter(dialog);
         dialog.footer.append(back, save);
         resetSecondaryViewport(dialog);
+        completeDialogSurface(dialog);
     }
 
     function renderCandidatePicker(dialog, item, season, keyword) {
@@ -3634,8 +4143,7 @@
         }
         dialog.setBackHandler(null);
         dialog.androidBackLocked = false;
-        dialog.body.replaceChildren();
-        dialog.footer.replaceChildren();
+        beginDialogSurface(dialog);
         var manualKeyword = isManualKeyword(season);
 
         var scopeLine = scopeSummaryLine(season);
@@ -3705,6 +4213,7 @@
             main.append(title, meta, reason);
             appendCandidateDetailControl(dialog, main, value(season, "SeasonId", "seasonId", item.Id), candidate, detailGeneration);
             row.append(radio, main);
+            prepareCandidateRemoteProxy(row, radio);
             list.appendChild(row);
         });
         dialog.body.appendChild(list);
@@ -3770,6 +4279,7 @@
             }
         });
         resetSecondaryViewport(dialog);
+        completeDialogSurface(dialog);
     }
 
     function renderCompositeTargetPicker(dialog, item, season) {
@@ -3819,8 +4329,7 @@
     function renderEpisodeSourcePicker(dialog, item, target, candidate, detail, keyword, manual) {
         var episodes = selectedCandidateEpisodes(detail);
         dialog.androidBackLocked = false;
-        dialog.body.replaceChildren();
-        dialog.footer.replaceChildren();
+        beginDialogSurface(dialog);
         function returnToParent() {
             dialog.preDownloadRecovery = null;
             if (!returnFromChild(dialog)) renderItemCandidatePicker(dialog, item, target, keyword);
@@ -3850,6 +4359,7 @@
                 value(episode, "Title", "title", "未命名来源剧集");
             main.append(title);
             row.append(radio, main);
+            prepareCandidateRemoteProxy(row, radio);
             list.appendChild(row);
         });
         dialog.body.appendChild(list);
@@ -3878,6 +4388,7 @@
         appendPreDownloadFooter(dialog);
         dialog.footer.append(back, start);
         resetSecondaryViewport(dialog);
+        completeDialogSurface(dialog);
     }
 
     async function resolveSelectedCandidateDetail(dialog, item, target, candidate, keyword, manual, transitionContext) {
@@ -3914,8 +4425,7 @@
     function renderMoviePartPicker(dialog, item, target, candidate, detail, keyword, manual) {
         var parts = moviePartChoices(detail);
         dialog.androidBackLocked = false;
-        dialog.body.replaceChildren();
-        dialog.footer.replaceChildren();
+        beginDialogSurface(dialog);
         function returnToParent() {
             dialog.preDownloadRecovery = null;
             if (!returnFromChild(dialog)) renderItemCandidatePicker(dialog, item, target, keyword);
@@ -3943,6 +4453,7 @@
             title.textContent = value(part, "PartTitle", "partTitle", "正片版本 " + (index + 1));
             main.appendChild(title);
             row.append(radio, main);
+            prepareCandidateRemoteProxy(row, radio);
             list.appendChild(row);
         });
         dialog.body.appendChild(list);
@@ -3970,6 +4481,7 @@
         appendPreDownloadFooter(dialog);
         dialog.footer.append(back, start);
         resetSecondaryViewport(dialog);
+        completeDialogSurface(dialog);
     }
 
     async function resolveSelectedMovieParts(dialog, item, target, candidate, keyword, manual, transitionContext) {
@@ -4006,8 +4518,7 @@
     function renderItemCandidatePicker(dialog, item, target, keyword) {
         dialog.setBackHandler(null);
         dialog.androidBackLocked = false;
-        dialog.body.replaceChildren();
-        dialog.footer.replaceChildren();
+        beginDialogSurface(dialog);
         var isEpisode = item.Type === "Episode";
         var manualKeyword = isManualKeyword(target);
         var candidates = itemCandidates(target);
@@ -4093,6 +4604,7 @@
                 appendCandidateDetailControl(dialog, main, item.Id, candidate, detailGeneration);
             }
             row.append(radio, main);
+            prepareCandidateRemoteProxy(row, radio);
             list.appendChild(row);
         });
         dialog.body.appendChild(list);
@@ -4168,6 +4680,7 @@
         });
         dialog.footer.appendChild(start);
         resetSecondaryViewport(dialog);
+        completeDialogSurface(dialog);
     }
 
     async function renderSingleTargetProgress(dialog, item, target, candidate, sourceEpisodeNumber, sourceEpisodeId, manual, moviePartToken) {
@@ -4205,8 +4718,7 @@
         var monitoring = false;
 
         dialog.androidBackLocked = false;
-        dialog.body.replaceChildren();
-        dialog.footer.replaceChildren();
+        beginDialogSurface(dialog);
         var summary = document.createElement("div");
         summary.className = "danmuProgressSummary";
         var block = document.createElement("div");
@@ -4236,6 +4748,7 @@
         stop.className = "danmuSmartButton danger";
         stop.textContent = "强制停止全部下载";
         dialog.footer.append(background, stop);
+        completeDialogSurface(dialog);
 
         function terminal(status) {
             return status === "completed" || status === "completed_with_warnings" ||
@@ -4361,8 +4874,7 @@
     function renderInitialSearchFailure(dialog, item, status, error) {
         if (!dialog || !dialog.overlay || !dialog.overlay.isConnected) return;
         dialog.androidBackLocked = false;
-        dialog.body.replaceChildren();
-        dialog.footer.replaceChildren();
+        beginDialogSurface(dialog);
         var message = document.createElement("p");
         message.className = "danmuMuted";
         message.textContent = status === "cancelled"
@@ -4374,6 +4886,7 @@
         retry.addEventListener("click", function () { runSmartDownload(item, dialog); });
         dialog.body.appendChild(message);
         dialog.footer.appendChild(retry);
+        completeDialogSurface(dialog);
         if (status !== "cancelled") notify(message.textContent, true);
     }
 
@@ -4630,6 +5143,7 @@
         restoreCompositeRun: restoreCompositeRun,
         selectionLocalEpisodeItemIds: selectionLocalEpisodeItemIds,
         filterCompositeSelectionsByItemIds: filterCompositeSelectionsByItemIds,
+        compositeRematchSuffixEpisodes: compositeRematchSuffixEpisodes,
         compositePlanCoversItemIds: compositePlanCoversItemIds,
         compositeDraftParameters: compositeDraftParameters,
         temporaryRangeKeyword: temporaryRangeKeyword,
@@ -4640,6 +5154,11 @@
         isCurrentSearch: isCurrentSearch,
         runSmartDownload: runSmartDownload,
         openDialog: openDialog,
+        beginDialogSurface: beginDialogSurface,
+        completeDialogSurface: completeDialogSurface,
+        remoteFocusableElements: remoteFocusableElements,
+        spatialRemoteTarget: spatialRemoteTarget,
+        focusRemoteElement: focusRemoteElement,
         setBusy: setBusy,
         appendPreDownloadFooter: appendPreDownloadFooter,
         snapshotForceRefresh: snapshotForceRefresh,
