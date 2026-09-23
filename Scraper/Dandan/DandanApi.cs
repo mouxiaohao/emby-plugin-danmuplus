@@ -21,7 +21,7 @@ namespace Emby.Plugin.Danmu.Scraper.Dandan
     public class DandanApi : AbstractApi
     {
         private const string OfficialApiBaseUrl = "https://api.dandanplay.net/api/v2/";
-        private const string OfficialProxyCorsBaseUrl = "https://danmuplus-dandan-proxy.mouxiaohao.workers.dev/cors/";
+        private const string OfficialProxyCorsBaseUrl = "https://danmuplus-dandan-proxy.mxhclfl.workers.dev/cors/";
         private static readonly object _lock = new object();
         private DateTime lastRequestTime = DateTime.Now.AddDays(-1);
         private readonly ILogger _logger;

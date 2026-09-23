@@ -17,7 +17,7 @@
 
 ## 4. 后端路由
 
-- [x] 4.1 仅在 Dandanplay 后端路由实现中加入私有官方 CORS 常量 `https://danmuplus-dandan-proxy.mouxiaohao.workers.dev/cors/`，确保该常量不属于配置模型或可序列化 DTO。
+- [x] 4.1 仅在 Dandanplay 后端路由实现中加入私有官方 CORS 常量 `https://danmuplus-dandan-proxy.mxhclfl.workers.dev/cors/`，确保该常量不属于配置模型或可序列化 DTO。
 - [x] 4.2 扩展集中请求路由：非代理模式直连官方 API 并本地签名；代理加官方 CORS 使用内建前缀且不解析/发送本地签名；代理加自定义 CORS 使用保存前缀且不解析/发送本地签名。
 - [x] 4.3 让 `search`、`bangumi` 与 `comment` 三个既有端点复用同一来源决策、前缀规范化和清理后的错误处理；自定义代理地址为空或无效时显式失败，不回退到官方 CORS 或直连。
 
