@@ -30,7 +30,7 @@
 
 ### 后端常量与可序列化配置严格分离
 
-将 `https://danmuplus-dandan-proxy.mxhclfl.workers.dev/cors/` 定义为 Dandanplay 后端路由代码中的私有常量。配置对象、配置 API DTO、嵌入式 HTML、JavaScript、输入默认值、placeholder、帮助文本以及前端测试夹具均不得包含该字面量。配置响应可以返回官方 CORS 选择的解析后布尔值和用户自己的 `ProxyCorsUrl`，但不得用内建地址填充后者。
+将内建官方 CORS 地址定义为 Dandanplay 后端路由代码中的私有常量。配置对象、配置 API DTO、嵌入式 HTML、JavaScript、输入默认值、placeholder、帮助文本以及前端测试夹具均不得包含该字面量。配置响应可以返回官方 CORS 选择的解析后布尔值和用户自己的 `ProxyCorsUrl`，但不得用内建地址填充后者。
 
 采用后端常量而不是隐藏输入或由 JavaScript 拼接，是因为任何发送到浏览器的数据都违背“软件界面不暴露”的约束。该边界不承诺真正保密：开源仓库、DLL 和代理网络请求仍可观察 URL。
 

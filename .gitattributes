@@ -5,3 +5,7 @@ artifacts/2.0.7/review-package/* binary
 artifacts/2.0.7r1/review-package/* binary
 artifacts/2.0.7r2/review-package/* binary
 artifacts/2.0.7r3/review-package/* binary
+Frontend/dd-danmaku/baselines/* binary
+Frontend/dd-danmaku/vendor/danmaku-2.0.8/* binary
+Frontend/dd-danmaku/dist/* binary
+Frontend/dd-danmaku/review-package/*/* binary

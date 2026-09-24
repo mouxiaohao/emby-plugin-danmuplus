@@ -27,7 +27,7 @@
 - **AND** 系统不得因自定义地址为空而自动重新勾选
 
 ### Requirement: 配置页面隐藏内建地址并保留自定义值
-系统 SHALL 仅在 `UseProxyApi` 已启用时呈现官方 CORS 选择与自定义 CORS 控件。官方 CORS 已勾选时，自定义输入 SHALL 禁用；未勾选时 SHALL 启用。切换两种代理来源 MUST 保留用户保存或当前输入的自定义地址。内建地址 `https://danmuplus-dandan-proxy.mxhclfl.workers.dev/cors/` MUST 只存在于后端路由实现中，不得渲染到 HTML 或 JavaScript，不得写入持久化配置、配置 API 响应或输入框，也不得作为隐藏字段、占位符、帮助文本或其他界面内容返回。
+系统 SHALL 仅在 `UseProxyApi` 已启用时呈现官方 CORS 选择与自定义 CORS 控件。官方 CORS 已勾选时，自定义输入 SHALL 禁用；未勾选时 SHALL 启用。切换两种代理来源 MUST 保留用户保存或当前输入的自定义地址。内建官方 CORS 地址 MUST 只存在于后端路由实现中，不得渲染到 HTML 或 JavaScript，不得写入持久化配置、配置 API 响应或输入框，也不得作为隐藏字段、占位符、帮助文本或其他界面内容返回。
 
 #### Scenario: 勾选官方 CORS
 - **WHEN** 用户在代理 API 模式中勾选“使用插件官方 CORS 地址”
