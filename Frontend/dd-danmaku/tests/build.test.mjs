@@ -25,7 +25,9 @@ test('frozen baseline and upstream source hashes remain exact', async () => {
 
 test('standalone candidate bundles one controlled engine and keeps custom-engine fallback', async () => {
   const candidate = await readFile(path.join(root, 'dist', 'dd-danmaku.CustomCssJS.js'), 'utf8');
-  const engine = (await readFile(path.join(root, 'src', 'danmaku.fixed-speed.js'), 'utf8')).trimEnd();
+  const engine = (await readFile(path.join(root, 'src', 'danmaku.fixed-speed.js'), 'utf8'))
+    .replace(/\r\n?/g, '\n')
+    .trimEnd();
   assert.ok(candidate.includes(engine));
   assert.equal((candidate.match(/dd-danmaku-wall-clock-v1/g) || []).length >= 2, true);
   assert.equal(candidate.includes('skipInnerModule'), false);
