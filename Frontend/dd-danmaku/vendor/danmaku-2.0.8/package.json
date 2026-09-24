@@ -1,0 +1,59 @@
+{
+  "name": "danmaku",
+  "version": "2.0.8",
+  "description": "Display danmaku (flying comments) on HTML5 video.",
+  "main": "dist/danmaku.js",
+  "module": "dist/esm/danmaku.js",
+  "sideEffects": false,
+  "files": [
+    "dist",
+    "src",
+    "types"
+  ],
+  "types": "types/index.d.ts",
+  "scripts": {
+    "dev": "npm run bundle -- -w",
+    "lint": "eslint src test",
+    "unit": "karma start",
+    "test": "npm run lint && npm run unit",
+    "bundle": "rollup -c",
+    "build": "npm run bundle",
+    "preversion": "npm test",
+    "version": "npm run build && git add -A dist",
+    "postversion": "git push && git push --tags && npm publish"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/weizhenye/Danmaku.git"
+  },
+  "keywords": [
+    "danmaku",
+    "comment",
+    "弹幕",
+    "video",
+    "audio",
+    "live"
+  ],
+  "author": "Zhenye Wei",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/weizhenye/Danmaku/issues"
+  },
+  "homepage": "https://danmaku.js.org/",
+  "devDependencies": {
+    "@rollup/plugin-replace": "^2.3.3",
+    "chai": "4.2.0",
+    "es6-promise": "^4.2.8",
+    "eslint": "^7.6.0",
+    "karma": "^5.1.1",
+    "karma-chai": "^0.1.0",
+    "karma-chrome-launcher": "^3.1.0",
+    "karma-coverage": "^2.0.3",
+    "karma-mocha": "^2.0.1",
+    "karma-rollup-preprocessor": "^7.0.5",
+    "mocha": "^4.1.0",
+    "rollup": "^2.23.0",
+    "rollup-plugin-istanbul": "^2.0.1",
+    "rollup-plugin-terser": "^6.1.0"
+  }
+}

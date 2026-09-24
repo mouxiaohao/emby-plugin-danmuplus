@@ -9,10 +9,15 @@
 
 ## Reviewed payloads
 
-- `Emby.Plugin.Danmu.dll`: 1,748,480 bytes; SHA-256 `3944A015B1A085E32A9DC6C9D4F99E9DF6EED8C7C3E4C52B09887C47B81DD8D8`.
+- `Emby.Plugin.Danmu.dll`: 1,748,480 bytes; SHA-256 `DDBC51DF90C4F253F3E96BD98CB903691DC092BA1A3C7AEDE16BAAAC5034D33F`.
 - `DanmuSmartMatch.CustomCssJS.js`: 277,161 bytes; SHA-256 `3EAD13CBA0BA2319CCEE4F1E175BCDEAB01E458CAE2BBC99DF78AEB70B6772C3`.
-- `UPDATE.md`: 33,209 bytes; SHA-256 `025CCA876AC41C1230810704F470CA7770D7238F7C7044D5239148D10052B2B6`.
-- `SHA256SUMS.txt` lists exactly those three payloads and was generated from the copied review-package bytes.
+- `dd-danmaku.CustomCssJS.js`: 303,089 bytes; SHA-256 `76F05EFE46346B8612FE082DC7AE42E20E7CF7E20A61D35C84D695FAEC9E9D50`.
+- `dd-danmaku-1.48.1-MANIFEST.md`: 8,857 bytes; SHA-256 `8EC702FB32103291C4B59A015F0F976E006A9891ACC419A3F595A5B0246D6171`.
+- `dd-danmaku-1.48.1-MODIFICATIONS.md`: 957 bytes; SHA-256 `A22D67A481F5BFF5821E3B583F9EC27A6298DED0BBF248CAAA8A485825DCEA12`.
+- `dd-danmaku-LICENSE.txt`: 1,060 bytes; SHA-256 `150017DF761F7465FF237EF9F41107BA95A30705830E1975CE91CA3E42FDDDD4`.
+- `Danmaku-2.0.8-LICENSE.txt`: 1,077 bytes; SHA-256 `C87577B536D2683C9BEE9B5BDA29EA0667B01AF10770D2E1333AE84BCAF12CDD`.
+- `UPDATE.md`: 33,872 bytes; SHA-256 `AF3B38A6A3CB40052DC4D34D34BC2538EB529BFA6F45B290823887D3BBACD749`.
+- `SHA256SUMS.txt` lists exactly those eight payloads and was generated from the copied review-package bytes.
 - `.gitattributes` treats the complete 2.0.7r3 review package as binary.
 
 ## Identity and protocol
@@ -31,7 +36,8 @@
 - Static guards prove no dialog remote-controller `scrollIntoView`, host-scroller ownership, MutationObserver/timer/animation-frame correction, request/persistence, responsive television heuristic, private Emby focus API, new history/backbutton path, or matching/API branch.
 - Complete backend regression suite: success.
 - Clean sequential Release build: success with 131 baseline warnings and zero errors.
-- Strict OpenSpec validation and `git diff --check`: success.
+- dd-danmaku 1.48.1 deterministic generation, syntax checks, license/provenance checks, and all 39 timing/settings/adapter/remote-input tests: success. The asset is explicitly an unofficial self-use build with no upstream PR or merge plan.
+- Strict OpenSpec validation for the official-CORS, dd-danmaku, and 2.0.7r3 changes plus `git diff --check`: success.
 
 ## Deployment acceptance
 
