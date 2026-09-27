@@ -578,11 +578,11 @@ async function main() {
     // Fake DOM proves topology neutrality and lifecycle invariants only. Real CSS scroll chaining at short,
     // middle, top, and bottom states remains a required browser/device acceptance gate.
 
-    assert((source.match(/__embyDanmuSmartMenuV36/g) || []).length === 1 &&
+    assert((source.match(/__embyDanmuSmartMenuV37/g) || []).length === 1 && !source.includes("__embyDanmuSmartMenuV36") &&
         !source.includes("__embyDanmuSmartMenuV35") && !source.includes("__embyDanmuSmartMenuV34") && !source.includes("__embyDanmuSmartMenuV33") && !source.includes("__embyDanmuSmartMenuV32") && !source.includes("__embyDanmuSmartMenuV31") && !source.includes("__embyDanmuSmartMenuV30") && !source.includes("__embyDanmuSmartMenuV29") && !source.includes("CarHistoryProbe") &&
         !source.includes("CarBackChannelProbe") && !source.includes("CarCommandTraceProbe") &&
         !source.includes("CarCommandOwnerProbe") && !source.includes("__embyDanmuHistoryModeOverride"),
-        "the formal frontend flag must be V36 exactly once with V35 and every older or diagnostic marker excluded");
+        "the formal frontend flag must be V37 exactly once with V36 and every older or diagnostic marker excluded");
     assert(!source.includes("MAPPING_PROTOCOL_GENERATION") && source.includes("var MAPPING_PROTOCOL_VERSION = 22"),
         "the sparse-alignment UI must use the backend numeric V22 mapping protocol and server-authored plan generation");
     const compositeFailure = "复合季映射需要重新确认：Selected candidate evidence expired or belongs to another Season.";
@@ -4248,7 +4248,7 @@ async function main() {
         typeof hooks.remoteFocusableElements === "function" &&
         typeof hooks.spatialRemoteTarget === "function" &&
         typeof hooks.focusRemoteElement === "function",
-        "V36 must expose only the narrow deterministic remote-focus hooks used by regression fixtures");
+        "V37 must expose only the narrow deterministic remote-focus hooks used by regression fixtures");
 
     function remoteControl(tag, text, left, top, width, height) {
         const element = new FakeElement(tag);
@@ -4289,10 +4289,14 @@ async function main() {
     remoteDialog.body.append(remoteSearch, remoteRowOne, remoteRowTwo, remoteHidden, remoteDisabled);
     remoteDialog.footer.append(remoteBack, remoteSave);
     hooks.completeDialogSurface(remoteDialog);
-    assert(documentStub.activeElement === remoteSearch && remoteSearch.classList.contains("danmuTvFocused"),
-        "surface completion must prefer the first enabled body control and make remote focus visible");
+    assert(documentStub.activeElement === remoteSearch && !remoteSearch.classList.contains("danmuTvFocused") &&
+        !remoteDialog.overlay.classList.contains("danmuRemoteInput"),
+        "programmatic entry focus must not show a television ring before navigation input");
 
     let keyEvent = documentStub.dispatchKey("ArrowDown");
+    assert(remoteDialog.overlay.classList.contains("danmuRemoteInput") &&
+        remoteRadioOne.classList.contains("danmuTvFocused"),
+        "the first direction must enable the remote ring on its actual target");
     assert(documentStub.activeElement === remoteRadioOne && keyEvent.defaultPrevented &&
         keyEvent.immediatePropagationStopped && !remoteRadioOne.checked,
         "Down from an editable field must enter the nearest candidate without selecting it or reaching Emby");
@@ -4364,8 +4368,34 @@ async function main() {
     assert(documentStub.activeElement === remoteSave && keyEvent.defaultPrevented,
         "Shift+Tab at the first overlay control must wrap to the final eligible control");
     await remoteDialog.overlay.dispatch("pointerdown", { target: remoteSave, pointerType: "mouse" });
-    assert(!remoteSave.classList.contains("danmuTvFocused"),
+    assert(!remoteSave.classList.contains("danmuTvFocused") &&
+        !remoteDialog.overlay.classList.contains("danmuRemoteInput"),
         "pointer handoff must clear the remote-only marker without activating the control");
+
+    // Touch must not re-enable television rings via focusin, rerender, or child/parent focus.
+    for (const pointerType of ["touchstart", "pointerdown", "mousedown"]) {
+        documentStub.dispatchKey("Tab");
+        assert(remoteDialog.overlay.classList.contains("danmuRemoteInput"),
+            "native interior Tab must enable keyboard highlighting too");
+        await remoteDialog.overlay.dispatch(pointerType, { target: remoteSearch, pointerType: "touch" });
+        remoteSearch.focus();
+        hooks.completeDialogSurface(remoteDialog);
+        hooks.focusRemoteElement(remoteDialog, remoteSave, { reveal: false });
+        assert(!remoteDialog.remoteInputActive && !remoteDialog.remoteFocusedElement &&
+            !remoteDialog.overlay.classList.contains("danmuRemoteInput") &&
+            !remoteSave.classList.contains("danmuTvFocused"),
+            pointerType + " must keep automatic focus and rerenders in pointer mode");
+        documentStub.dispatchKey("ArrowRight");
+        assert(remoteDialog.overlay.classList.contains("danmuRemoteInput") &&
+            remoteSave.classList.contains("danmuTvFocused"),
+            "a direction at an edge must restore the ring even without moving focus");
+    }
+    await remoteDialog.overlay.dispatch("touchstart", { target: remoteSearch });
+    remoteSearch.focus();
+    documentStub.dispatchKey("Enter");
+    documentStub.dispatchKey(" ");
+    assert(!remoteDialog.remoteInputActive,
+        "touchscreen IME Enter/Space in a search field must not enable television highlighting");
 
     // Surface identity continuity restores a semantically equivalent field synchronously.
     remoteSearch.focus();
@@ -4378,6 +4408,8 @@ async function main() {
     hooks.completeDialogSurface(remoteDialog);
     assert(documentStub.activeElement === replacementSearch,
         "a same-surface rerender must restore an equivalent surviving search control");
+    assert(!remoteDialog.remoteInputActive && !replacementSearch.classList.contains("danmuTvFocused"),
+        "an asynchronous replacement must preserve touch modality");
 
     // Off-screen reveal writes only the Smart Match body and uses preventScroll focus.
     replacementButton.setRect({ left: 100, top: 550, width: 180, height: 44 });
@@ -4425,6 +4457,8 @@ async function main() {
     // Only the topmost connected dialog owns a direction.
     const lowerFocusedBefore = documentStub.activeElement;
     const topRemoteDialog = hooks.openDialog("topmost remote owner");
+    assert(topRemoteDialog.remoteInputActive === remoteDialog.remoteInputActive,
+        "nested dialogs must inherit the initiating parent's input mode");
     hooks.beginDialogSurface(topRemoteDialog);
     const topOne = remoteControl("button", "top one", 100, 100, 140, 44);
     const topTwo = remoteControl("button", "top two", 100, 200, 140, 44);
@@ -4433,6 +4467,10 @@ async function main() {
     documentStub.dispatchKey("ArrowDown");
     assert(documentStub.activeElement === topTwo && lowerFocusedBefore !== topTwo,
         "only the topmost connected overlay may consume and move focus");
+    await topRemoteDialog.overlay.dispatch("touchstart", { target: topTwo });
+    assert(!topRemoteDialog.remoteInputActive && !remoteDialog.remoteInputActive &&
+        !remoteDialog.overlay.classList.contains("danmuRemoteInput"),
+        "touch in a nested dialog must clear the parent's remote mode before returning");
     topRemoteDialog.forceClose();
     remoteDialog.forceClose();
     assert((documentStub.captureListeners.keydown || []).length === remoteListenerBaseline &&
@@ -4445,7 +4483,12 @@ async function main() {
         source.indexOf("function topmostCommandDialog"));
     assert(remoteStyleSource.includes("danmuTvFocused") && remoteStyleSource.includes(":focus-within") &&
         remoteStyleSource.includes(":focus-visible"),
-        "V36 styles must expose a high-contrast remote target and whole-row focus-within treatment");
+        "V37 styles must expose a high-contrast remote target and whole-row focus-within treatment");
+    const televisionRules = remoteStyleSource.split("\n").filter(line => line.includes("outline:3px solid #fff"));
+    assert(televisionRules.length >= 2 && televisionRules.every(line =>
+        line.slice(line.indexOf('"') + 1, line.indexOf("{")).split(",").every(selector =>
+            selector.startsWith(".danmuSmartOverlay.danmuRemoteInput "))),
+        "every television ring selector, including focus-visible and focus-within, must be input-mode gated");
     const remoteControllerSource = source.slice(source.indexOf("function remoteElementTag"),
         source.indexOf("function presentationAnchorToken"));
     assert(!remoteControllerSource.includes("scrollIntoView") && !remoteControllerSource.includes("MutationObserver") &&
@@ -4522,7 +4565,7 @@ async function main() {
         !source.includes("dialogHistory") && !source.includes("ignoredDialogHistoryPops") &&
         !commandOwnerSource.includes("stopPropagation") && !commandOwnerSource.includes("setTimeout") &&
         !commandOwnerSource.includes("backbutton"),
-        "formal V36 must retain one command owner and no dialog history, Smart backbutton, cancellation, or timer fallback");
+        "formal V37 must retain one command owner and no dialog history, Smart backbutton, cancellation, or timer fallback");
     const activationHelperSource = source.slice(source.indexOf("function armParentNavigationTrigger"),
         source.indexOf("function resetSecondaryViewport"));
     assert(activationHelperSource.includes('trigger.addEventListener("pointerdown"') &&

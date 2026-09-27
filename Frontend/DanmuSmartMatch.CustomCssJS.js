@@ -5,8 +5,8 @@
 (function () {
     "use strict";
 
-    // V36 refreshes the 2.0.7r3 television focus closure while retaining V22.
-    var INSTALL_FLAG = "__embyDanmuSmartMenuV36";
+    // V37 separates touch focus from television navigation while retaining V22.
+    var INSTALL_FLAG = "__embyDanmuSmartMenuV37";
     var MAPPING_PROTOCOL_VERSION = 22;
     var DEFAULT_ZERO_OFFSET = "DefaultZeroOffset";
     var EXPLICIT_ANCHOR = "ExplicitAnchor";
@@ -401,8 +401,9 @@
             ".danmuSmartFooter{display:flex;align-items:center;justify-content:flex-end;gap:.7rem;padding:.9rem 1.2rem;border-top:1px solid rgba(255,255,255,.14)}",
             ".danmuSmartButton{background:#555;padding:.65rem 1rem;font-size:.95rem}",
             ".danmuSmartButton.primary{background:#00a4dc}.danmuSmartButton.danger{background:#c62828}.danmuSmartButton:disabled{opacity:.5;cursor:default}",
-            ".danmuSmartOverlay .danmuTvFocused,.danmuSmartOverlay .danmuCandidate:focus-visible,.danmuSmartOverlay button:focus-visible,.danmuSmartOverlay input:focus-visible,.danmuSmartOverlay summary:focus-visible,.danmuSmartOverlay a:focus-visible{outline:3px solid #fff;outline-offset:3px;box-shadow:0 0 0 6px #00a4dc}",
-            ".danmuSmartOverlay .danmuCandidate:focus-within,.danmuSmartOverlay .danmuVirtualSeason:focus-within,.danmuSmartOverlay .danmuSeasonSummary:focus-within,.danmuSmartOverlay .danmuSmartSearch:focus-within,.danmuSmartOverlay .danmuForceRefresh:focus-within{outline:3px solid #fff;outline-offset:3px;box-shadow:0 0 0 6px rgba(0,164,220,.9)}",
+            ".danmuSmartOverlay.danmuRemoteInput .danmuTvFocused{outline:3px solid #fff;outline-offset:3px;box-shadow:0 0 0 6px #00a4dc}",
+            ".danmuSmartOverlay.danmuRemoteInput .danmuCandidate:focus-visible,.danmuSmartOverlay.danmuRemoteInput button:focus-visible,.danmuSmartOverlay.danmuRemoteInput input:focus-visible,.danmuSmartOverlay.danmuRemoteInput summary:focus-visible,.danmuSmartOverlay.danmuRemoteInput a:focus-visible{outline:3px solid #fff;outline-offset:3px;box-shadow:0 0 0 6px #00a4dc}",
+            ".danmuSmartOverlay.danmuRemoteInput .danmuCandidate:focus-within,.danmuSmartOverlay.danmuRemoteInput .danmuVirtualSeason:focus-within,.danmuSmartOverlay.danmuRemoteInput .danmuSeasonSummary:focus-within,.danmuSmartOverlay.danmuRemoteInput .danmuSmartSearch:focus-within,.danmuSmartOverlay.danmuRemoteInput .danmuForceRefresh:focus-within{outline:3px solid #fff;outline-offset:3px;box-shadow:0 0 0 6px rgba(0,164,220,.9)}",
             ".danmuForceRefresh{display:flex;align-items:center;gap:.45rem;margin-right:auto;cursor:pointer;font-size:.9rem}.danmuForceRefresh.locked{opacity:.55;cursor:default}",
             ".danmuSmartSearch{display:flex;gap:.6rem;margin-bottom:1rem}.danmuSmartSearch input{flex:1;min-width:0;padding:.65rem .75rem;border:1px solid #777;border-radius:.35rem;background:#111;color:#fff;font-size:1rem}",
             ".danmuCandidate{display:flex;gap:.7rem;padding:.8rem;border:1px solid rgba(255,255,255,.16);border-radius:.4rem;margin:.55rem 0;cursor:pointer;background:rgba(255,255,255,.035)}",
@@ -474,6 +475,7 @@
 
     function openDialog(title) {
         ensureStyles();
+        var parentDialog = topmostCommandDialog();
         var overlay = document.createElement("div");
         overlay.className = "danmuSmartOverlay";
         var card = document.createElement("div");
@@ -575,6 +577,7 @@
         }
         activeDialogs.push(dialog);
         installDialogRemoteController(dialog, isTopmost);
+        setDialogRemoteInput(dialog, !!(parentDialog && parentDialog.remoteInputActive));
         focusRemoteElement(dialog, close, { reveal: false });
         dialog.disposeFromHostNavigation = function () { return dispose(); };
         close.addEventListener("click", function () { dialog.close(); });
@@ -2319,14 +2322,26 @@
             }
         }
         if (document.activeElement !== element) return false;
-        dialog.remoteInputActive = true;
-        dialog.remoteFocusedElement = element;
-        if (element.classList && typeof element.classList.add === "function") {
-            element.classList.add("danmuTvFocused");
-        }
+        updateDialogRemoteMarker(dialog, element);
         if (options.alignBodyTop && dialog.body) dialog.body.scrollTop = 0;
         else if (options.reveal !== false) revealRemoteElement(dialog, element);
         return true;
+    }
+
+    function updateDialogRemoteMarker(dialog, element) {
+        clearDialogRemoteMarker(dialog);
+        if (!dialog.remoteInputActive || !remoteElementIsFocusable(dialog, element)) return;
+        dialog.remoteFocusedElement = element;
+        if (element.classList) element.classList.add("danmuTvFocused");
+    }
+
+    function setDialogRemoteInput(dialog, active) {
+        dialog.remoteInputActive = active;
+        if (dialog.overlay && dialog.overlay.classList) {
+            if (active) dialog.overlay.classList.add("danmuRemoteInput");
+            else dialog.overlay.classList.remove("danmuRemoteInput");
+        }
+        updateDialogRemoteMarker(dialog, document.activeElement);
     }
 
     function dialogRemoteEntryTarget(dialog, elements) {
@@ -2458,9 +2473,15 @@
         if (!dialog || !dialog.overlay || !dialog.overlay.isConnected || !isTopmost() ||
             !event || event.isComposing) return;
         var remoteKey = normalizeDialogRemoteKey(event);
-        if (!remoteKey) return;
+        // Space stays native (or with the candidate proxy), but is keyboard input.
+        if (!remoteKey && event.key !== " " && event.code !== "Space") return;
         var active = document.activeElement;
         if ((remoteKey === "left" || remoteKey === "right") && remoteEditableElement(active)) return;
+        // A phone IME's Enter submits search; it is not a switch to remote mode.
+        if ((remoteKey && remoteKey !== "confirm") || !remoteEditableElement(active)) {
+            setDialogRemoteInput(dialog, true);
+        }
+        if (!remoteKey) return;
         var elements = remoteFocusableElements(dialog);
         if (remoteKey === "tab") {
             if (!elements.length) return;
@@ -2521,15 +2542,13 @@
         var focusListener = function (event) {
             if (!dialog.remoteInputActive || !isTopmost() ||
                 !remoteElementIsFocusable(dialog, event && event.target)) return;
-            clearDialogRemoteMarker(dialog);
-            dialog.remoteFocusedElement = event.target;
-            if (event.target.classList && typeof event.target.classList.add === "function") {
-                event.target.classList.add("danmuTvFocused");
-            }
+            updateDialogRemoteMarker(dialog, event.target);
         };
         var pointerListener = function () {
-            dialog.remoteInputActive = false;
-            clearDialogRemoteMarker(dialog);
+            // A touch in a nested dialog also determines the mode on parent return.
+            activeDialogs.forEach(function (activeDialog) {
+                setDialogRemoteInput(activeDialog, false);
+            });
         };
         dialog.remoteKeyListener = keyListener;
         dialog.remoteEditableKeyListener = editableKeyListener;
@@ -2563,9 +2582,8 @@
             dialog.overlay.removeEventListener("touchstart", dialog.remotePointerListener, true);
             dialog.remotePointerListener = null;
         }
-        clearDialogRemoteMarker(dialog);
+        setDialogRemoteInput(dialog, false);
         dialog.pendingRemoteFocusIdentity = "";
-        dialog.remoteInputActive = false;
     }
 
     function presentationAnchorToken(dialog, kind, identity) {

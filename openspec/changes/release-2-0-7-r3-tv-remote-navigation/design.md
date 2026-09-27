@@ -27,6 +27,12 @@ The live Synology target runs Emby 4.9.5.0. Its enabled Emby.CustomCssJS configu
 
 ## Decisions
 
+### V37 follow-up: input modality owns television styling
+
+The V36 focus helper unconditionally enabled remote mode on every programmatic focus, while ungated focus-within/focus-visible selectors painted touch-focused controls. V37 keeps deterministic focus placement but does not infer navigation input from it. A dialog starts without television rings, inherits a parent dialog's modality when nested, and enables `.danmuRemoteInput` only from navigation keys (including interior Tab and an edge direction). Pointer/mouse/touch down removes both the overlay mode and target marker. Text-input Enter/Space preserves touch modality for phone IMEs. Rerenders and parent-return focus preserve mode. All high-contrast selectors require the overlay mode; the explicit target rule is separate from focus-visible so older WebViews retain the fallback. Native browser focus and click behavior remain unchanged. Initial television highlighting begins with the first navigation input; no UA, viewport, device-capability heuristic, or global input listener is added.
+
+This frontend-only follow-up advances the install marker to V37, retains V22 and the installed DLL, and updates only the named Smart Match configuration content. Historical V36 packaging and acceptance records below remain unchanged; this follow-up is committed to develop without retagging or replacing release assets.
+
 ### 1. Give each dialog one topmost-gated remote controller
 
 `openDialog` creates one transient remote controller owned by that dialog. It installs a document capture `keydown` listener so direction input can recover even if Emby temporarily moved active focus outside the overlay, and an overlay capture pointer listener that clears the remote-only marker when input mode changes. The existing `isTopmost` check gates all work; a lower dialog and the Emby page are never queried or mutated after that gate fails. Disposal removes both listeners, clears the marker/reference, and remains idempotent.

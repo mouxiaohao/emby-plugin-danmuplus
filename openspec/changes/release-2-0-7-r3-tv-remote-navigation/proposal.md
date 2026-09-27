@@ -4,6 +4,8 @@ The injected Smart Match dialog is usable with pointer and touch input, but its 
 
 ## What Changes
 
+- V37 touch follow-up (2026-09-27): separate programmatic focus from navigation input. Touch/mouse clears all television rings, including ancestor focus-within; rerenders and parent return preserve modality. Direction/Tab restores rings, while touchscreen IME submission retains pointer mode. Publish this frontend-only correction to develop without replacing the existing release assets.
+
 - Add dialog-local television remote navigation for the four directional keys and the confirm/OK key across Smart Match header, body, full-width candidate selection rows, search fields, disclosure controls, and footer actions.
 - Give every newly rendered dialog surface a deterministic initial or continuity focus target, keep the active target visible inside the dialog body, contain focus within the topmost connected Smart Match overlay, and align the dialog body to its top when an upward move reaches the header close control.
 - Add an unmistakable high-contrast focus indicator without changing pointer hover, touch selection, disabled-control behavior, or native text editing.
