@@ -30,3 +30,7 @@ The root OpenSpec context still mentions global descending-score order. Existing
 - Independently resolved all twelve S1 plan ItemIds through Emby's item API and compared them with Emby's displayed Episode list: all twelve representatives matched, with 1080P/720P media sources belonging to those same logical Episodes.
 
 Live checks use preview endpoints, not a forced download or metadata rewrite. Actual playback of both video versions using existing server XML was user-confirmed before this change; this deployment does not claim new physical-device playback acceptance.
+
+## GitHub delivery
+
+Implementation commit `3e2df52` was pushed to `develop`. PR #20 targets `main`, includes the earlier V37 touch-focus correction, and was attached to the task. The PR is left open; no main merge or existing release-asset replacement was performed.

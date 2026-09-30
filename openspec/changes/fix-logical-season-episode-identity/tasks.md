@@ -12,4 +12,4 @@
 
 ## 3. GitHub delivery
 
-- [ ] 3.1 Commit the scoped patch and validation record, push develop, and create/attach a PR to main without merging it.
+- [x] 3.1 Commit the scoped patch and validation record, push develop, and create/attach a PR to main without merging it.
