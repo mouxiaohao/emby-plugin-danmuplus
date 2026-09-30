@@ -10,7 +10,7 @@ While a Smart Match overlay is connected, its topmost dialog SHALL keep keyboard
 #### Scenario: Smart Match opens without an existing dialog focus
 - **WHEN** Smart Match opens while focus belongs to the Emby page
 - **THEN** focus SHALL move to a deterministic enabled control in the new overlay
-- **AND** the focused control SHALL have a visible television focus indicator
+- **AND** the focused control SHALL have a visible television focus indicator once keyboard/remote navigation is active; programmatic entry alone MUST NOT enable that indicator for touch users
 
 #### Scenario: A nested Smart Match dialog is present
 - **WHEN** a directional or confirm key is pressed while two Smart Match overlays are connected
@@ -108,7 +108,7 @@ Before a dialog surface is replaced, Smart Match SHALL capture a transient seman
 - **AND** the next directional input after an enabled action appears SHALL recover to that action
 
 ### Requirement: Television focus is visually unambiguous
-The focused Smart Match control and the containing candidate or option row SHALL expose a high-contrast outline or focus-within treatment distinguishable from hover, checked, matched, warning, and disabled states. The indication SHALL remain visible at television viewing distance and MUST NOT alter layout geometry or hide existing state colors.
+In keyboard/remote navigation mode, the focused Smart Match control and the containing candidate or option row SHALL expose a high-contrast outline or focus-within treatment distinguishable from hover, checked, matched, warning, and disabled states. Every television outline selector SHALL require that mode. The indication SHALL remain visible at television viewing distance and MUST NOT alter layout geometry or hide existing state colors.
 
 #### Scenario: A candidate row has remote focus
 - **WHEN** D-pad navigation focuses a candidate selection proxy
@@ -122,7 +122,17 @@ The focused Smart Match control and the containing candidate or option row SHALL
 #### Scenario: Input mode changes to pointer
 - **WHEN** pointer or touch input occurs after remote navigation
 - **THEN** the remote-only focus marker SHALL be cleared
+- **AND** all television focus-within and focus-visible rings SHALL be disabled until navigation resumes, including after rerender or parent-return focus restoration
 - **AND** ordinary browser focus-visible and hover behavior SHALL remain available
+
+#### Scenario: Touchscreen keyboard submits search
+- **WHEN** touch focuses a search field and the phone IME sends Enter or Space
+- **THEN** native search/editing behavior SHALL remain available without enabling television highlighting
+
+#### Scenario: Keyboard navigation resumes after touch
+- **WHEN** a direction or Tab is pressed after touch input
+- **THEN** keyboard/remote highlighting SHALL return even for interior native Tab or a direction at an edge
+- **AND** nested dialogs SHALL inherit their parent's current modality without changing activation semantics
 
 ### Requirement: Remote support preserves dialog and matching boundaries
 The remote-navigation layer SHALL reuse the existing close, Escape, Android command-owned Back, host-pop cleanup, protected-state, parent/child navigation, cancellation, retry, binding, download, and metadata workflows. It MUST NOT add dialog history, a Smart Match `backbutton` listener, host-scroller ownership, private Emby focus-manager dependencies, responsive-width television detection, server requests, stored focus state, or mapping protocol changes. Closing or disposing a dialog SHALL remove its per-dialog remote listeners and transient focus state exactly once.
@@ -169,4 +179,4 @@ When a user explicitly chooses Rematch for an already mapped temporary Season in
 - **WHEN** the 2.0.7r3 package is compared with 2.0.7r2
 - **THEN** mapping protocol V22, the 2.0.7r2 backend behavior, saved manual bindings, provider behavior, and unattended matching policies SHALL remain compatible
 - **AND** only explicitly initiated temporary-Season rematching SHALL prune later browser-draft selections before the existing preview endpoint is called
-- **AND** the final V36 installation marker SHALL prevent an already loaded early V35 closure from suppressing the follow-up frontend
+- **AND** the V37 touch-fix installation marker SHALL be distinct from V36 and earlier installation markers; clients SHALL reload to load only the updated closure

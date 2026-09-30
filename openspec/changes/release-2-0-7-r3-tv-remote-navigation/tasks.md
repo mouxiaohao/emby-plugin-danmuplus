@@ -1,3 +1,13 @@
+## V37 touch follow-up (2026-09-27)
+
+- [x] Reproduce the unconditional programmatic remote-mode activation and ungated television CSS; add failing regression assertions.
+- [x] Gate every television ring by input modality; preserve mode through rerender/parent focus, IME Enter/Space, nested dialogs, and keyboard resumption.
+- [x] Run syntax, full frontend/backend regression, Release build, strict OpenSpec, and actual browser computed-style checks; retain V22 and the existing release/DLL.
+- [x] Back up active Synology files, atomically replace only named Smart Match content, restart and verify health, source/readback identity, unrelated bytes, and deployed browser behavior.
+- [x] Review scope/privacy and push the correction to GitHub develop without modifying main or release assets.
+
+Evidence: `Frontend/SMART-MATCH-TOUCH-VERIFICATION.md`. Physical Android devices remain outside the browser/event validation claim.
+
 ## 1. Baseline and failing contracts
 
 - [x] 1.1 Record the isolated 2.0.7r3 worktree branch/base/status, the 2.0.7r2 V34/V22 frontend hash and Arrow-handler absence, Emby 4.9.5.0 health, active DLL/configuration hashes, and the enabled CustomCssJS component inventory without recording credentials or component content.

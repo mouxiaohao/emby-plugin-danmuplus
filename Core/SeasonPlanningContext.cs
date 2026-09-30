@@ -12,7 +12,8 @@ namespace Emby.Plugin.Danmu.Core
 {
     /// <summary>
     /// Authoritative r5 snapshot for one selected Season. InventoryLocalEpisodes
-    /// contains every valid ItemId observed from targetSeason.GetEpisodes(); the
+    /// contains every logical representative observed from the grouped
+    /// targetSeason.GetEpisodes(query) inventory; the
     /// public planning lists contain only exact target-season matches.
     /// </summary>
     public sealed class SeasonPlanningContext

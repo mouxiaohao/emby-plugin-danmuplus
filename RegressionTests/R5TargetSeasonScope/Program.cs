@@ -176,7 +176,8 @@ namespace Emby.Plugin.Danmu.R5TargetSeasonScopeRegression
             var root = FindRepositoryRoot();
             var coordinator = System.IO.File.ReadAllText(System.IO.Path.Combine(root,
                 "Core", "SeasonTargetPlanningCoordinator.cs"));
-            Assert(coordinator.Contains("var result = target.GetEpisodes();", StringComparison.Ordinal) &&
+            Assert(coordinator.Contains("var result = target.GetEpisodes(new InternalItemsQuery", StringComparison.Ordinal) &&
+                   coordinator.Contains("GroupByPresentationUniqueKey = true", StringComparison.Ordinal) &&
                    coordinator.Contains("result == null || result.Items == null", StringComparison.Ordinal) &&
                    coordinator.Contains("error = \"target-season-inventory-unavailable\";", StringComparison.Ordinal) &&
                    coordinator.Contains("catch (Exception)", StringComparison.Ordinal),

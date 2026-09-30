@@ -974,6 +974,8 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                     ParentIds = new[] { series.InternalId },
                     IncludeItemTypes = new[] { "Season" },
                     Recursive = false,
+                    // Multiple physical Season folders can be one Emby Season.
+                    GroupByPresentationUniqueKey = true,
                 })
                     .OfType<Season>()
                     .ToList();
@@ -989,6 +991,7 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                         {
                             IncludeItemTypes = new[] { "Season" },
                             Recursive = false,
+                            GroupByPresentationUniqueKey = true,
                         })
                         .OfType<Season>()
                         .ToList();
@@ -2723,6 +2726,7 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                     ParentIds = new[] { authoritativeParentSeries.InternalId },
                     IncludeItemTypes = new[] { "Season" },
                     Recursive = false,
+                    GroupByPresentationUniqueKey = true,
                 }).OfType<Season>();
                 season = SelectUniqueParentTitleRematchSeason(candidates, request);
             }

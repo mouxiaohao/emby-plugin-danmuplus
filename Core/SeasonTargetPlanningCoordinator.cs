@@ -9,7 +9,8 @@ namespace Emby.Plugin.Danmu.Core
 {
     /// <summary>
     /// The single r5 boundary for every batch Season operation. It reads only
-    /// target.GetEpisodes(); sibling Season inventories cannot claim, lend, or
+    /// target.GetEpisodes(query) with Emby's logical presentation grouping;
+    /// sibling Season inventories cannot claim, lend, or
     /// supplement an Episode for the selected target.
     /// </summary>
     public static class SeasonTargetPlanningCoordinator
@@ -41,7 +42,14 @@ namespace Emby.Plugin.Danmu.Core
 
             try
             {
-                var result = target.GetEpisodes();
+                // Use the same logical Episode identity as Emby's display/playback
+                // inventory. Physical versions must not consume extra matching
+                // slots or produce one download per file. Emby chooses the item
+                // representative; keep its ordering and existing XML path policy.
+                var result = target.GetEpisodes(new InternalItemsQuery
+                {
+                    GroupByPresentationUniqueKey = true,
+                });
                 if (result == null || result.Items == null)
                 {
                     error = "target-season-inventory-unavailable";
