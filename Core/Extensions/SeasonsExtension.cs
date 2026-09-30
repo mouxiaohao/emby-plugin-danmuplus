@@ -12,7 +12,10 @@ namespace Emby.Plugin.Danmu.Core.Extensions
         {
             InternalItemsQuery query = new InternalItemsQuery(user)
             {
-                DtoOptions = options
+                DtoOptions = options,
+                IncludeItemTypes = new[] { "Season" },
+                Recursive = false,
+                GroupByPresentationUniqueKey = true,
             };
 
             BaseItem[] baseItems = series.GetItemList(query);

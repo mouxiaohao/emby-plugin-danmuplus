@@ -36,6 +36,12 @@ namespace Emby.Plugin.Danmu.RegressionTests
     {
         private static int Main(string[] args)
         {
+            if (args != null && args.Contains("--logical-inventory", StringComparer.Ordinal))
+            {
+                LogicalLibraryInventoryTests.Run();
+                return 0;
+            }
+
             if (args != null && args.Contains("--manual-keyword-core", StringComparer.Ordinal))
             {
                 PreservesManualKeywordEvidenceAndRouting();
@@ -96,6 +102,7 @@ namespace Emby.Plugin.Danmu.RegressionTests
             }
 
             MapsAnimeSeason();
+            LogicalLibraryInventoryTests.Run();
             MapsLiveActionSeasonAndCleansTitle();
             UsesIdentifierFallbackOrder();
             OmitsMalformedRecords();
