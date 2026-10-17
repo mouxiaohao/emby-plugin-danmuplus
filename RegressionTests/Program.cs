@@ -42,6 +42,13 @@ namespace Emby.Plugin.Danmu.RegressionTests
                 return 0;
             }
 
+            if (args != null && args.Contains("--season-number-fallback", StringComparer.Ordinal))
+            {
+                SeasonNumberFallbackTests.Run();
+                Console.WriteLine("Season-number fallback regression checks passed.");
+                return 0;
+            }
+
             if (args != null && args.Contains("--selected-episode-download", StringComparer.Ordinal))
             {
                 SelectedEpisodeDownloadTests.Run();
@@ -116,6 +123,7 @@ namespace Emby.Plugin.Danmu.RegressionTests
             BoundedSearchFoundationTests.Run();
             BilibiliSearchTests.Run();
             TmdbAliasTests.Run();
+            SeasonNumberFallbackTests.Run();
             CancelsEnglishAndJapaneseAliasRoundsFailClosed();
             SevenDayReplayTests.Run();
             SelectedEpisodeDownloadTests.Run();

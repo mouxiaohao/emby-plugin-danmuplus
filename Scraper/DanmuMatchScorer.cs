@@ -387,7 +387,7 @@ namespace Emby.Plugin.Danmu.Scraper
             // Execution completeness is classified independently by the search
             // result; this pure selector only evaluates the canonical evidence.
             var available = (candidates ?? new List<DanmuMatchCandidate>())
-                .Where(x => x != null)
+                .Where(x => x != null && !x.ExcludeFromAutomaticSelection)
                 .ToList();
             foreach (var candidate in available)
             {
