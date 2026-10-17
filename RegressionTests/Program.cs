@@ -42,6 +42,13 @@ namespace Emby.Plugin.Danmu.RegressionTests
                 return 0;
             }
 
+            if (args != null && args.Contains("--selected-episode-download", StringComparer.Ordinal))
+            {
+                SelectedEpisodeDownloadTests.Run();
+                Console.WriteLine("Selected episode download regression checks passed.");
+                return 0;
+            }
+
             if (args != null && args.Contains("--manual-keyword-core", StringComparer.Ordinal))
             {
                 PreservesManualKeywordEvidenceAndRouting();
@@ -111,6 +118,7 @@ namespace Emby.Plugin.Danmu.RegressionTests
             TmdbAliasTests.Run();
             CancelsEnglishAndJapaneseAliasRoundsFailClosed();
             SevenDayReplayTests.Run();
+            SelectedEpisodeDownloadTests.Run();
             IqiyiSourceMetadataTests.Run();
             OrdersAndSelectsCrossProviderTies();
             PreservesSameSiteHighestScoreTieAmbiguity();
@@ -1406,8 +1414,8 @@ namespace Emby.Plugin.Danmu.RegressionTests
                     controller.Contains("CommitSeasonDisplayMirrorAfterTerminalAsync") &&
                     controller.Contains("CanPersistCompleteSeasonBinding") &&
                    controller.Contains("ErrorCode = \"mapping_required\"") &&
-                   controller.Contains("ErrorCode = \"partial_confirmation_required\""),
-                "mapped Season downloads must write each successful Episode, persist a Season binding only for a complete single-source plan, and reject positional or unconfirmed partial downloads");
+                   !controller.Contains("ErrorCode = \"partial_confirmation_required\""),
+                "mapped Season downloads must write each selected Episode without a second partial-download gate and mirror only complete single-source plans");
             Assert(library.Contains("persisted = true") &&
                     !library.Contains("SaveAutomaticSeasonProviderId(") &&
                     library.Contains("SeasonDisplayMirrorPolicy.CanCommit") &&

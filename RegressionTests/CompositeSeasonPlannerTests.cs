@@ -1507,11 +1507,11 @@ namespace Emby.Plugin.Danmu.RegressionTests
                    controller.Contains("DanmuExcludedLocalEpisodeItemIdsJson.TryParse"),
                 "the scalar GET exclusion contract must be parsed before preview/download dispatch");
             Assert(controller.Contains("BuildCompositePlanAsync(latest, request.ParsedCompositeSelections, false,") &&
-                    controller.Contains("BuildCompositePlanAsync(season, request.ParsedCompositeSelections, false,") &&
+                    controller.Contains("SeasonPreviewPlans.TryGetValue(") &&
                     controller.Contains("MergeEpisodeExclusions") &&
                     controller.Contains("TryBuildOwnedPlanningContext") &&
                     !controller.Contains("CompositeSeasonTargetOwnership.Resolve(inventories)"),
-                "composite preview and tracked download must rebuild from the same parsed exclusions and target-season scope");
+                "composite preview must establish the exclusion-aware scope and tracked download must use its captured mapping");
             Assert(controller.Contains("TryCreatePlan(local, mappings, null,\n                    effectiveExclusions, durableCompositeMarker") &&
                     controller.Contains("TryCreatePlan(local, mappings, replacementMappings,\n                    effectiveExclusions, durableCompositeMarker"),
                 "the controller must validate exclusions before direct evidence and then rebuild confirmed replacements");
@@ -1776,16 +1776,17 @@ namespace Emby.Plugin.Danmu.RegressionTests
                 "private async Task<DanmuSeasonMatchResult> GetCompositeSeasonPlanPreview",
                 "private async Task PopulateCompositePreviewIfRequired");
             var download = SliceSource(controller,
-                "private async Task<DanmuDownloadTaskResult> StartTrackedCompositeSeasonDownload",
+                "private Task<DanmuDownloadTaskResult> StartTrackedCompositeSeasonDownload",
                 "private async Task<DanmuDownloadTaskResult> StartTrackedSingleEpisodeDownload");
             var builder = SliceSource(controller,
                 "private async Task<CompositePlanBuild> BuildCompositePlanAsync",
-                "private async Task<DanmuDownloadTaskResult> StartTrackedCompositeSeasonDownload");
+                "private Task<DanmuDownloadTaskResult> StartTrackedCompositeSeasonDownload");
 
             Assert(preview.Contains("request.ParsedCompositeSelections, false,") &&
                     preview.Contains("effectiveExclusions") &&
-                    download.Contains("request.ParsedCompositeSelections, false,\n                request.ParsedExcludedLocalEpisodeItemIds"),
-                "preview and download must pass the identical exclusion and selection collections into the authoritative builder");
+                    download.Contains("SeasonPreviewPlans.TryGetValue(") &&
+                    !download.Contains("BuildCompositePlanAsync("),
+                "preview must validate exclusions and download must execute the resulting selected snapshot");
             Assert(builder.Contains("TryCreatePlan(local, mappings, null,\n                    effectiveExclusions, durableCompositeMarker") &&
                     builder.Contains("TryCreatePlan(local, mappings, replacementMappings,\n                    effectiveExclusions, durableCompositeMarker") &&
                     builder.Contains("TryBuildOwnedPlanningContext"),

@@ -529,6 +529,29 @@ function verifyDeterministicContainmentTopology(entryType, hostKind, origin, bod
 }
 
 async function main() {
+    const confirmedMappingWithChangedMetadata = {
+        SeasonNumber: 1,
+        PlanGeneration: 3,
+        PlanFingerprint: "retained-user-mapping",
+        ParentTitleRematchAvailable: true,
+        CompositePlan: {
+            OrderedEpisodes: [{ ItemId: "chosen-special", ParentSeasonNumber: null }],
+            Mappings: [{ LocalEpisodeItemId: "chosen-special", SourceEpisodeId: "chosen-oad" }],
+            UnmatchedRuns: []
+        },
+        CompositeSelections: []
+    };
+    assert(hooks.hasCompositePlan(confirmedMappingWithChangedMetadata) &&
+        hooks.compositeHasDownloadableMappings(confirmedMappingWithChangedMetadata, {}),
+        "retained confirmed mappings must remain downloadable despite missing parent metadata or stale matching intent");
+    const selectedDownloadDialog = {
+        forceRefresh: false, executionForceRefresh: null, forceRefreshLocked: false,
+        footer: new FakeElement("div")
+    };
+    hooks.appendPreDownloadFooter(selectedDownloadDialog);
+    assert(selectedDownloadDialog.footer.querySelectorAll(".danmuForceRefresh").length === 1 &&
+        hooks.snapshotForceRefresh(selectedDownloadDialog) === false,
+        "selected Episode workflows must retain the explicit force-refresh choice and normal duplicate policy");
     const styleSource = source.slice(source.indexOf("function ensureStyles"),
         source.indexOf("function topmostCommandDialog"));
     const overlayRule = generatedRule(styleSource, ".danmuSmartOverlay");

@@ -1576,14 +1576,6 @@ namespace Emby.Plugin.Danmu
                         //         continue;
                         //     }
                         //
-                        //     // 特典或extras影片不处理（动画经常会放在季文件夹下）
-                        //     if (episode.ParentIndexNumber == null || episode.ParentIndexNumber == 0)
-                        //     {
-                        //         _logger.LogInformation("[{0}]缺少季号，可能是特典或extras影片，忽略处理. [{1}]{2}", scraper.Name,
-                        //             season.Name, fileName);
-                        //         continue;
-                        //     }
-                        //
                         //     var epId = media.Episodes[indexNumber - 1].Id;
                         //     var commentId = media.Episodes[indexNumber - 1].CommentId;
                         //
@@ -1607,13 +1599,6 @@ namespace Emby.Plugin.Danmu
                 _logger.LogInformation("[{0}]缺少集号或集号超过弹幕数，忽略处理. [{1}]{2}, indexNumber={3}, mediaCount={4}", scraper.Name, episode.Name, fileName, indexNumber, media.Episodes.Count);
                 return false;
             }
-            // 特典或extras影片不处理（动画经常会放在季文件夹下）
-            if (episode.ParentIndexNumber == null || episode.ParentIndexNumber == 0)
-            {
-                _logger.LogInformation("[{0}]缺少季号，可能是特典或extras影片，忽略处理. [{1}]{2}", scraper.Name, episode.Name, fileName);
-                return false;
-            }
-
             var epId = media.Episodes[indexNumber - 1].Id;
             var commentId = media.Episodes[indexNumber - 1].CommentId;
 
@@ -1652,11 +1637,8 @@ namespace Emby.Plugin.Danmu
                     $"缺少集号或集号超过弹幕数（本地第 {indexNumber} 集，来源共 {media.Episodes.Count} 集）");
             }
 
-            if (episode.ParentIndexNumber == null || episode.ParentIndexNumber == 0)
-            {
-                throw new DanmuDownloadErrorException("缺少季号，可能是特典或 extras 影片");
-            }
-
+            // Season ownership belongs to matching. Once a source Episode has
+            // been selected, S00 and incomplete local metadata do not veto it.
             if (string.IsNullOrWhiteSpace(mediaEpisode.CommentId))
             {
                 throw new DanmuDownloadErrorException("弹幕来源没有返回该集的弹幕 ID");
@@ -2273,6 +2255,14 @@ namespace Emby.Plugin.Danmu
             {
                 return null;
             }
+
+            // This is automatic positional inference from a Season binding,
+            // not execution of a user-confirmed Episode mapping. S00 is a real
+            // Season; only Episodes owned by this target may be inferred here.
+            if (!season.IndexNumber.HasValue || episode.ParentIndexNumber != season.IndexNumber)
+            {
+                return null;
+            }
             
             var providerVal = season.GetDanmuProviderId(scraper.ProviderId);
             if (string.IsNullOrEmpty(providerVal))
@@ -2315,14 +2305,6 @@ namespace Emby.Plugin.Danmu
             if (episodeIndexNumber < 1 || episodeIndexNumber>media.Episodes.Count)
             {
                 _logger.LogInformation("[{0}]缺少集号或集号超过弹幕数，忽略处理. [{1}]{2}, indexNumber={3}, mediaCount={4}", scraper.Name, season.Name, fileName, episodeIndexNumber, media.Episodes.Count);
-                return null;
-            }
-            
-            // 特典或extras影片不处理（动画经常会放在季文件夹下）
-            if (episode.ParentIndexNumber == null || episode.ParentIndexNumber == 0)
-            {
-                _logger.LogInformation("[{0}]缺少季号，可能是特典或extras影片，忽略处理. [{1}]{2}", scraper.Name,
-                    season.Name, fileName);
                 return null;
             }
             
