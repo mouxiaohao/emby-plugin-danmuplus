@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -11,6 +12,7 @@ using Emby.Plugin.Danmu.Scraper.Entity;
 using Emby.Plugin.Danmu.Scraper.Tmdb;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.Movies;
+using MediaBrowser.Controller.Entities.TV;
 using MediaBrowser.Model.Logging;
 
 namespace Emby.Plugin.Danmu.Scraper
@@ -118,7 +120,7 @@ namespace Emby.Plugin.Danmu.Scraper
                 var effectiveSeasonName = continuation == null
                     ? seasonName
                     : "Season " + continuation.ExpectedLogicalSeasonNumber;
-                return await SearchSeasonCoreAsync(
+                var result = await SearchSeasonCoreAsync(
                     effectiveScrapers,
                     seriesName,
                     effectiveSeasonName,
@@ -133,11 +135,100 @@ namespace Emby.Plugin.Danmu.Scraper
                     contextItem,
                     manualKeywordDiscovery,
                     continuation?.ExpectedLogicalSeasonNumber).ConfigureAwait(false);
+
+                // Only first-source named discovery may fall back. Logical searches
+                // already carry their own ordinal and must never reset to the
+                // physical Emby Season number while consuming a composite Season.
+                if (continuation != null || !CanTrySeasonNumberFallback(result, contextItem,
+                        seriesName, seasonName, keywordOverride, manualKeywordDiscovery))
+                {
+                    return result;
+                }
+
+                var ordinal = ((Season)contextItem).IndexNumber.Value;
+                logger?.Info("[SeasonNumberFallback] retry-started: season={0}, ordinal={1}",
+                    contextItem.Id, ordinal);
+                var fallback = await SearchSeasonCoreAsync(
+                    effectiveScrapers, seriesName,
+                    "Season " + ordinal.ToString(CultureInfo.InvariantCulture),
+                    expectedYear, expectedEpisodes, null, logger, policy, cancellationToken,
+                    localSeriesTitleAliases, null, contextItem, false, null).ConfigureAwait(false);
+                var merged = MergeSeasonNumberFallback(result, fallback, cancellationToken);
+                logger?.Info("[SeasonNumberFallback] retry-completed: season={0}, ordinal={1}, decision={2}, site={3}, candidate={4}",
+                    contextItem.Id, ordinal, merged.Decision,
+                    merged.SelectedCandidate?.Site ?? string.Empty,
+                    merged.SelectedCandidate?.Id ?? string.Empty);
+                return merged;
             }
             finally
             {
                 linkedCancellation?.Dispose();
             }
+        }
+
+        private static bool CanTrySeasonNumberFallback(
+            DanmuMatchSearchResult result,
+            BaseItem contextItem,
+            string seriesName,
+            string seasonName,
+            string keywordOverride,
+            bool manualKeywordDiscovery)
+        {
+            // A transport fault or a strong named tie is not evidence that the
+            // descriptive name is absent. Keep both safety boundaries intact,
+            // including the existing lower threshold for TMDB alias evidence.
+            var threshold = result.CanonicalCandidates.Any(candidate =>
+                string.Equals(candidate.MatchOrigin, "tmdb-alias", StringComparison.OrdinalIgnoreCase))
+                ? 0.80 : DanmuMatchScorer.AutomaticConfidenceThreshold;
+            return contextItem is Season season && season.IndexNumber.GetValueOrDefault() > 0 &&
+                   !manualKeywordDiscovery && string.IsNullOrWhiteSpace(keywordOverride) &&
+                   result.IsComplete && result.HasCompletedProviders && !result.WasCancelled &&
+                   result.SelectedCandidate == null &&
+                   !result.CanonicalCandidates.Any(candidate =>
+                       candidate.MatchScore >= threshold) &&
+                   DanmuMatchScorer.IsIdentityBearingLooseTitle(
+                       DanmuMatchScorer.ExtractSeasonKeyword(seriesName, seasonName));
+        }
+
+        private static DanmuMatchSearchResult MergeSeasonNumberFallback(
+            DanmuMatchSearchResult named,
+            DanmuMatchSearchResult fallback,
+            CancellationToken cancellationToken)
+        {
+            fallback.UsedSeasonNumberFallback = true;
+            fallback.SearchErrors.InsertRange(0, named.SearchErrors);
+            fallback.CompletionDiagnostics.InsertRange(0, named.CompletionDiagnostics);
+            fallback.IsComplete &= named.IsComplete;
+            fallback.HasProviderLocalFaults |= named.HasProviderLocalFaults;
+            fallback.CompletedProviderIds = named.CompletedProviderIds.Concat(fallback.CompletedProviderIds)
+                .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+            fallback.CompletedProviderCount = fallback.CompletedProviderIds.Count;
+            MarkCancellationIfRequested(fallback, cancellationToken);
+            if (fallback.WasCancelled)
+            {
+                fallback.CanonicalCandidates.Clear();
+                fallback.Candidates.Clear();
+            }
+            else
+            {
+                // Preserve named-only candidates for authoritative Part/metadata
+                // remainder matching. Retry scoring wins for an observed identity,
+                // but the UI's visible limit must not trim the canonical pool.
+                foreach (var candidate in named.CanonicalCandidates)
+                    candidate.ExcludeFromAutomaticSelection = true;
+                fallback.CanonicalCandidates = OrderCanonicalCandidates(
+                    named.CanonicalCandidates.Concat(fallback.CanonicalCandidates)
+                        .GroupBy(candidate => BuildKey(candidate.Site, candidate.Id),
+                            StringComparer.OrdinalIgnoreCase)
+                        .Select(group => group.Last()));
+                fallback.Candidates = OrderCandidates(fallback.CanonicalCandidates);
+            }
+            ClassifyResult(fallback);
+            fallback.ParentTitleRematchAvailable =
+                (named.ParentTitleRematchAvailable || fallback.ParentTitleRematchAvailable) &&
+                fallback.SelectedCandidate == null && !fallback.WasCancelled &&
+                !string.Equals(fallback.Decision, "retryable-incomplete", StringComparison.OrdinalIgnoreCase);
+            return fallback;
         }
 
         /// <summary>Searches an unmatched suffix as an in-memory logical Season.
@@ -1122,6 +1213,7 @@ namespace Emby.Plugin.Danmu.Scraper
         public bool IsComplete { get; set; } = true;
         public bool WasCancelled { get; set; }
         public bool UsedTmdbAlias { get; set; }
+        public bool UsedSeasonNumberFallback { get; set; }
         public bool ParentTitleRematchAvailable { get; set; }
     }
 }

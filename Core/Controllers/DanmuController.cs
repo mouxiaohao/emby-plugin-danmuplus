@@ -186,6 +186,10 @@ namespace Emby.Plugin.Danmu.Core.Controllers
             SeasonPlanGenerationCoordinator.Shared;
         private static readonly ConcurrentDictionary<string, string> SeasonPreviewPlanFingerprints =
             new ConcurrentDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        private static readonly ConcurrentDictionary<string, CompositePlanBuild> SeasonPreviewPlans =
+            new ConcurrentDictionary<string, CompositePlanBuild>(StringComparer.OrdinalIgnoreCase);
+        private static readonly ConcurrentDictionary<string, ScraperEpisode> SelectedEpisodeSources =
+            new ConcurrentDictionary<string, ScraperEpisode>(StringComparer.OrdinalIgnoreCase);
         private readonly ILibraryManager _libraryManager;
         private readonly LibraryManagerEventsHelper _libraryManagerEventsHelper;
         private readonly MediaBrowser.Model.IO.IFileSystem _fileSystem;
@@ -221,7 +225,9 @@ namespace Emby.Plugin.Danmu.Core.Controllers
         /// <returns>xml弹幕文件内容</returns>
         public async Task<object> Any(DanmuParams danmuParams)
         {
-            if (!TryPrepareCompositeSelections(danmuParams, out var compositeError))
+            var startsConfirmedPlan = DanmuDispatchOption.StartTrackedDownload.Equals(danmuParams?.Option) &&
+                danmuParams.CompositePlan && !string.IsNullOrWhiteSpace(danmuParams.PlanFingerprint);
+            if (!startsConfirmedPlan && !TryPrepareCompositeSelections(danmuParams, out var compositeError))
             {
                 return DanmuDispatchOption.MatchPreview.Equals(danmuParams?.Option)
                     ? (object)InvalidCompositePreview(danmuParams, compositeError)
@@ -700,6 +706,7 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                     return response;
                 }
 
+                RegisterSelectedEpisodeSources(episode, scraper.ProviderId, request.CandidateId, execution.Result);
                 response.Episodes = (execution.Result?.Episodes ?? new List<ScraperEpisode>())
                     .Where(sourceEpisode => sourceEpisode != null &&
                         !string.IsNullOrWhiteSpace(sourceEpisode.Id) &&
@@ -1222,6 +1229,7 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 }
                 if (episode != null)
                 {
+                    RegisterSelectedEpisodeSources(episode, scraper.ProviderId, request.CandidateId, media);
                     response.SuggestedEpisodeNumber = DanmuEpisodeMatchHelper.SuggestSourceEpisodeNumber(
                         episode.IndexNumber, media.Episodes);
                     if (!response.SuggestedEpisodeNumber.HasValue && response.SourceEpisodes.Count == 1)
@@ -1944,7 +1952,7 @@ namespace Emby.Plugin.Danmu.Core.Controllers
             response.HasVerifiedSourceEpisodeSurplus = build.HasVerifiedSourceEpisodeSurplus;
             response.PlanFingerprint = build.PlanFingerprint;
             RegisterPreviewPlanFingerprint(latest.Id.ToString(), response.PlanGeneration,
-                build.PlanFingerprint);
+                build.PlanFingerprint, build);
             response.CompositeGroups = CompositeSeasonMatchService.ToGroups(
                 build.Plan, build.Episodes, build.SourceEpisodeNames);
             ApplyGroupAlignmentIntents(response.CompositeGroups, build.Selections);
@@ -2159,7 +2167,7 @@ namespace Emby.Plugin.Danmu.Core.Controllers
             if (string.IsNullOrWhiteSpace(requestedStart) && direct.Plan.UnmatchedRuns.Count == 0)
             {
                 RegisterPreviewPlanFingerprint(season.Id.ToString(), result.PlanGeneration,
-                    direct.PlanFingerprint);
+                    direct.PlanFingerprint, direct);
                 result.PlanFingerprint = direct.PlanFingerprint;
                 result.CompositePlan = direct.Plan;
                 result.HasVerifiedSourceEpisodeSurplus = direct.HasVerifiedSourceEpisodeSurplus;
@@ -2230,7 +2238,7 @@ namespace Emby.Plugin.Danmu.Core.Controllers
             result.HasVerifiedSourceEpisodeSurplus = build.HasVerifiedSourceEpisodeSurplus;
             result.PlanFingerprint = build.PlanFingerprint;
             RegisterPreviewPlanFingerprint(season.Id.ToString(), result.PlanGeneration,
-                build.PlanFingerprint);
+                build.PlanFingerprint, build);
             result.CompositeGroups = CompositeSeasonMatchService.ToGroups(
                 build.Plan, build.Episodes, build.SourceEpisodeNames);
             ApplyGroupAlignmentIntents(result.CompositeGroups, build.Selections);
@@ -4092,11 +4100,18 @@ namespace Emby.Plugin.Danmu.Core.Controllers
             (seasonId ?? string.Empty) + "\u001f" + generation;
 
         private static void RegisterPreviewPlanFingerprint(
-            string seasonId, long generation, string fingerprint)
+            string seasonId, long generation, string fingerprint, CompositePlanBuild build = null)
         {
             if (generation <= 0 || string.IsNullOrWhiteSpace(seasonId) ||
                 string.IsNullOrWhiteSpace(fingerprint)) return;
             SeasonPreviewPlanFingerprints[PreviewPlanKey(seasonId, generation)] = fingerprint;
+            if (build?.Plan != null)
+            {
+                // Retain each displayed mapping independently of later previews.
+                // A download executes this server-owned snapshot, never a new
+                // positional plan inferred from changed Season metadata.
+                SeasonPreviewPlans[PreviewPlanKey(seasonId, generation) + "\u001f" + fingerprint] = build;
+            }
         }
 
         private static bool IsCompositePlanExecutionCurrent(
@@ -4114,95 +4129,33 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                    string.Equals(registeredFingerprint, fingerprint, StringComparison.Ordinal);
         }
 
-        private static void EnsureCompositePlanExecutionCurrent(
-            DanmuDownloadTaskResult task,
-            string seasonId)
-        {
-            if (task != null && IsCompositePlanExecutionCurrent(
-                    SeasonPlanGenerations,
-                    SeasonPreviewPlanFingerprints,
-                    seasonId,
-                    task.PlanGeneration,
-                    task.SeasonPlanFingerprint))
-            {
-                return;
-            }
-
-            if (task != null)
-            {
-                lock (task) task.ErrorCode = "stale_plan";
-            }
-            throw new StaleCompositePlanException(
-                "The Season structure or mapping generation changed; preview again before downloading.");
-        }
-
-        private sealed class StaleCompositePlanException : DanmuDownloadErrorException
-        {
-            public StaleCompositePlanException(string message) : base(message)
-            {
-            }
-        }
-
-        private async Task<DanmuDownloadTaskResult> StartTrackedCompositeSeasonDownload(DanmuParams request)
+        private Task<DanmuDownloadTaskResult> StartTrackedCompositeSeasonDownload(DanmuParams request)
         {
             var failed = new DanmuDownloadTaskResult
             {
                 SeasonId = request.Id ?? string.Empty,
                 Status = "failed",
             };
-            var season = ResolveSeason(request);
-            if (season == null)
-            {
-                failed.Message = "找不到指定季。";
-                return failed;
-            }
-
-            if (!DanmuMappingProtocol.IsCurrent(request.MappingProtocolVersion) ||
-                !SeasonPlanGenerations.IsCurrent(season.Id.ToString(), request.PlanGeneration) ||
-                request.ParsedCompositeSelections.Any(selection => selection == null ||
-                    selection.PlanGeneration != request.PlanGeneration ||
-                    !DanmuMappingProtocol.IsCurrent(selection.MappingProtocolVersion) ||
-                    !DanmuMappingProtocol.IsAllowedBatchOrigin(selection.MatchOrigin)))
-            {
-                failed.SeasonName = season.Name ?? string.Empty;
-                failed.ErrorCode = "stale_protocol";
-                failed.Message = "The Season mapping protocol or generation is stale; preview again.";
-                return failed;
-            }
+            // The mapping already identifies the target. Current parent/title
+            // context must not resolve a replacement Season during execution.
+            var season = ResolveSeason(new DanmuParams { Id = request.Id });
+            var seasonId = season?.Id.ToString() ?? (Guid.TryParse(request.Id, out var capturedSeasonId)
+                ? capturedSeasonId.ToString() : request.Id ?? string.Empty);
             var capturedPlanGeneration = request.PlanGeneration;
-
-            var build = await BuildCompositePlanAsync(season, request.ParsedCompositeSelections, false,
-                request.ParsedExcludedLocalEpisodeItemIds).ConfigureAwait(false);
-            if (build.Plan == null)
+            if (!SeasonPreviewPlans.TryGetValue(
+                    PreviewPlanKey(seasonId, capturedPlanGeneration) + "\u001f" + request.PlanFingerprint,
+                    out var build) || build.Plan == null)
             {
-                failed.SeasonName = season.Name ?? string.Empty;
-                failed.Message = "复合季映射无效：" + build.Error;
-                return failed;
-            }
-            if (!SeasonPreviewPlanFingerprints.TryGetValue(
-                    PreviewPlanKey(season.Id.ToString(), capturedPlanGeneration),
-                    out var previewFingerprint) ||
-                string.IsNullOrWhiteSpace(request.PlanFingerprint) ||
-                !string.Equals(request.PlanFingerprint, previewFingerprint, StringComparison.Ordinal) ||
-                !string.Equals(previewFingerprint, build.PlanFingerprint, StringComparison.Ordinal))
-            {
-                failed.SeasonName = season.Name ?? string.Empty;
-                failed.ErrorCode = "stale_plan";
-                failed.Message = "The authoritative Season plan changed after preview; preview again.";
-                return failed;
+                failed.SeasonName = season?.Name ?? string.Empty;
+                failed.ErrorCode = "mapping_unavailable";
+                failed.Message = "找不到已选择的剧集映射，可能是 Emby 已重启，请重新打开匹配结果。";
+                return Task.FromResult(failed);
             }
             if (build.Plan.Mappings.Count == 0)
             {
-                failed.SeasonName = season.Name ?? string.Empty;
-                failed.Message = "没有可验证的剧集映射可供下载。";
-                return failed;
-            }
-            if (build.Plan.UnmatchedRuns.Count > 0 && !request.ConfirmPartial)
-            {
-                failed.SeasonName = season.Name ?? string.Empty;
-                failed.ErrorCode = "partial_confirmation_required";
-                failed.Message = "The authoritative plan is partial; confirm mapped-only download explicitly.";
-                return failed;
+                failed.SeasonName = season?.Name ?? string.Empty;
+                failed.Message = "没有已选择的剧集映射可供下载。";
+                return Task.FromResult(failed);
             }
 
             var byItemId = build.Episodes.ToDictionary(x => x.Id.ToString(), StringComparer.OrdinalIgnoreCase);
@@ -4212,7 +4165,7 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 .ToList();
             var canPersistSingleSeasonSource = build.Plan.CanPersistCompleteSeasonBinding;
             var singleSource = canPersistSingleSeasonSource ? distinctSources[0] : null;
-            var singleSourceGeneration = singleSource == null
+            var singleSourceGeneration = singleSource == null || season == null
                 ? 0
                 : _libraryManagerEventsHelper.BeginProviderWrite(season, singleSource.ProviderId);
             var task = new DanmuDownloadTaskResult
@@ -4220,11 +4173,11 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 TaskId = Guid.NewGuid().ToString("N"),
                 MappingProtocolVersion = DanmuMappingProtocol.CurrentVersion,
                 PlanGeneration = capturedPlanGeneration,
-                SeasonId = season.Id.ToString(),
-                SeriesId = season.GetParent()?.Id.ToString() ?? string.Empty,
-                SeasonName = season.Name ?? string.Empty,
-                SeasonNumber = season.IndexNumber,
-                SeasonYear = season.ProductionYear,
+                SeasonId = seasonId,
+                SeriesId = season?.GetParent()?.Id.ToString() ?? string.Empty,
+                SeasonName = season?.Name ?? string.Empty,
+                SeasonNumber = season?.IndexNumber,
+                SeasonYear = season?.ProductionYear,
                 TargetItemType = "CompositeSeason",
                 // This is intentionally the write-safety decision, not the
                 // final visible source count. A subset of a former composite
@@ -4240,7 +4193,7 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 SeasonPlanFingerprint = build.PlanFingerprint,
                 SeasonPlanSelections = build.Selections.Select(CloneSeasonPlanSelection).ToList(),
                 SeasonPlanExcludedItemIds = build.ExcludedItemIds.ToList(),
-                SeasonMirrorEligible = canPersistSingleSeasonSource && singleSource != null &&
+                SeasonMirrorEligible = season != null && canPersistSingleSeasonSource && singleSource != null &&
                     !string.IsNullOrWhiteSpace(singleSource.MediaId) &&
                     !singleSource.MediaId.StartsWith("direct-episode-provider:", StringComparison.OrdinalIgnoreCase),
                 SeasonProviderWriteGeneration = singleSourceGeneration,
@@ -4280,26 +4233,12 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 CompositeSeasonProviderWriteLease lease = null;
                 try
                 {
-                    lease = _libraryManagerEventsHelper.BeginCompositeSeasonWrite(season, task.IsCompositePlan);
+                    if (season != null)
+                    {
+                        lease = _libraryManagerEventsHelper.BeginCompositeSeasonWrite(season, task.IsCompositePlan);
+                    }
                     await TrackedDownloadQueue.WaitAsync(cancellation.Token).ConfigureAwait(false);
                     enteredQueue = true;
-                    var preflightBuild = await BuildCompositePlanAsync(
-                        season, task.SeasonPlanSelections, false, task.SeasonPlanExcludedItemIds,
-                        cancellation.Token).ConfigureAwait(false);
-                    if (preflightBuild.Plan == null ||
-                        !string.Equals(task.SeasonPlanFingerprint,
-                            preflightBuild.PlanFingerprint, StringComparison.Ordinal) ||
-                        !IsCompositePlanExecutionCurrent(
-                            SeasonPlanGenerations,
-                            SeasonPreviewPlanFingerprints,
-                            season.Id.ToString(),
-                            task.PlanGeneration,
-                            task.SeasonPlanFingerprint))
-                    {
-                        lock (task) task.ErrorCode = "stale_plan";
-                        throw new StaleCompositePlanException(
-                            "The Season structure or mapping generation changed; preview again before downloading.");
-                    }
                     lock (task)
                     {
                         task.Status = "running";
@@ -4309,11 +4248,6 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                     foreach (var episodeResult in task.Episodes)
                     {
                         cancellation.Token.ThrowIfCancellationRequested();
-                        EnsureCompositePlanExecutionCurrent(task, season.Id.ToString());
-                        if (!byItemId.TryGetValue(episodeResult.ItemId, out var episode))
-                        {
-                            throw new DanmuDownloadErrorException("本地剧集已不存在。");
-                        }
                         lock (task)
                         {
                             episodeResult.Status = "running";
@@ -4321,57 +4255,15 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                         }
                         try
                         {
-                            EnsureCompositePlanExecutionCurrent(task, season.Id.ToString());
-                            var scraper = _scraperManager.All().FirstOrDefault(x => string.Equals(
-                                x.ProviderId, episodeResult.SourceSite, StringComparison.OrdinalIgnoreCase));
-                            if (scraper == null)
+                            if (!Guid.TryParse(episodeResult.ItemId, out var itemId) ||
+                                !(_libraryManager.GetItemById(itemId) is Episode episode))
                             {
-                                throw new DanmuDownloadErrorException("来源站点已不可用。");
+                                throw new DanmuDownloadErrorException("本地剧集已不存在。");
                             }
-                            // Direct Episode ProviderIds identify an upstream
-                            // episode, not a media/season. Keep that path exact
-                            // instead of calling GetMedia with an episode id.
-                            var isDirectMapping = IsDirectEpisodeProviderMapping(episodeResult);
-                            var media = isDirectMapping
-                                ? await DanmuProviderIdResolver.ResolveDirectEpisodeMediaAsync(
-                                    scraper, episode, episodeResult.SourceCandidateId, 1).ConfigureAwait(false)
-                                : await scraper.GetMedia(season, episodeResult.SourceCandidateId).ConfigureAwait(false);
-                            EnsureCompositePlanExecutionCurrent(task, season.Id.ToString());
-                            var sourceEpisode = (media?.Episodes ?? new List<ScraperEpisode>()).FirstOrDefault(x =>
-                                x != null && string.Equals(x.Id, episodeResult.SourceEpisodeId, StringComparison.OrdinalIgnoreCase) &&
-                                !string.IsNullOrWhiteSpace(x.CommentId));
-                            if (sourceEpisode == null || string.IsNullOrWhiteSpace(episodeResult.FrozenCommentId) ||
-                                !string.Equals(sourceEpisode.CommentId, episodeResult.FrozenCommentId,
-                                    StringComparison.Ordinal))
-                            {
-                                throw new DanmuDownloadErrorException("来源剧集已变更，无法验证原映射。");
-                            }
-                            // A one-item media collection avoids any positional fallback: this
-                            // local ItemId always downloads the source episode verified above.
-                            var exactMedia = new ScraperMedia
-                            {
-                                Id = media.Id,
-                                ProviderId = scraper.ProviderId,
-                                Episodes = new List<ScraperEpisode>
-                                {
-                                    new ScraperEpisode
-                                    {
-                                        Id = sourceEpisode.Id,
-                                        CommentId = sourceEpisode.CommentId,
-                                        EpisodeNumber = 1,
-                                        Title = sourceEpisode.Title,
-                                    },
-                                },
-                            };
-                            EnsureCompositePlanExecutionCurrent(task, season.Id.ToString());
+                            var preparation = await PrepareFrozenReplayAsync(episodeResult).ConfigureAwait(false);
                             var outcome = await _libraryManagerEventsHelper.DownloadEpisodeForProgress(
-                                episode, exactMedia, scraper, request.ForceRefresh, 1).ConfigureAwait(false);
-                            // The provider call may already have completed this Episode's XML write.
-                            // A superseding preview never rolls that accepted write back, but it
-                            // fences metadata and every later Episode before another write begins.
-                            EnsureCompositePlanExecutionCurrent(task, season.Id.ToString());
+                                episode, preparation.Media, preparation.Scraper, request.ForceRefresh, 1).ConfigureAwait(false);
                             await PersistProviderIdAfterAcceptedOutcome(episode, outcome).ConfigureAwait(false);
-                            EnsureCompositePlanExecutionCurrent(task, season.Id.ToString());
                             lock (task)
                             {
                                 episodeResult.Status = outcome.Status;
@@ -4382,14 +4274,10 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                                 else task.Skipped++;
                             }
                         }
-                        catch (StaleCompositePlanException)
-                        {
-                            throw;
-                        }
                         catch (Exception ex)
                         {
                             _logger.LogError(ex, "[CompositeSeason] Download failed: season={0}, episode={1}",
-                                season.Name, episodeResult.EpisodeNumber);
+                                season?.Name, episodeResult.EpisodeNumber);
                             lock (task)
                             {
                                 episodeResult.Status = "failed";
@@ -4403,9 +4291,15 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                         }
                     }
                     lock (task) UpdateCompletedTaskSummary(task);
-                    EnsureCompositePlanExecutionCurrent(task, season.Id.ToString());
-                    await CommitSeasonDisplayMirrorAfterTerminalAsync(season, task).ConfigureAwait(false);
-                    EnsureCompositePlanExecutionCurrent(task, season.Id.ToString());
+                    try
+                    {
+                        await CommitSeasonDisplayMirrorAfterTerminalAsync(season, task).ConfigureAwait(false);
+                    }
+                    catch (Exception ex)
+                    {
+                        task.SeasonMirrorWarning = "Season identifier update failed: " + ex.Message;
+                        _logger.LogError(ex, "Season metadata update failed after completed downloads: season={0}", season?.Name);
+                    }
                 }
                 catch (OperationCanceledException)
                 {
@@ -4422,7 +4316,7 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogError(ex, "[CompositeSeason] Task failed: season={0}", season.Name);
+                    _logger.LogError(ex, "[CompositeSeason] Task failed: season={0}", season?.Name);
                     lock (task)
                     {
                         task.Status = "failed";
@@ -4437,7 +4331,7 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 }
             });
 
-            return Snapshot(task);
+            return Task.FromResult(Snapshot(task));
         }
 
         private async Task<DanmuDownloadTaskResult> StartTrackedMovieDownload(Movie movie, DanmuParams request)
@@ -4522,20 +4416,15 @@ namespace Emby.Plugin.Danmu.Core.Controllers
         {
             var failed = FailedTarget(episode, request, "Episode");
             var season = episode.GetParent() as Season;
-            if (season == null)
-            {
-                failed.Message = "找不到本集所属季度";
-                return failed;
-            }
 
             var sourceEpisodeNumber = request.SourceEpisodeNumber ?? 0;
-            if (sourceEpisodeNumber <= 0 && string.IsNullOrWhiteSpace(request.SourceEpisodeId))
+            if (string.IsNullOrWhiteSpace(request.SourceEpisodeId))
             {
-                failed.Message = "来源集数必须是正整数";
+                failed.Message = "缺少所选来源剧集 ID";
                 return failed;
             }
 
-            var scraper = _scraperManager.All().FirstOrDefault(x =>
+            var scraper = _scraperManager.AllWithNoEnabled().FirstOrDefault(x =>
                 string.Equals(x.ProviderId, request.Site, StringComparison.OrdinalIgnoreCase));
             if (scraper == null || string.IsNullOrWhiteSpace(request.CandidateId))
             {
@@ -4552,10 +4441,24 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 StringComparison.OrdinalIgnoreCase);
             try
             {
-                var resolvedMedia = isDirectEpisodeProviderId
-                    ? await DanmuProviderIdResolver.ResolveDirectEpisodeMediaAsync(
-                        scraper, episode, request.CandidateId, sourceEpisodeNumber).ConfigureAwait(false)
-                    : await scraper.GetMedia(season, request.CandidateId).ConfigureAwait(false);
+                ScraperMedia resolvedMedia;
+                if (SelectedEpisodeSources.TryGetValue(
+                    SelectedEpisodeSourceKey(episode, scraper.ProviderId, request.CandidateId, request.SourceEpisodeId),
+                    out var selectedSource))
+                {
+                    resolvedMedia = new ScraperMedia
+                    {
+                        Id = request.CandidateId, ProviderId = scraper.ProviderId,
+                        Episodes = new List<ScraperEpisode> { selectedSource },
+                    };
+                }
+                else
+                {
+                    resolvedMedia = isDirectEpisodeProviderId
+                        ? await DanmuProviderIdResolver.ResolveDirectEpisodeMediaAsync(
+                            scraper, episode, request.CandidateId, sourceEpisodeNumber).ConfigureAwait(false)
+                        : await scraper.GetMedia((BaseItem)season ?? episode, request.CandidateId).ConfigureAwait(false);
+                }
                 if (!DanmuExactEpisodeSelectionHelper.TryCreateExactMedia(
                         resolvedMedia, request.SourceEpisodeId, out media, out sourceEpisode))
                 {
@@ -4574,11 +4477,11 @@ namespace Emby.Plugin.Danmu.Core.Controllers
 
             var confirmedSourceNumber = sourceEpisode.EpisodeNumber ?? request.SourceEpisodeNumber;
             var task = CreateSingleTargetTask(episode, request, scraper, "Episode", confirmedSourceNumber);
-            task.SeasonId = season.Id.ToString();
-            task.SeasonName = season.Name ?? string.Empty;
-            task.SeasonNumber = season.IndexNumber;
-            task.SeasonYear = season.ProductionYear;
-            task.SeriesId = season.GetParent()?.Id.ToString() ?? string.Empty;
+            task.SeasonId = season?.Id.ToString() ?? string.Empty;
+            task.SeasonName = season?.Name ?? string.Empty;
+            task.SeasonNumber = season?.IndexNumber;
+            task.SeasonYear = season?.ProductionYear;
+            task.SeriesId = season?.GetParent()?.Id.ToString() ?? string.Empty;
             // CandidateId is the original lookup token. The canonical media id
             // is not a safe substitute when a provider uses a distinct id.
             task.CandidateId = request.CandidateId;
@@ -4608,6 +4511,22 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 CandidateId = request.CandidateId ?? string.Empty,
                 Status = "failed",
             };
+        }
+
+        private static string SelectedEpisodeSourceKey(Episode episode, string site, string candidateId, string sourceEpisodeId) =>
+            episode.Id + "\u001f" + site + "\u001f" + candidateId + "\u001f" + sourceEpisodeId;
+
+        private static void RegisterSelectedEpisodeSources(Episode episode, string site, string candidateId, ScraperMedia media)
+        {
+            foreach (var source in media?.Episodes ?? new List<ScraperEpisode>())
+            {
+                if (source == null || string.IsNullOrWhiteSpace(source.Id) || string.IsNullOrWhiteSpace(source.CommentId)) continue;
+                SelectedEpisodeSources[SelectedEpisodeSourceKey(episode, site, candidateId, source.Id)] = new ScraperEpisode
+                {
+                    Id = source.Id, CommentId = source.CommentId, EpisodeNumber = source.EpisodeNumber,
+                    ParentMediaId = source.ParentMediaId, Title = source.Title,
+                };
+            }
         }
 
         private DanmuDownloadTaskResult CreateSingleTargetTask(
@@ -4809,7 +4728,8 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 StaleStructure = terminalBuild.Plan == null ||
                     !string.Equals(task.SeasonPlanFingerprint,
                         terminalBuild.PlanFingerprint, StringComparison.Ordinal) ||
-                    !SeasonPlanGenerations.IsCurrent(season.Id.ToString(), task.PlanGeneration),
+                    !IsCompositePlanExecutionCurrent(SeasonPlanGenerations, SeasonPreviewPlanFingerprints,
+                        season.Id.ToString(), task.PlanGeneration, task.SeasonPlanFingerprint),
                 HasCanonicalSeasonIdentity = !string.IsNullOrWhiteSpace(task.SeasonProviderValue) &&
                     !task.SeasonProviderValue.StartsWith("direct-episode-provider:", StringComparison.OrdinalIgnoreCase),
             };
@@ -5070,17 +4990,11 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                     var season = ResolveSeason(new DanmuParams
                     {
                         Id = task.SeasonId,
-                        SeriesId = task.SeriesId,
-                        SeasonName = task.SeasonName,
-                        SeasonNumber = task.SeasonNumber,
-                        SeasonYear = task.SeasonYear,
                     });
-                    if (season == null)
+                    if (season != null)
                     {
-                        throw new DanmuDownloadErrorException("重放失败：找不到原季度媒体项");
+                        compositeLease = _libraryManagerEventsHelper.BeginCompositeSeasonWrite(season, task.IsCompositePlan);
                     }
-
-                    compositeLease = _libraryManagerEventsHelper.BeginCompositeSeasonWrite(season, task.IsCompositePlan);
                     await TrackedDownloadQueue.WaitAsync(cancellation.Token).ConfigureAwait(false);
                     enteredQueue = true;
                     lock (task)
@@ -5110,7 +5024,7 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                                 episodeResult.Status = "running";
                                 episodeResult.Message = "正在强制重新下载";
                             }
-                            var preparation = await PrepareFrozenReplayAsync(season, episode, episodeResult)
+                            var preparation = await PrepareFrozenReplayAsync(episodeResult)
                                 .ConfigureAwait(false);
                             var providerTask = _libraryManagerEventsHelper.DownloadEpisodeForProgress(
                                 episode, preparation.Media, preparation.Scraper, true, 1);
@@ -5130,7 +5044,7 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                         catch (Exception ex) when (!(ex is OperationCanceledException))
                         {
                             _logger.LogError(ex, "七天跳过重放失败: season={0}, episode={1}",
-                                season.Name, episode.IndexNumber);
+                                season?.Name, episode.IndexNumber);
                             lock (task)
                             {
                                 episodeResult.Status = "failed";
@@ -5197,73 +5111,50 @@ namespace Emby.Plugin.Danmu.Core.Controllers
             return Snapshot(task);
         }
 
-        private async Task<FrozenReplayPreparation> PrepareFrozenReplayAsync(
-            Season season,
-            Episode episode,
+        private Task<FrozenReplayPreparation> PrepareFrozenReplayAsync(
             DanmuEpisodeDownloadResult episodeResult)
         {
             if (string.IsNullOrWhiteSpace(episodeResult.SourceSite) ||
-                string.IsNullOrWhiteSpace(episodeResult.SourceCandidateId) ||
                 string.IsNullOrWhiteSpace(episodeResult.SourceEpisodeId) ||
                 string.IsNullOrWhiteSpace(episodeResult.FrozenCommentId))
             {
-                throw new DanmuDownloadErrorException("重放失败：原任务缺少已验证的来源剧集证据");
+                throw new DanmuDownloadErrorException("原任务缺少来源集或弹幕 ID，无法请求弹幕");
             }
 
-            var scraper = _scraperManager.All().FirstOrDefault(candidate => string.Equals(
+            var scraper = _scraperManager.AllWithNoEnabled().FirstOrDefault(candidate => string.Equals(
                 candidate.ProviderId, episodeResult.SourceSite, StringComparison.OrdinalIgnoreCase));
             if (scraper == null)
             {
-                throw new DanmuDownloadErrorException("重放失败：原弹幕来源已不可用");
+                throw new DanmuDownloadErrorException("原弹幕来源已不可用");
             }
 
-            var isDirectMapping = IsDirectEpisodeProviderMapping(episodeResult);
-            if (!isDirectMapping && !IsSeasonProviderMapping(episodeResult))
-            {
-                throw new DanmuDownloadErrorException("重放失败：原任务缺少已冻结的来源范围类型");
-            }
-            var resolved = isDirectMapping
-                ? await DanmuProviderIdResolver.ResolveDirectEpisodeMediaAsync(
-                    scraper, episode, episodeResult.SourceCandidateId, 1).ConfigureAwait(false)
-                : await scraper.GetMedia(season, episodeResult.SourceCandidateId).ConfigureAwait(false);
-            var sourceEpisode = (resolved?.Episodes ?? new List<ScraperEpisode>()).FirstOrDefault(candidate =>
-                candidate != null && string.Equals(candidate.Id, episodeResult.SourceEpisodeId,
-                    StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(candidate.CommentId));
-            if (sourceEpisode == null || !string.Equals(
-                    sourceEpisode.CommentId, episodeResult.FrozenCommentId, StringComparison.Ordinal))
-            {
-                throw new DanmuDownloadErrorException("重放失败：来源剧集已变更，无法验证原映射");
-            }
-
-            return new FrozenReplayPreparation
+            // The task already owns an exact source EpisodeId/CommentId tuple.
+            // Execute it directly; source lists and Season scope may change
+            // after the user selected it without invalidating that choice.
+            return Task.FromResult(new FrozenReplayPreparation
             {
                 Scraper = scraper,
                 Media = new ScraperMedia
                 {
-                    Id = resolved.Id,
+                    Id = episodeResult.SourceCandidateId,
                     ProviderId = scraper.ProviderId,
                     Episodes = new List<ScraperEpisode>
                     {
                         new ScraperEpisode
                         {
-                            Id = sourceEpisode.Id,
-                            CommentId = sourceEpisode.CommentId,
+                            Id = episodeResult.SourceEpisodeId,
+                            CommentId = episodeResult.FrozenCommentId,
                             EpisodeNumber = 1,
-                            Title = sourceEpisode.Title,
+                            Title = episodeResult.EpisodeName,
                         },
                     },
                 },
-            };
+            });
         }
 
         private static bool IsDirectEpisodeProviderMapping(DanmuEpisodeDownloadResult episode)
         {
             return string.Equals(episode?.SourceScopeType, "Episode", StringComparison.OrdinalIgnoreCase);
-        }
-
-        private static bool IsSeasonProviderMapping(DanmuEpisodeDownloadResult episode)
-        {
-            return string.Equals(episode?.SourceScopeType, "Season", StringComparison.OrdinalIgnoreCase);
         }
 
         private static void NormalizeFrozenReplayProviderOutcome(
@@ -5336,98 +5227,31 @@ namespace Emby.Plugin.Danmu.Core.Controllers
             var season = ResolveSeason(new DanmuParams
             {
                 Id = task.SeasonId,
-                SeriesId = task.SeriesId,
-                SeasonName = task.SeasonName,
-                SeasonNumber = task.SeasonNumber,
-                SeasonYear = task.SeasonYear,
             });
-            if (!Guid.TryParse(request.Id, out var episodeId) || season == null ||
+            if (!Guid.TryParse(request.Id, out var episodeId) ||
                 !(_libraryManager.GetItemById(episodeId) is Episode episode))
             {
                 lock (task)
                 {
-                    task.Message = "重试失败：找不到季度或剧集媒体项";
+                    task.Message = "重试失败：找不到剧集媒体项";
                 }
                 return Snapshot(task);
             }
 
-            var isCompositeTask = string.Equals(task.TargetItemType, "CompositeSeason", StringComparison.OrdinalIgnoreCase);
-            var isSevenDayReplayTask = string.Equals(task.TargetItemType, "SevenDayReplay", StringComparison.OrdinalIgnoreCase);
-            var useFrozenEpisodeSource = isCompositeTask || isSevenDayReplayTask;
-            var retryBuild = isCompositeTask
-                ? await BuildCompositePlanAsync(
-                    season, task.SeasonPlanSelections, false, task.SeasonPlanExcludedItemIds)
-                    .ConfigureAwait(false)
-                : null;
-            if (isCompositeTask &&
-                (retryBuild?.Plan == null ||
-                 !string.Equals(task.SeasonPlanFingerprint,
-                     retryBuild.PlanFingerprint, StringComparison.Ordinal) ||
-                 !SeasonPlanGenerations.IsCurrent(season.Id.ToString(), task.PlanGeneration) ||
-                 !retryBuild.Context.LocalEpisodes.Any(item => string.Equals(
-                     item.ItemId, episodeResult.ItemId, StringComparison.OrdinalIgnoreCase))))
-            {
-                lock (task)
-                {
-                    task.ErrorCode = "stale_plan";
-                    task.Message = "Retry rejected because the target Season Episode scope changed; preview again." +
-                                   (string.IsNullOrWhiteSpace(retryBuild?.Error)
-                                       ? string.Empty
-                                       : " (" + retryBuild.Error + ")");
-                }
-                return Snapshot(task);
-            }
             var requiresCompositeTransition = task.IsCompositePlan;
             AbstractScraper scraper = null;
             ScraperMedia media;
             try
             {
-                if (useFrozenEpisodeSource)
-                {
-                    var preparation = await PrepareFrozenReplayAsync(season, episode, episodeResult)
-                        .ConfigureAwait(false);
-                    scraper = preparation.Scraper;
-                    media = preparation.Media;
-                }
-                else
-                {
-                    scraper = _scraperManager.All().FirstOrDefault(x =>
-                        string.Equals(x.ProviderId, task.Site, StringComparison.OrdinalIgnoreCase));
-                    var candidateId = task.CandidateId;
-                    if (scraper == null || string.IsNullOrWhiteSpace(candidateId))
-                    {
-                        throw new DanmuDownloadErrorException("重试失败：原弹幕来源或季度绑定已经失效");
-                    }
-                    var isDirectMapping = IsDirectEpisodeProviderMapping(episodeResult);
-                    if (!isDirectMapping && !IsSeasonProviderMapping(episodeResult))
-                    {
-                        throw new DanmuDownloadErrorException("重试失败：原任务缺少已冻结的来源范围类型");
-                    }
-                    var resolved = isDirectMapping
-                        ? await DanmuProviderIdResolver.ResolveDirectEpisodeMediaAsync(
-                            scraper,
-                            episode,
-                            candidateId,
-                            1).ConfigureAwait(false)
-                        : await scraper.GetMedia(season, candidateId).ConfigureAwait(false);
-                    if (!DanmuExactEpisodeSelectionHelper.TryCreateExactMedia(
-                            resolved, episodeResult.SourceEpisodeId, out media, out var revalidatedSourceEpisode) ||
-                        string.IsNullOrWhiteSpace(episodeResult.FrozenCommentId) ||
-                        !string.Equals(revalidatedSourceEpisode.CommentId,
-                            episodeResult.FrozenCommentId, StringComparison.Ordinal))
-                    {
-                        throw new DanmuDownloadErrorException("The upstream episode can no longer be verified.");
-                    }
-                }
-                if (media == null)
-                {
-                    throw new DanmuDownloadErrorException("弹幕来源无法读取该季度信息");
-                }
+                var preparation = await PrepareFrozenReplayAsync(episodeResult)
+                    .ConfigureAwait(false);
+                scraper = preparation.Scraper;
+                media = preparation.Media;
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "[{0}] 准备单集重试失败: season={1}, episode={2}",
-                    scraper?.Name ?? task.SiteName, season.Name, episode.IndexNumber);
+                    scraper?.Name ?? task.SiteName, season?.Name, episode.IndexNumber);
                 lock (task)
                 {
                     task.Message = "重试准备失败：" + ex.Message;
@@ -5472,7 +5296,7 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 Task<DanmuEpisodeDownloadOutcome> providerTask = null;
                 try
                 {
-                    if (requiresCompositeTransition)
+                    if (requiresCompositeTransition && season != null)
                     {
                         // A retry can be the first successful write of an
                         // otherwise failed composite task, so it needs the
@@ -5525,7 +5349,7 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                 catch (Exception ex)
                 {
                     _logger.LogError(ex, "[{0}] 单集重试失败: season={1}, episode={2}",
-                        scraper.Name, season.Name, episode.IndexNumber);
+                        scraper.Name, season?.Name, episode.IndexNumber);
                     lock (task)
                     {
                         episodeResult.Status = "failed";
@@ -5539,7 +5363,15 @@ namespace Emby.Plugin.Danmu.Core.Controllers
                     {
                         UpdateCompletedTaskSummary(task);
                     }
-                    await CommitSeasonDisplayMirrorAfterTerminalAsync(season, task).ConfigureAwait(false);
+                    try
+                    {
+                        await CommitSeasonDisplayMirrorAfterTerminalAsync(season, task).ConfigureAwait(false);
+                    }
+                    catch (Exception ex)
+                    {
+                        task.SeasonMirrorWarning = "Season identifier update failed: " + ex.Message;
+                        _logger.LogError(ex, "Season metadata update failed after retry: season={0}", season?.Name);
+                    }
                     if (enteredQueue)
                     {
                         TrackedDownloadQueue.Release();

@@ -59,7 +59,7 @@ Explicit virtual mapping SHALL operate only on the target-season eligible set. I
 - **THEN** the plan SHALL have no unmatched run and SHALL be complete for target S1
 
 ### Requirement: Every batch path uses the same eligible set
-Interactive whole-Series and single-Season preview, confidence selection, manual selection, rematch, automatic Season processing, download rebuild, retry, partial confirmation, and Season display-mirror eligibility SHALL use the same target-season eligibility operation and inventory snapshot.
+Interactive whole-Series and single-Season preview, confidence selection, manual selection, rematch, and automatic Season processing SHALL use the same target-season eligibility operation and inventory snapshot. User-started downloads and retries SHALL execute the mappings captured by that preview without rerunning target-season eligibility. Season display-mirror eligibility MAY recheck the current inventory solely for metadata writes.
 
 #### Scenario: Series and Season entry points process S1
 - **WHEN** both entry points process the same S1 with the same current selections
@@ -73,16 +73,16 @@ Interactive whole-Series and single-Season preview, confidence selection, manual
 - **WHEN** Emby triggers automatic processing specifically for Season 0
 - **THEN** it SHALL use the same Season 0 own-inventory-derived Parent 0 scope as explicit standalone Season 0 matching, while whole-Series interactive matching continues to skip Season 0
 
-### Requirement: Scope changes invalidate a captured plan
-The authoritative plan fingerprint SHALL cover the selected Season inventory membership, each observed ItemId's parent season number, the resulting eligibility decision, and all explicit mappings. Download or retry SHALL rebuild and compare this scope before writing.
+### Requirement: Scope changes do not veto confirmed downloads
+The authoritative plan fingerprint SHALL cover the selected Season inventory membership, each observed ItemId's parent season number, the resulting eligibility decision, and all explicit mappings. The server SHALL retain displayed mappings by their captured fingerprint. Once the user starts downloading a selected mapping, current Season scope or preview generation SHALL NOT reject it, rebuild its positional alignment, or prevent retry. Current structure and generation checks SHALL apply only to Season-level metadata mirrors.
 
 #### Scenario: Episode moves into the target season after preview
 - **WHEN** an Episode changes from Parent 0 to Parent 1 after an S1 preview
-- **THEN** the captured S1 plan SHALL be stale and the task SHALL perform zero file and metadata writes
+- **THEN** a user-started download SHALL execute the original captured local-to-source mappings and SHALL NOT adopt extra Episodes; a stale Season metadata mirror SHALL be skipped
 
 #### Scenario: Episode moves out of the target season after preview
 - **WHEN** an eligible Parent 1 Episode changes to Parent 0 or another season before download
-- **THEN** the captured plan SHALL be stale and SHALL not silently download the reduced set
+- **THEN** a user-started download and retry SHALL execute that ItemId's originally selected source Episode and SHALL NOT reduce the confirmed set or rematch it
 
 ### Requirement: Ignored Episodes do not block a complete Season mirror
 A terminal complete-single-source Season identifier mirror SHALL evaluate completeness only over the authoritative eligible target-season set. Ignored foreign and unknown-parent Episodes SHALL neither block nor qualify the mirror, and no identifier SHALL be cleared.

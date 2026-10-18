@@ -151,7 +151,7 @@ namespace Emby.Plugin.Danmu.RegressionTests
                    controller.Contains("CommitSeasonDisplayMirrorAfterTerminalAsync(season, task)"),
                 "download/retry must share ownership and terminal mirror fences");
             var compositeStart = controller.IndexOf(
-                "private async Task<DanmuDownloadTaskResult> StartTrackedCompositeSeasonDownload",
+                "private Task<DanmuDownloadTaskResult> StartTrackedCompositeSeasonDownload",
                 StringComparison.Ordinal);
             var compositeEnd = controller.IndexOf(
                 "private async Task<DanmuDownloadTaskResult> StartTrackedMovieDownload",
@@ -159,11 +159,11 @@ namespace Emby.Plugin.Danmu.RegressionTests
             var compositeBody = compositeStart >= 0 && compositeEnd > compositeStart
                 ? controller.Substring(compositeStart, compositeEnd - compositeStart)
                 : string.Empty;
-            Assert(Count(compositeBody, "EnsureCompositePlanExecutionCurrent(task, season.Id.ToString())") >= 8 &&
-                   compositeBody.Contains("catch (StaleCompositePlanException)") &&
-                   (compositeBody.IndexOf("EnsureCompositePlanExecutionCurrent(task, season.Id.ToString());\r\n                            var outcome", StringComparison.Ordinal) >= 0 ||
-                    compositeBody.IndexOf("EnsureCompositePlanExecutionCurrent(task, season.Id.ToString());\n                            var outcome", StringComparison.Ordinal) >= 0),
-                "composite execution must recheck generation/fingerprint around source resolution, each XML download, ProviderId persistence, and terminal mirror work");
+            Assert(compositeBody.Contains("SeasonPreviewPlans.TryGetValue(") &&
+                   compositeBody.Contains("PrepareFrozenReplayAsync(episodeResult)") &&
+                   !compositeBody.Contains("BuildCompositePlanAsync(") &&
+                   !compositeBody.Contains("EnsureCompositePlanExecutionCurrent("),
+                "confirmed composite downloads must execute captured mappings without rerunning matching or preview-generation gates");
             Assert(library.Contains("if (!(item is Season) && item.HasAnyDanmuProviderIds())") &&
                    library.Contains("TryBuildAutomaticPlanningContext"),
                 "automatic Season handling must ignore identifiers and use ownership-filtered planning");

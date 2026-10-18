@@ -482,6 +482,12 @@ namespace Emby.Plugin.Danmu.Model
         [JsonIgnore]
         [IgnoreDataMember]
         public int FidelityTitleEvidence { get; set; }
+
+        // Retained first-stage evidence is useful to manual/remainder discovery,
+        // but must not inherit a retry-stage alias confidence threshold.
+        [JsonIgnore]
+        [IgnoreDataMember]
+        internal bool ExcludeFromAutomaticSelection { get; set; }
     }
 
     /// <summary>

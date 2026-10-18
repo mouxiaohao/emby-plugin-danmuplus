@@ -1261,6 +1261,7 @@
     }
 
     function hasCompositePlan(season) {
+        if (hasConfirmedCompositeMappings(season)) return true;
         if (!hasCurrentMappingContract(season)) return false;
         var plan = compositePlan(season);
         return Boolean(plan && (compositeArray(plan, "Mappings", "mappings").length ||
@@ -1781,6 +1782,7 @@
     }
 
     function compositeHasDownloadableMappings(season, selections) {
+        if (hasConfirmedCompositeMappings(season)) return true;
         if (!serverCompositeAlignmentIntentsAreClosed(season) ||
             !manualCompositeAlignmentIntentsAreClosed(selections, season)) return false;
         var plan = compositePlan(season);
@@ -1969,6 +1971,11 @@
 
     function serverCompositeAlignmentIntentsAreClosed(season) {
         return canonicalCompositeSelectionState(season).valid;
+    }
+
+    function hasConfirmedCompositeMappings(season) {
+        return Boolean(value(season, "PlanFingerprint", "planFingerprint", "")) &&
+            compositeArray(compositePlan(season), "Mappings", "mappings").length > 0;
     }
 
     function manualCompositeAlignmentIntentsAreClosed(selections, season) {
@@ -3115,8 +3122,8 @@
             try {
                 var taskParameters = seasonRequestParameters(season);
                 if (hasCompositePlan(season)) {
-                    // JSON contains only user intent (source + start + range).
-                    // The controller re-resolves and verifies every source episode.
+                    // Download identifies the displayed server-owned mapping
+                    // snapshot; matching intent is retained for older servers.
                     taskParameters.compositeSelections = JSON.stringify(compositeRequestSelections(selections, season));
                     taskParameters.compositePlan = "true";
                     taskParameters.excludedLocalEpisodeItemIds = JSON.stringify(compositeExcludedItemIds(dialog, season));
@@ -3292,7 +3299,7 @@
         header.className = "danmuCompositeHeader";
         header.textContent = seasonLibraryContextLine(season);
         container.appendChild(header);
-        if (!serverCompositeAlignmentIntentsAreClosed(season)) {
+        if (!hasConfirmedCompositeMappings(season) && !serverCompositeAlignmentIntentsAreClosed(season)) {
             var staleIntent = document.createElement("div");
             staleIntent.className = "danmuAlignmentIntentStale";
             staleIntent.textContent = "映射对齐信息已过期，请重新预览后再下载。";
@@ -3950,8 +3957,9 @@
         var ok = document.createElement("button");
         ok.className = "danmuSmartButton primary";
         var matchedSeasons = seasons.filter(function (season) {
-            return !parentTitleRematchAvailable(season) && hasCompositePlan(season) &&
-                compositeHasDownloadableMappings(season, selections);
+            return hasConfirmedCompositeMappings(season) ||
+                (!parentTitleRematchAvailable(season) && hasCompositePlan(season) &&
+                    compositeHasDownloadableMappings(season, selections));
         });
         var compositeTotals = matchedSeasons.filter(hasCompositePlan).reduce(function (totals, season) {
             var coverage = compositeCoverage(season, selections);
